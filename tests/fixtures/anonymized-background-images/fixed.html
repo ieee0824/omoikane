@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box }
+  html, body { margin: 0; background: #eee }
+  main { display: flex; gap: 12px; padding: 16px; font: 700 30px/80px sans-serif }
+  .tile { width: 100px; height: 80px; border: 4px solid white }
+  #clip { color: transparent; text-align: center; background: linear-gradient(90deg, #e33, #36c); background-clip: text }
+  #blend { background-image: linear-gradient(#f44, #f44), linear-gradient(#48f, #48f); background-blend-mode: multiply; opacity: .75 }
+  #fade { background-image: cross-fade(50% red, 50% blue); image-rendering: pixelated }
+</style>
+<main>
+  <div id="clip" class="tile" data-probe>Text</div>
+  <div id="blend" class="tile" data-probe></div>
+  <div id="fade" class="tile" data-probe></div>
+</main>

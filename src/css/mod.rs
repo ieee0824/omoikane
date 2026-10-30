@@ -1566,6 +1566,29 @@ mod tests {
     }
 
     #[test]
+    fn expands_css_images_functions_in_background_shorthand() {
+        for image in [
+            "image-set(url(one.png) 1x, url(two.png) 2x)",
+            "cross-fade(25% red, blue)",
+        ] {
+            let stylesheet =
+                parse_stylesheet(&format!("div {{ background: {image} no-repeat; }}")).unwrap();
+            let Rule::Style(rule) = &stylesheet.rules[0] else {
+                panic!("expected style rule");
+            };
+            let expected_name = image.split('(').next().unwrap();
+            assert!(
+                rule.declarations.iter().any(|declaration| {
+                    declaration.name == "background-image"
+                        && matches!(&declaration.value, Value::Function { name, .. } if name == expected_name)
+                }),
+                "{image} should expand to background-image: {:?}",
+                rule.declarations
+            );
+        }
+    }
+
+    #[test]
     fn preserves_background_layer_commas_without_splitting_function_arguments() {
         let stylesheet = parse_stylesheet(
             "div { background-image: linear-gradient(rgb(1, 2, 3), blue), url(a.png), none; }",

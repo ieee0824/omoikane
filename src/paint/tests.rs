@@ -1802,6 +1802,386 @@ fn paints_tiled_background_images_from_data_uris() {
 }
 
 #[test]
+fn image_set_selects_the_smallest_supported_density_at_or_above_dpr() {
+    let red = pixel_data_uri(Color::rgb(255, 0, 0));
+    let blue = pixel_data_uri(Color::rgb(0, 0, 255));
+    let declaration = crate::css::parse_style_attribute(&format!(
+        "background-image:image-set(url(\"{red}\") 1x, url(\"{blue}\") 2x)"
+    ))
+    .remove(0);
+    let Value::Function { arguments, .. } = declaration.value else {
+        panic!("image-set did not retain its owned argument tree");
+    };
+    let Some(PreparedBackgroundImage::Image(image)) = prepare_image_set(&arguments, 2.0) else {
+        panic!("image-set did not resolve a supported candidate: {arguments:?}");
+    };
+    assert_eq!(image.pixels(), &[0, 0, 255, 255]);
+}
+
+#[test]
+fn image_rendering_switches_between_smooth_and_pixelated_sampling() {
+    let image = Image::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
+    let destination = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 4.0,
+        height: 1.0,
+    };
+    let mut smooth = Canvas::new(4, 1);
+    smooth.draw_image_scaled_clipped_with_sampling(
+        &image,
+        destination,
+        None,
+        ImageSampling::Smooth,
+    );
+    let mut pixelated = Canvas::new(4, 1);
+    pixelated.draw_image_scaled_clipped_with_sampling(
+        &image,
+        destination,
+        None,
+        ImageSampling::Pixelated,
+    );
+    assert_eq!(smooth.pixel(1, 0), Some(Color::rgb(191, 0, 64)));
+    assert_eq!(pixelated.pixel(1, 0), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
+fn from_image_reads_owned_exif_orientation_at_decode_boundary() {
+    let tiff = [
+        b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1, 0, 34];
+    jpeg.extend_from_slice(b"Exif\0\0");
+    jpeg.extend_from_slice(&tiff);
+    jpeg.extend_from_slice(&[0xff, 0xd9]);
+    assert_eq!(image::encoded_image_orientation(&jpeg), 6);
+
+    let mut image = Image::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
+    image.encoded_orientation = 6;
+    let mut style = ComputedStyle::default();
+    style.set_paint_value("image-orientation", "from-image".to_string());
+    let oriented = orient_content_image(&image, &style).unwrap();
+    assert_eq!((oriented.width(), oriented.height()), (1, 2));
+    assert_eq!(oriented.pixels(), &[255, 0, 0, 255, 0, 0, 255, 255]);
+}
+
+#[test]
+fn paints_selected_image_set_candidate_as_a_background_layer() {
+    let red = pixel_data_uri(Color::rgb(255, 0, 0));
+    let blue = pixel_data_uri(Color::rgb(0, 0, 255));
+    let stylesheet = format!(
+        "body {{ margin: 0; }} div {{ width: 2px; height: 2px; \
+         background-image: image-set(url(\"{red}\") 1x, url(\"{blue}\") 2x); \
+         background-repeat: no-repeat; }}"
+    );
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    body.append_child(div.clone());
+    document.append_child(body.clone());
+    let sheet = parse_stylesheet(&stylesheet).unwrap();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, sheet.clone());
+    assert!(
+        resolver
+            .computed_style(&div)
+            .get("background-image")
+            .is_some_and(|value| value.css_text().starts_with("image-set("))
+    );
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 4.0,
+        height: 4.0,
+    };
+    let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    let mut paint_resolver = StyleResolver::new();
+    paint_resolver.add_stylesheet(Origin::Author, sheet);
+    let canvas = paint_layout(&layout, &mut paint_resolver, viewport);
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
+fn image_set_repaints_when_the_selected_candidate_becomes_available() {
+    crate::data::clear_blob_urls();
+    let source = "blob:http://example.test/image-set-candidate";
+    let stylesheet = parse_stylesheet(&format!(
+        "body {{ margin: 0; }} div {{ width: 2px; height: 2px; background-color: green; \
+         background-image: image-set(url(\"{source}\") 1x); background-repeat: no-repeat; }}"
+    ))
+    .unwrap();
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    body.append_child(NodeHandle::element("div"));
+    document.append_child(body.clone());
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 4.0,
+        height: 4.0,
+    };
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, stylesheet);
+    let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    assert_eq!(
+        paint_layout(&layout, &mut resolver, viewport).pixel(0, 0),
+        Some(Color::rgb(0, 128, 0))
+    );
+
+    let mut image = Canvas::new(1, 1);
+    image.fill_rect(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        Color::rgb(255, 0, 0),
+    );
+    crate::data::register_blob_url(source.to_string(), image.encode_png(), "image/png".into());
+    assert_eq!(
+        paint_layout(&layout, &mut resolver, viewport).pixel(0, 0),
+        Some(Color::rgb(255, 0, 0))
+    );
+    crate::data::clear_blob_urls();
+}
+
+#[test]
+fn paints_cross_fade_as_a_premultiplied_generated_background_image() {
+    let red = pixel_data_uri(Color::rgb(255, 0, 0));
+    let blue = pixel_data_uri(Color::rgb(0, 0, 255));
+    let stylesheet = format!(
+        "body {{ margin: 0; }} div {{ width: 2px; height: 2px; \
+         background-image: cross-fade(50% url(\"{red}\"), 50% url(\"{blue}\")); \
+         background-repeat: no-repeat; }}"
+    );
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    body.append_child(NodeHandle::element("div"));
+    document.append_child(body.clone());
+    let sheet = parse_stylesheet(&stylesheet).unwrap();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, sheet.clone());
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 4.0,
+        height: 4.0,
+    };
+    let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    let mut paint_resolver = StyleResolver::new();
+    paint_resolver.add_stylesheet(Origin::Author, sheet);
+    let canvas = paint_layout(&layout, &mut paint_resolver, viewport);
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(128, 0, 128)));
+}
+
+#[test]
+fn background_blend_mode_composites_layers_in_background_order() {
+    let stylesheet = parse_stylesheet(
+        "body { margin: 0; } div { width: 2px; height: 2px; \
+         background-image: linear-gradient(red, red), linear-gradient(blue, blue); \
+         background-blend-mode: multiply; }",
+    )
+    .unwrap();
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    body.append_child(NodeHandle::element("div"));
+    document.append_child(body.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, stylesheet.clone());
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 4.0,
+        height: 4.0,
+    };
+    let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    let mut paint_resolver = StyleResolver::new();
+    paint_resolver.add_stylesheet(Origin::Author, stylesheet);
+    let canvas = paint_layout(&layout, &mut paint_resolver, viewport);
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(0, 0, 0)));
+}
+
+#[test]
+fn background_blend_group_is_isolated_from_the_backdrop() {
+    let stylesheet = parse_stylesheet(
+        "body { margin: 0; background: green; } div { width: 2px; height: 2px; \
+         background-image: linear-gradient(red, red); background-blend-mode: multiply; }",
+    )
+    .unwrap();
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    body.append_child(NodeHandle::element("div"));
+    document.append_child(body.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, stylesheet.clone());
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 4.0,
+        height: 4.0,
+    };
+    let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    let mut paint_resolver = StyleResolver::new();
+    paint_resolver.add_stylesheet(Origin::Author, stylesheet);
+    let canvas = paint_layout(&layout, &mut paint_resolver, viewport);
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
+fn background_blend_finishes_before_element_opacity_filter_and_mask() {
+    let cases = [
+        ("opacity: .5", Color::rgba(0, 0, 0, 128)),
+        ("filter: invert(1)", Color::rgb(255, 255, 255)),
+        (
+            "mask-image: linear-gradient(rgba(0, 0, 0, .5), rgba(0, 0, 0, .5))",
+            Color::rgba(0, 0, 0, 128),
+        ),
+    ];
+    for (effect, expected) in cases {
+        let stylesheet = parse_stylesheet(&format!(
+            "body {{ margin: 0; }} div {{ width: 2px; height: 2px; \
+             background-image: linear-gradient(red, red), linear-gradient(blue, blue); \
+             background-blend-mode: multiply; {effect}; }}"
+        ))
+        .unwrap();
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        body.append_child(NodeHandle::element("div"));
+        document.append_child(body.clone());
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 4.0,
+        };
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, stylesheet.clone());
+        let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+        let mut paint_resolver = StyleResolver::new();
+        paint_resolver.add_stylesheet(Origin::Author, stylesheet);
+        let canvas = paint_layout(&layout, &mut paint_resolver, viewport);
+        assert_eq!(canvas.pixel(0, 0), Some(expected), "effect: {effect}");
+    }
+}
+
+#[test]
+fn nonseparable_background_blend_modes_use_cross_channel_components() {
+    let mut blue = [0, 0, 255, 255];
+    blend_background_pixel(&mut blue, &[255, 0, 0, 255], "hue");
+    assert_eq!(blue, [94, 0, 0, 255]);
+
+    let mut red = [255, 0, 0, 255];
+    blend_background_pixel(&mut red, &[0, 0, 255, 255], "luminosity");
+    assert_eq!(red, [94, 0, 0, 255]);
+}
+
+#[test]
+fn background_clip_text_uses_glyph_alpha_even_for_transparent_text() {
+    let stylesheet = parse_stylesheet(
+        "body { margin: 0; } div { width: 40px; height: 20px; font: 16px/20px Fixture; \
+         color: transparent; background: red; background-clip: text; }",
+    )
+    .unwrap();
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    div.append_child(NodeHandle::text("X"));
+    body.append_child(div);
+    document.append_child(body.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, stylesheet.clone());
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 40.0,
+        height: 20.0,
+    };
+    let font = Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/anonymized-textarea-lines/LiberationSans-Regular.ttf")
+            .to_vec(),
+    )
+    .unwrap();
+    let mut registry = crate::font::WebFontRegistry::new();
+    registry.push(
+        "Fixture",
+        crate::font::FontWeight::default(),
+        crate::font::FontStyle::default(),
+        font,
+    );
+    let registry = Arc::new(registry);
+    let canvas = crate::layout::with_layout_fonts(vec![], Some(Arc::clone(&registry)), || {
+        let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+        let mut paint_resolver = StyleResolver::new();
+        paint_resolver.add_stylesheet(Origin::Author, stylesheet);
+        paint_layout_with_web_fonts(
+            &layout,
+            &mut paint_resolver,
+            viewport,
+            vec![],
+            Some(registry.as_ref()),
+        )
+    });
+    let red = count_pixels(&canvas, Color::rgb(255, 0, 0));
+    assert!(
+        red > 0 && red < 40 * 20,
+        "unexpected red pixel count: {red}"
+    );
+    assert_eq!(canvas.pixel(39, 19), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn background_clip_text_masks_only_its_matching_layer() {
+    let stylesheet = parse_stylesheet(
+        "body { margin: 0; } div { width: 40px; height: 20px; font: 16px/20px Fixture; \
+         color: transparent; background-image: linear-gradient(red, red), \
+         linear-gradient(blue, blue); background-clip: text, border-box; }",
+    )
+    .unwrap();
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    div.append_child(NodeHandle::text("X"));
+    body.append_child(div);
+    document.append_child(body.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, stylesheet.clone());
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 40.0,
+        height: 20.0,
+    };
+    let font = Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/anonymized-textarea-lines/LiberationSans-Regular.ttf")
+            .to_vec(),
+    )
+    .unwrap();
+    let mut registry = crate::font::WebFontRegistry::new();
+    registry.push(
+        "Fixture",
+        crate::font::FontWeight::default(),
+        crate::font::FontStyle::default(),
+        font,
+    );
+    let registry = Arc::new(registry);
+    let canvas = crate::layout::with_layout_fonts(vec![], Some(Arc::clone(&registry)), || {
+        let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+        let mut paint_resolver = StyleResolver::new();
+        paint_resolver.add_stylesheet(Origin::Author, stylesheet);
+        paint_layout_with_web_fonts(
+            &layout,
+            &mut paint_resolver,
+            viewport,
+            vec![],
+            Some(registry.as_ref()),
+        )
+    });
+    assert!(count_pixels(&canvas, Color::rgb(255, 0, 0)) > 0);
+    assert_eq!(canvas.pixel(39, 19), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
 fn paints_non_repeating_background_images_once() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -4684,7 +5064,7 @@ fn count_pixels(canvas: &Canvas, color: Color) -> usize {
     count
 }
 
-fn red_pixel_data_uri() -> String {
+fn pixel_data_uri(color: Color) -> String {
     let mut canvas = Canvas::new(1, 1);
     canvas.fill_rect(
         Rect {
@@ -4693,10 +5073,14 @@ fn red_pixel_data_uri() -> String {
             width: 1.0,
             height: 1.0,
         },
-        Color::rgb(255, 0, 0),
+        color,
     );
     let encoded = base64::engine::general_purpose::STANDARD.encode(canvas.encode_png());
     format!("data:image/png;base64,{encoded}")
+}
+
+fn red_pixel_data_uri() -> String {
+    pixel_data_uri(Color::rgb(255, 0, 0))
 }
 
 fn rgba_mask_data_uri(width: u32, height: u32, alphas: &[u8]) -> String {

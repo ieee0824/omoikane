@@ -178,7 +178,10 @@ pub(crate) fn decode_png(bytes: &[u8]) -> Result<Image, PaintError> {
         _ => return Err(PaintError::UnsupportedPngFormat),
     };
 
-    Image::new(info.width, info.height, rgba)
+    Image::new(info.width, info.height, rgba).map(|mut image| {
+        image.encoded_orientation = encoded_image_orientation(bytes);
+        image
+    })
 }
 
 pub(crate) fn decode_png_fallback(bytes: &[u8]) -> Result<Image, PaintError> {
@@ -282,7 +285,10 @@ pub(crate) fn decode_png_fallback(bytes: &[u8]) -> Result<Image, PaintError> {
         _ => return Err(PaintError::UnsupportedPngFormat),
     }
 
-    Image::new(width, height, rgba)
+    Image::new(width, height, rgba).map(|mut image| {
+        image.encoded_orientation = encoded_image_orientation(bytes);
+        image
+    })
 }
 
 pub(crate) fn unfilter_png_scanline(
@@ -399,7 +405,107 @@ pub(crate) fn decode_jpeg(bytes: &[u8]) -> Result<Image, PaintError> {
         _ => return Err(PaintError::UnsupportedJpegFormat),
     };
 
-    Image::new(info.width as u32, info.height as u32, rgba)
+    Image::new(info.width as u32, info.height as u32, rgba).map(|mut image| {
+        image.encoded_orientation = encoded_image_orientation(bytes);
+        image
+    })
+}
+
+pub(crate) fn encoded_image_orientation(bytes: &[u8]) -> u8 {
+    let tiff = if bytes.starts_with(b"\xFF\xD8") {
+        jpeg_exif_tiff(bytes)
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        png_exif_tiff(bytes)
+    } else {
+        None
+    };
+    tiff.and_then(tiff_orientation).unwrap_or(1)
+}
+
+fn jpeg_exif_tiff(bytes: &[u8]) -> Option<&[u8]> {
+    let mut index = 2usize;
+    while index + 4 <= bytes.len() {
+        if bytes[index] != 0xff {
+            return None;
+        }
+        let marker = bytes[index + 1];
+        index += 2;
+        if matches!(marker, 0xd8 | 0xd9) {
+            continue;
+        }
+        if marker == 0xda {
+            break;
+        }
+        let length = u16::from_be_bytes(bytes.get(index..index + 2)?.try_into().ok()?) as usize;
+        if length < 2 || index.checked_add(length)? > bytes.len() {
+            return None;
+        }
+        let payload = &bytes[index + 2..index + length];
+        if marker == 0xe1 && payload.starts_with(b"Exif\0\0") {
+            return Some(&payload[6..]);
+        }
+        index += length;
+    }
+    None
+}
+
+fn png_exif_tiff(bytes: &[u8]) -> Option<&[u8]> {
+    let mut index = 8usize;
+    while index + 12 <= bytes.len() {
+        let length = u32::from_be_bytes(bytes.get(index..index + 4)?.try_into().ok()?) as usize;
+        let chunk = bytes.get(index + 4..index + 8)?;
+        let data_start = index + 8;
+        let data_end = data_start.checked_add(length)?;
+        if data_end.checked_add(4)? > bytes.len() {
+            return None;
+        }
+        if chunk == b"eXIf" {
+            return Some(&bytes[data_start..data_end]);
+        }
+        if chunk == b"IEND" {
+            break;
+        }
+        index = data_end + 4;
+    }
+    None
+}
+
+fn tiff_orientation(tiff: &[u8]) -> Option<u8> {
+    let little_endian = match tiff.get(..2)? {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    let read_u16 = |bytes: &[u8]| -> Option<u16> {
+        let bytes: [u8; 2] = bytes.get(..2)?.try_into().ok()?;
+        Some(if little_endian {
+            u16::from_le_bytes(bytes)
+        } else {
+            u16::from_be_bytes(bytes)
+        })
+    };
+    let read_u32 = |bytes: &[u8]| -> Option<u32> {
+        let bytes: [u8; 4] = bytes.get(..4)?.try_into().ok()?;
+        Some(if little_endian {
+            u32::from_le_bytes(bytes)
+        } else {
+            u32::from_be_bytes(bytes)
+        })
+    };
+    if read_u16(tiff.get(2..)?)? != 42 {
+        return None;
+    }
+    let ifd = usize::try_from(read_u32(tiff.get(4..)?)?).ok()?;
+    let count = usize::from(read_u16(tiff.get(ifd..)?)?);
+    for entry in 0..count {
+        let start = ifd.checked_add(2)?.checked_add(entry.checked_mul(12)?)?;
+        let data = tiff.get(start..start + 12)?;
+        if read_u16(data)? == 0x0112 && read_u16(&data[2..])? == 3 && read_u32(&data[4..])? == 1 {
+            let orientation = read_u16(&data[8..])? as u8;
+            return (1..=8).contains(&orientation).then_some(orientation);
+        }
+    }
+    None
 }
 
 /// Parses a `data:` URI into either text or binary content.

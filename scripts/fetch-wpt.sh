@@ -238,6 +238,20 @@ collect_pattern \
   "/css/css-conditional/container-queries/support/cq-testcommon.js"
 collect_pattern "/css/css-overflow/parsing/line-clamp-valid.html"
 collect_pattern "/css/css-overflow/parsing/line-clamp-invalid.html"
+collect_pattern \
+  "/css/css-images/parsing/image-orientation-valid.html" \
+  "/css/css-images/parsing/image-orientation-invalid.html" \
+  "/css/css-images/parsing/image-orientation-computed.html" \
+  "/css/css-images/image-orientation/image-orientation-from-image-computed-style.html" \
+  "/css/css-images/image-orientation/image-orientation-none-computed-style.html" \
+  "/css/css-images/image-orientation/support/" \
+  "/css/css-images/image-set/image-set-parsing.html" \
+  "/css/css-images/image-set/image-set-computed.sub.html" \
+  "/css/css-images/cross-fade-computed-value.html" \
+  "/css/compositing/parsing/background-blend-mode-valid.html" \
+  "/css/compositing/parsing/background-blend-mode-invalid.html" \
+  "/css/compositing/parsing/background-blend-mode-computed.html" \
+  "/css/compositing/parsing/background-blend-mode-computed-multiple.html"
 collect_pattern "/css/css-overflow/parsing/webkit-line-clamp-valid.html"
 collect_pattern \
   "/css/css-backgrounds/parsing/border-image-valid.html" \

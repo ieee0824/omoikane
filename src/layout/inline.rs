@@ -21,7 +21,7 @@ use crate::font::{
 };
 use crate::http::cors::{self, CredentialsMode, PreflightCache, RedirectMode, RequestMode};
 use crate::http::{Client, HttpRequest, HttpResponse, Url, url::resolve_url};
-use crate::paint::{DataUri, Image, parse_data_uri};
+use crate::paint::{DataUri, Image, oriented_image_dimensions, parse_data_uri};
 
 use super::{
     BoxDimensions, EdgeSizes, FontMetrics, FragmentStyle, HTTP_CLIENT, IMAGE_ANIMATION_CACHE,
@@ -3017,23 +3017,21 @@ pub(super) fn generated_inline_segments(
             overflow_wrap: ow,
             white_space_mode: white_space(&style),
         }],
-        Some(GeneratedContent::Image(image)) => vec![InlineSegment {
-            node: node.clone(),
-            text_source: Vec::new(),
-            content: InlineSegmentContent::Image(
-                image.clone(),
-                style.clone(),
-                image.width() as f32,
-                image.height() as f32,
-            ),
-            metrics: metrics.clone(),
-            line_height: line_height.max(metrics.font_size),
-            vertical_align,
-            style: fragment_style,
-            word_break: wb,
-            overflow_wrap: ow,
-            white_space_mode: white_space(&style),
-        }],
+        Some(GeneratedContent::Image(image)) => {
+            let (width, height) = oriented_image_dimensions(&image, &style);
+            vec![InlineSegment {
+                node: node.clone(),
+                text_source: Vec::new(),
+                content: InlineSegmentContent::Image(image.clone(), style.clone(), width, height),
+                metrics: metrics.clone(),
+                line_height: line_height.max(metrics.font_size),
+                vertical_align,
+                style: fragment_style,
+                word_break: wb,
+                overflow_wrap: ow,
+                white_space_mode: white_space(&style),
+            }]
+        }
         None => Vec::new(),
     }
 }
@@ -4009,8 +4007,7 @@ pub(super) fn resolve_image_rendered_size(
     image: &Image,
     style: &ComputedStyle,
 ) -> (f32, f32) {
-    let intrinsic_w = image.width() as f32;
-    let intrinsic_h = image.height() as f32;
+    let (intrinsic_w, intrinsic_h) = oriented_image_dimensions(image, style);
     let intrinsic_ratio =
         (intrinsic_w > 0.0 && intrinsic_h > 0.0).then(|| intrinsic_w / intrinsic_h);
     let ratio = preferred_aspect_ratio(style, intrinsic_ratio);

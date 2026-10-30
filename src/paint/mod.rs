@@ -60,6 +60,7 @@ const MAX_TILE_PIXELS: u64 = 16_777_216;
 
 thread_local! {
     static FORCE_OPACITY: Cell<bool> = const { Cell::new(false) };
+    static FORCE_TEXT_MASK: Cell<bool> = const { Cell::new(false) };
     static LAST_RENDER_TIMINGS: RefCell<RenderTimings> = RefCell::new(RenderTimings::default());
     #[cfg(test)]
     static EFFECT_SURFACE_PIXELS: Cell<u64> = const { Cell::new(0) };
@@ -67,6 +68,19 @@ thread_local! {
     static BACKDROP_SURFACE_PIXELS: Cell<u64> = const { Cell::new(0) };
     #[cfg(test)]
     static BACKGROUND_IMAGE_SURFACE_PIXELS: Cell<u64> = const { Cell::new(0) };
+}
+
+fn with_forced_text_mask<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FORCE_TEXT_MASK.with(|cell| cell.set(self.0));
+        }
+    }
+    FORCE_TEXT_MASK.with(|cell| {
+        let _restore = Restore(cell.replace(true));
+        f()
+    })
 }
 
 #[cfg(test)]
@@ -176,6 +190,13 @@ use crate::layout::{
 pub use color::Color;
 pub use image::parse_data_uri;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImageSampling {
+    Legacy,
+    Smooth,
+    Pixelated,
+}
+
 // Re-export crate-internal items so that `use crate::paint::*` in tests and sibling modules works.
 // Many of these are only referenced from test code, hence the allow.
 #[allow(unused_imports)]
@@ -225,12 +246,16 @@ pub struct Image {
     pixels: Vec<u8>,
     animation_regions: Vec<animation::AnimationRegion>,
     animated_pixels: Option<animation::AnimatedPixels>,
+    encoded_orientation: u8,
 }
 
 // Equality compares dimensions and pixels, excluding playback metadata.
 impl PartialEq for Image {
     fn eq(&self, other: &Self) -> bool {
-        self.width == other.width && self.height == other.height && self.pixels == other.pixels
+        self.width == other.width
+            && self.height == other.height
+            && self.pixels == other.pixels
+            && self.encoded_orientation == other.encoded_orientation
     }
 }
 impl Eq for Image {}
@@ -323,6 +348,7 @@ impl Image {
             pixels,
             animation_regions: Vec::new(),
             animated_pixels: None,
+            encoded_orientation: 1,
         })
     }
 
@@ -414,6 +440,46 @@ fn box_filter_sample(
         channel(green_sum),
         channel(blue_sum),
         (alpha_sum / total_weight).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
+fn bilinear_image_sample(image: &Image, destination: Rect, x: i32, y: i32) -> Color {
+    let source_x = ((x as f32 + 0.5 - destination.x) * image.width as f32 / destination.width
+        - 0.5)
+        .clamp(0.0, image.width.saturating_sub(1) as f32);
+    let source_y = ((y as f32 + 0.5 - destination.y) * image.height as f32 / destination.height
+        - 0.5)
+        .clamp(0.0, image.height.saturating_sub(1) as f32);
+    let x0 = source_x.floor() as u32;
+    let y0 = source_y.floor() as u32;
+    let x1 = (x0 + 1).min(image.width.saturating_sub(1));
+    let y1 = (y0 + 1).min(image.height.saturating_sub(1));
+    let fx = source_x - x0 as f32;
+    let fy = source_y - y0 as f32;
+    let weights = [
+        ((1.0 - fx) * (1.0 - fy), x0, y0),
+        (fx * (1.0 - fy), x1, y0),
+        ((1.0 - fx) * fy, x0, y1),
+        (fx * fy, x1, y1),
+    ];
+    let mut premultiplied = [0.0f32; 4];
+    for (weight, source_x, source_y) in weights {
+        let index = ((source_y * image.width + source_x) * 4) as usize;
+        let alpha = f32::from(image.pixels[index + 3]) / 255.0;
+        premultiplied[0] += f32::from(image.pixels[index]) * alpha * weight;
+        premultiplied[1] += f32::from(image.pixels[index + 1]) * alpha * weight;
+        premultiplied[2] += f32::from(image.pixels[index + 2]) * alpha * weight;
+        premultiplied[3] += alpha * weight;
+    }
+    let alpha = premultiplied[3];
+    if alpha <= 0.0 {
+        return Color::rgba(0, 0, 0, 0);
+    }
+    Color::rgba(
+        (premultiplied[0] / alpha).round().clamp(0.0, 255.0) as u8,
+        (premultiplied[1] / alpha).round().clamp(0.0, 255.0) as u8,
+        (premultiplied[2] / alpha).round().clamp(0.0, 255.0) as u8,
+        (alpha * 255.0).round().clamp(0.0, 255.0) as u8,
     )
 }
 
@@ -547,6 +613,7 @@ impl Canvas {
             pixels: self.pixels,
             animation_regions: self.animation_regions,
             animated_pixels: None,
+            encoded_orientation: 1,
         }
     }
 
@@ -1251,6 +1318,16 @@ impl Canvas {
         self.draw_image_scaled_clipped_with_opacity(image, destination, clip, 1.0);
     }
 
+    fn draw_image_scaled_clipped_with_sampling(
+        &mut self,
+        image: &Image,
+        destination: Rect,
+        clip: Option<Rect>,
+        sampling: ImageSampling,
+    ) {
+        self.draw_image_scaled_clipped_internal(image, destination, clip, 1.0, sampling);
+    }
+
     pub(crate) fn draw_image_scaled_clipped_with_opacity(
         &mut self,
         image: &Image,
@@ -1258,11 +1335,34 @@ impl Canvas {
         clip: Option<Rect>,
         opacity: f32,
     ) {
+        self.draw_image_scaled_clipped_internal(
+            image,
+            destination,
+            clip,
+            opacity,
+            ImageSampling::Legacy,
+        );
+    }
+
+    fn draw_image_scaled_clipped_internal(
+        &mut self,
+        image: &Image,
+        destination: Rect,
+        clip: Option<Rect>,
+        opacity: f32,
+        sampling: ImageSampling,
+    ) {
         if self.with_retained_operation(
             retained_layers::RetainedPrimitiveKind::Image,
             destination,
             |canvas| {
-                canvas.draw_image_scaled_clipped_with_opacity(image, destination, clip, opacity);
+                canvas.draw_image_scaled_clipped_internal(
+                    image,
+                    destination,
+                    clip,
+                    opacity,
+                    sampling,
+                );
             },
         ) {
             return;
@@ -1302,7 +1402,7 @@ impl Canvas {
         if self.try_draw_unscaled_image(image, destination, opacity, x0..x1, y0..y1) {
             return;
         }
-        self.draw_scaled_image_pixels(image, destination, opacity, x0..x1, y0..y1);
+        self.draw_scaled_image_pixels(image, destination, opacity, sampling, x0..x1, y0..y1);
     }
 
     /// Paints sampled image pixels after normalization and animation registration.
@@ -1311,6 +1411,7 @@ impl Canvas {
         image: &Image,
         destination: Rect,
         opacity: f32,
+        sampling: ImageSampling,
         x_range: std::ops::Range<i32>,
         y_range: std::ops::Range<i32>,
     ) {
@@ -1320,7 +1421,7 @@ impl Canvas {
         let shrink_y = destination.height < image.height as f32;
         let source_per_dest_x = image.width as f32 / destination.width;
         let source_per_dest_y = image.height as f32 / destination.height;
-        let scale_plan = if shrink_x || shrink_y {
+        let scale_plan = if (shrink_x || shrink_y) && sampling != ImageSampling::Pixelated {
             image_scale::ImageScalePlan::try_new(
                 x0..x1,
                 y0..y1,
@@ -1364,7 +1465,9 @@ impl Canvas {
                     continue;
                 }
 
-                let mut color = if shrink_x || shrink_y {
+                let mut color = if sampling == ImageSampling::Smooth && !shrink_x && !shrink_y {
+                    bilinear_image_sample(image, destination, dest_x, dest_y)
+                } else if (shrink_x || shrink_y) && sampling != ImageSampling::Pixelated {
                     if let Some(plan) = &scale_plan {
                         plan.sample(image, dest_x, dest_y)
                     } else {
@@ -1433,6 +1536,11 @@ impl Canvas {
         color: Color,
         clip: Option<Rect>,
     ) {
+        let color = if FORCE_TEXT_MASK.with(Cell::get) {
+            Color::rgb(255, 255, 255)
+        } else {
+            color
+        };
         let destination = Rect {
             x,
             y,
@@ -5388,6 +5496,8 @@ fn paint_replaced_image_box(
     let Some(image) = crate::layout::decode_or_fetch_image_asset(source, base_url.as_ref()) else {
         return;
     };
+    let oriented = orient_content_image(&image, style);
+    let image = oriented.as_ref().unwrap_or(&image);
 
     let content_box = offset.rect(layout.dimensions.content);
     let destination =
@@ -5401,7 +5511,96 @@ fn paint_replaced_image_box(
         },
         None => content_box,
     };
-    canvas.draw_image_scaled_clipped(&image, destination, Some(clip));
+    canvas.draw_image_scaled_clipped_with_sampling(
+        image,
+        destination,
+        Some(clip),
+        image_sampling(style),
+    );
+}
+
+fn content_image_orientation(image: &Image, style: &ComputedStyle) -> Option<(i32, bool)> {
+    let value = match style.get_by_id(PropertyId::ImageOrientation) {
+        Some(ComputedValue::Keyword(value)) => value.to_ascii_lowercase(),
+        _ => return None,
+    };
+    let (quarter_turns, flip) = if value == "from-image" {
+        match image.encoded_orientation {
+            2 => (0, true),
+            3 => (2, false),
+            4 => (2, true),
+            5 => (1, true),
+            6 => (1, false),
+            7 => (3, true),
+            8 => (3, false),
+            _ => return None,
+        }
+    } else if value == "none" {
+        return None;
+    } else {
+        let flip = value.split_ascii_whitespace().any(|part| part == "flip");
+        let quarter_turns = value
+            .split_ascii_whitespace()
+            .find_map(|part| part.strip_suffix("deg"))
+            .and_then(|degrees| degrees.parse::<i32>().ok())
+            .map(|degrees| degrees.rem_euclid(360) / 90)?;
+        (quarter_turns, flip)
+    };
+    (quarter_turns != 0 || flip).then_some((quarter_turns, flip))
+}
+
+pub(crate) fn oriented_image_dimensions(image: &Image, style: &ComputedStyle) -> (f32, f32) {
+    let swaps_axes = content_image_orientation(image, style)
+        .is_some_and(|(quarter_turns, _)| quarter_turns % 2 != 0);
+    if swaps_axes {
+        (image.height as f32, image.width as f32)
+    } else {
+        (image.width as f32, image.height as f32)
+    }
+}
+
+pub(crate) fn orient_content_image(image: &Image, style: &ComputedStyle) -> Option<Image> {
+    let (quarter_turns, flip) = content_image_orientation(image, style)?;
+    let (width, height) = if quarter_turns % 2 == 0 {
+        (image.width, image.height)
+    } else {
+        (image.height, image.width)
+    };
+    let mut pixels = vec![0; width as usize * height as usize * 4];
+    for source_y in 0..image.height {
+        for source_x in 0..image.width {
+            let (mut x, y) = match quarter_turns {
+                1 => (image.height - 1 - source_y, source_x),
+                2 => (image.width - 1 - source_x, image.height - 1 - source_y),
+                3 => (source_y, image.width - 1 - source_x),
+                _ => (source_x, source_y),
+            };
+            if flip {
+                x = width - 1 - x;
+            }
+            let source = ((source_y * image.width + source_x) * 4) as usize;
+            let destination = ((y * width + x) * 4) as usize;
+            pixels[destination..destination + 4].copy_from_slice(&image.pixels[source..source + 4]);
+        }
+    }
+    Image::new(width, height, pixels).ok()
+}
+
+fn image_sampling(style: &ComputedStyle) -> ImageSampling {
+    match style.get_by_id(PropertyId::ImageRendering) {
+        Some(ComputedValue::Keyword(value))
+            if matches!(
+                value.to_ascii_lowercase().as_str(),
+                "pixelated" | "crisp-edges"
+            ) =>
+        {
+            ImageSampling::Pixelated
+        }
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("smooth") => {
+            ImageSampling::Smooth
+        }
+        _ => ImageSampling::Legacy,
+    }
 }
 
 fn overflow_clip_rect(
@@ -5555,55 +5754,54 @@ fn paint_box_internal_to(
         // box-shadow を背景より前（下）に描画する
         border::paint_box_shadow(canvas, style, border_box, inherited_clip, shadow_masks);
 
-        // `background_list` always supplies at least its default, but keep the
-        // arithmetic robust if its parsing contract changes.
-        let image_count = background_list(style, "background-image", "none")
-            .len()
-            .max(1);
-        let clip_values = background_list(style, "background-clip", "border-box");
-        let color_clip = &clip_values[(image_count - 1) % clip_values.len()];
-        let (background_clip_rect, background_radii) =
-            background_clip_geometry(layout, style, color_clip, border_box, padding_box, offset);
-        let background_clip = match inherited_clip {
-            Some(inherited_clip) => intersect(background_clip_rect, inherited_clip),
-            None => Some(background_clip_rect),
-        };
-        if let Some(background_clip) = background_clip {
-            if let Some(background) = background_color(style).filter(|_| {
-                layout.pseudo.is_some()
-                    || layout.node.is_fullscreen()
-                    || context.propagated_background_node != Some(layout.node.identity())
-            }) {
-                if background_radii != (0.0, 0.0, 0.0, 0.0) {
-                    let (tl, tr, br, bl) = background_radii;
-                    canvas.fill_rounded_rect(
-                        background_clip_rect,
-                        background,
-                        tl,
-                        tr,
-                        br,
-                        bl,
-                        Some(background_clip),
-                    );
-                } else {
-                    canvas.fill_rect_clipped(
-                        background_clip_rect,
-                        background,
-                        Some(background_clip),
-                    );
-                }
-            }
+        let isolated = background_list(style, "background-blend-mode", "normal")
+            .iter()
+            .any(|mode| !mode.eq_ignore_ascii_case("normal"))
+            && u64::from(canvas.width) * u64::from(canvas.height) <= MAX_TILE_PIXELS;
+        let text_clipped = background_list(style, "background-clip", "border-box")
+            .iter()
+            .any(|clip| clip.eq_ignore_ascii_case("text"))
+            && u64::from(canvas.width) * u64::from(canvas.height) <= MAX_TILE_PIXELS;
+        if isolated || text_clipped {
+            let mut background = Canvas::new(canvas.width, canvas.height);
+            let text_mask = text_clipped.then(|| {
+                build_background_text_mask(
+                    canvas.width,
+                    canvas.height,
+                    layout,
+                    resolver,
+                    context,
+                    inherited_clip,
+                    offset,
+                )
+            });
+            paint_box_backgrounds(
+                &mut background,
+                layout,
+                style,
+                border_box,
+                padding_box,
+                inherited_clip,
+                viewport,
+                offset,
+                context.propagated_background_node,
+                text_mask.as_ref(),
+            );
+            canvas.draw_image(&background.into_image(), 0.0, 0.0);
+        } else {
+            paint_box_backgrounds(
+                canvas,
+                layout,
+                style,
+                border_box,
+                padding_box,
+                inherited_clip,
+                viewport,
+                offset,
+                context.propagated_background_node,
+                None,
+            );
         }
-        paint_background_images_for_box(
-            canvas,
-            style,
-            layout,
-            border_box,
-            padding_box,
-            inherited_clip,
-            viewport,
-            offset,
-        );
     }
     if layout.content_visibility_contents_skipped {
         // The principal box remains visible, but replaced content, generated
@@ -5722,6 +5920,116 @@ fn paint_box_internal_to(
     if paint_decorations {
         outline::paint_solid_outline(canvas, style, border_box, inherited_clip);
     }
+}
+
+fn build_background_text_mask(
+    width: u32,
+    height: u32,
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    context: PaintContext<'_>,
+    clip: Option<Rect>,
+    offset: PaintOffset,
+) -> Canvas {
+    let mut mask = Canvas::new(width, height);
+    with_forced_text_mask(|| {
+        paint_text_mask_subtree(&mut mask, layout, resolver, context, clip, offset);
+    });
+    mask
+}
+
+fn apply_background_text_mask(background: &mut Canvas, mask: &Canvas) {
+    for (pixel, mask) in background
+        .pixels
+        .chunks_exact_mut(4)
+        .zip(mask.pixels.chunks_exact(4))
+    {
+        pixel[3] = ((u16::from(pixel[3]) * u16::from(mask[3]) + 127) / 255) as u8;
+    }
+}
+
+fn paint_text_mask_subtree(
+    mask: &mut Canvas,
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    context: PaintContext<'_>,
+    clip: Option<Rect>,
+    offset: PaintOffset,
+) {
+    if layout.visibility == Visibility::Hidden || layout.content_visibility_contents_skipped {
+        return;
+    }
+    let style = paint_box_style(layout, resolver);
+    text::paint_text_with_context(mask, layout, resolver, &style, clip, context, offset);
+    for child in &layout.children {
+        paint_text_mask_subtree(mask, child, resolver, context, clip, offset);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_box_backgrounds(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    style: &ComputedStyle,
+    border_box: Rect,
+    padding_box: Rect,
+    inherited_clip: Option<Rect>,
+    viewport: Rect,
+    offset: PaintOffset,
+    propagated_background_node: Option<usize>,
+    text_mask: Option<&Canvas>,
+) {
+    let image_count = background_list(style, "background-image", "none")
+        .len()
+        .max(1);
+    let clip_values = background_list(style, "background-clip", "border-box");
+    let color_clip = &clip_values[(image_count - 1) % clip_values.len()];
+    let (background_clip_rect, background_radii) =
+        background_clip_geometry(layout, style, color_clip, border_box, padding_box, offset);
+    let background_clip = match inherited_clip {
+        Some(inherited_clip) => intersect(background_clip_rect, inherited_clip),
+        None => Some(background_clip_rect),
+    };
+    if let Some(background_clip) = background_clip
+        && let Some(background) = background_color(style).filter(|_| {
+            layout.pseudo.is_some()
+                || layout.node.is_fullscreen()
+                || propagated_background_node != Some(layout.node.identity())
+        })
+    {
+        let text_clipped = color_clip.eq_ignore_ascii_case("text");
+        let mut text_layer = text_clipped.then(|| Canvas::new(canvas.width, canvas.height));
+        let target = text_layer.as_mut().unwrap_or(canvas);
+        if background_radii != (0.0, 0.0, 0.0, 0.0) {
+            let (tl, tr, br, bl) = background_radii;
+            target.fill_rounded_rect(
+                background_clip_rect,
+                background,
+                tl,
+                tr,
+                br,
+                bl,
+                Some(background_clip),
+            );
+        } else {
+            target.fill_rect_clipped(background_clip_rect, background, Some(background_clip));
+        }
+        if let (Some(mut text_layer), Some(text_mask)) = (text_layer, text_mask) {
+            apply_background_text_mask(&mut text_layer, text_mask);
+            canvas.draw_image(&text_layer.into_image(), 0.0, 0.0);
+        }
+    }
+    paint_background_images_for_box(
+        canvas,
+        style,
+        layout,
+        border_box,
+        padding_box,
+        inherited_clip,
+        viewport,
+        offset,
+        text_mask,
+    );
 }
 
 fn paint_scrollbars(
@@ -6445,6 +6753,8 @@ fn paint_background_image_rounded(
 enum PreparedBackgroundImage {
     Gradient(color::Gradient),
     Image(Image),
+    Color(Color),
+    CrossFade(Vec<(PreparedBackgroundImage, f32)>),
 }
 
 fn prepare_background_image(style: &ComputedStyle) -> Option<PreparedBackgroundImage> {
@@ -6454,10 +6764,153 @@ fn prepare_background_image(style: &ComputedStyle) -> Option<PreparedBackgroundI
         | Some(ComputedValue::Color(value)) => value,
         _ => return None,
     };
-    if let Some(gradient) = color::parse_gradient(value.trim_start()) {
+    let declaration = crate::css::parse_style_attribute(&format!("background-image:{value}"))
+        .into_iter()
+        .find(|declaration| declaration.name == "background-image")?;
+    let device_pixel_ratio = crate::layout::current_image_device_pixel_ratio();
+    prepare_background_image_value(&declaration.value, device_pixel_ratio)
+}
+
+fn prepare_background_image_value(
+    value: &Value,
+    device_pixel_ratio: f32,
+) -> Option<PreparedBackgroundImage> {
+    let serialized = crate::css::serialize_specified_value(value);
+    if let Some(gradient) = color::parse_gradient(&serialized) {
         return Some(PreparedBackgroundImage::Gradient(gradient));
     }
-    background_image(style).map(PreparedBackgroundImage::Image)
+    if let Some(color) = color::parse_color(&serialized) {
+        return Some(PreparedBackgroundImage::Color(color));
+    }
+    match value {
+        Value::Function { name, arguments }
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "image-set" | "-webkit-image-set"
+            ) =>
+        {
+            prepare_image_set(arguments, device_pixel_ratio)
+        }
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("cross-fade") => {
+            prepare_cross_fade(arguments, device_pixel_ratio)
+        }
+        Value::Function { name, .. } if name.eq_ignore_ascii_case("url") => {
+            image::parse_background_image_value(&serialized).map(PreparedBackgroundImage::Image)
+        }
+        Value::String(url) => {
+            image::parse_background_image_value(url).map(PreparedBackgroundImage::Image)
+        }
+        Value::Keyword(url) if url.trim_start().to_ascii_lowercase().starts_with("url(") => {
+            image::parse_background_image_value(url).map(PreparedBackgroundImage::Image)
+        }
+        _ => None,
+    }
+}
+
+fn prepare_cross_fade(
+    entries: &[Value],
+    device_pixel_ratio: f32,
+) -> Option<PreparedBackgroundImage> {
+    let mut prepared = Vec::with_capacity(entries.len());
+    let mut explicit_sum = 0.0;
+    let mut omitted = 0usize;
+    for entry in entries {
+        let values = match entry {
+            Value::List(values) => values.as_slice(),
+            value => std::slice::from_ref(value),
+        };
+        let (image, weight) = match values {
+            [image] => {
+                omitted += 1;
+                (image, None)
+            }
+            [image, Value::Percentage(weight)] if weight.is_finite() && *weight >= 0.0 => {
+                let weight = *weight / 100.0;
+                explicit_sum += weight;
+                (image, Some(weight))
+            }
+            [Value::Percentage(weight), image] if weight.is_finite() => {
+                let weight = (*weight / 100.0).clamp(0.0, 1.0);
+                explicit_sum += weight;
+                (image, Some(weight))
+            }
+            _ => return None,
+        };
+        prepared.push((
+            prepare_background_image_value(image, device_pixel_ratio)?,
+            weight,
+        ));
+    }
+    let omitted_weight = if omitted == 0 {
+        0.0
+    } else {
+        (1.0 - explicit_sum).max(0.0) / omitted as f32
+    };
+    let total = explicit_sum + omitted_weight * omitted as f32;
+    let scale = if total > 1.0 { 1.0 / total } else { 1.0 };
+    Some(PreparedBackgroundImage::CrossFade(
+        prepared
+            .into_iter()
+            .map(|(image, weight)| (image, weight.unwrap_or(omitted_weight) * scale))
+            .collect(),
+    ))
+}
+
+fn prepare_image_set(
+    entries: &[Value],
+    device_pixel_ratio: f32,
+) -> Option<PreparedBackgroundImage> {
+    let mut candidates = entries
+        .iter()
+        .filter_map(image_set_candidate)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let selected = candidates
+        .iter()
+        .position(|(density, _)| *density >= device_pixel_ratio)
+        .unwrap_or_else(|| candidates.len().saturating_sub(1));
+    candidates
+        .get(selected..)
+        .into_iter()
+        .flatten()
+        .chain(candidates[..selected].iter().rev())
+        .find_map(|(_, image)| prepare_background_image_value(image, device_pixel_ratio))
+}
+
+fn image_set_candidate(value: &Value) -> Option<(f32, &Value)> {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let (image, descriptors) = values.split_first()?;
+    let mut density = 1.0;
+    for descriptor in descriptors {
+        match descriptor {
+            Value::Length(value, unit) if value.is_finite() && *value > 0.0 => {
+                density = match unit.to_ascii_lowercase().as_str() {
+                    "dppx" | "x" => *value,
+                    "dpi" => *value / 96.0,
+                    "dpcm" => *value * 2.54 / 96.0,
+                    _ => return None,
+                };
+            }
+            Value::Function { name, arguments } if name.eq_ignore_ascii_case("type") => {
+                let mime = arguments
+                    .first()
+                    .map(crate::css::serialize_specified_value)?
+                    .trim_matches(['\'', '"'])
+                    .to_ascii_lowercase();
+                if !matches!(
+                    mime.as_str(),
+                    "image/png" | "image/jpeg" | "image/jpg" | "image/webp"
+                ) {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some((density, image))
 }
 
 fn background_image(style: &ComputedStyle) -> Option<Image> {
@@ -8413,7 +8866,7 @@ fn paint_background_image(
         let Some(layer_clip) = layer_clip else {
             continue;
         };
-        let layer_style = background_layer_style(
+        let mut layer_style = background_layer_style(
             &images[index],
             &positions_x[index % positions_x.len()],
             &positions_y[index % positions_y.len()],
@@ -8421,6 +8874,11 @@ fn paint_background_image(
             &repeats[index % repeats.len()],
             &attachments[index % attachments.len()],
         );
+        for property in [PropertyId::ImageRendering, PropertyId::ImageOrientation] {
+            if let Some(value) = style.get_by_id(property) {
+                layer_style.set_paint_value(property.as_str(), value.css_text());
+            }
+        }
         paint_background_image_rounded(
             canvas,
             &layer_style,
@@ -8485,6 +8943,7 @@ fn paint_background_images_for_box(
     inherited_clip: Option<Rect>,
     viewport: Rect,
     offset: PaintOffset,
+    text_mask: Option<&Canvas>,
 ) {
     let images = background_list(style, "background-image", "none");
     let origins = background_list(style, "background-origin", "padding-box");
@@ -8494,6 +8953,7 @@ fn paint_background_images_for_box(
     let sizes = background_list(style, "background-size", "auto");
     let repeats = background_list(style, "background-repeat", "repeat");
     let attachments = background_list(style, "background-attachment", "scroll");
+    let blend_modes = background_list(style, "background-blend-mode", "normal");
     for index in (0..images.len()).rev() {
         let mut origin = background_box_rect(
             &origins[index % origins.len()],
@@ -8516,7 +8976,7 @@ fn paint_background_images_for_box(
         let Some(clip) = clip else {
             continue;
         };
-        let layer_style = background_layer_style(
+        let mut layer_style = background_layer_style(
             &images[index],
             &positions_x[index % positions_x.len()],
             &positions_y[index % positions_y.len()],
@@ -8524,6 +8984,11 @@ fn paint_background_images_for_box(
             &repeats[index % repeats.len()],
             &attachments[index % attachments.len()],
         );
+        for property in [PropertyId::ImageRendering, PropertyId::ImageOrientation] {
+            if let Some(value) = style.get_by_id(property) {
+                layer_style.set_paint_value(property.as_str(), value.css_text());
+            }
+        }
         if background_attachment(&layer_style) == BackgroundAttachment::Local
             && layout.is_scroll_container()
         {
@@ -8537,15 +9002,209 @@ fn paint_background_images_for_box(
             origin.width += extra_width;
             origin.height += extra_height;
         }
-        paint_background_image_rounded(
-            canvas,
-            &layer_style,
-            origin,
-            Some(clip),
-            viewport,
-            clip_rect,
-            radii,
-        );
+        let blend_mode = &blend_modes[index % blend_modes.len()];
+        let text_clipped = clips[index % clips.len()].eq_ignore_ascii_case("text");
+        if (blend_mode.eq_ignore_ascii_case("normal") && !text_clipped)
+            || u64::from(canvas.width) * u64::from(canvas.height) > MAX_TILE_PIXELS
+        {
+            paint_background_image_rounded(
+                canvas,
+                &layer_style,
+                origin,
+                Some(clip),
+                viewport,
+                clip_rect,
+                radii,
+            );
+        } else {
+            let mut layer = Canvas::new(canvas.width, canvas.height);
+            paint_background_image_rounded(
+                &mut layer,
+                &layer_style,
+                origin,
+                Some(clip),
+                viewport,
+                clip_rect,
+                radii,
+            );
+            if text_clipped && let Some(text_mask) = text_mask {
+                apply_background_text_mask(&mut layer, text_mask);
+            }
+            if blend_mode.eq_ignore_ascii_case("normal") {
+                canvas.draw_image(&layer.into_image(), 0.0, 0.0);
+            } else {
+                composite_background_blend(canvas, &layer, blend_mode, clip);
+            }
+        }
+    }
+}
+
+fn composite_background_blend(destination: &mut Canvas, source: &Canvas, mode: &str, clip: Rect) {
+    let Some(area) = intersect(
+        clip,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: destination.width as f32,
+            height: destination.height as f32,
+        },
+    ) else {
+        return;
+    };
+    let x0 = area.x.floor().max(0.0) as u32;
+    let y0 = area.y.floor().max(0.0) as u32;
+    let x1 = (area.x + area.width).ceil().min(destination.width as f32) as u32;
+    let y1 = (area.y + area.height).ceil().min(destination.height as f32) as u32;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let index = ((y * destination.width + x) * 4) as usize;
+            let source = &source.pixels[index..index + 4];
+            if source[3] == 0 {
+                continue;
+            }
+            blend_background_pixel(&mut destination.pixels[index..index + 4], source, mode);
+        }
+    }
+}
+
+fn blend_background_pixel(destination: &mut [u8], source: &[u8], mode: &str) {
+    let source_alpha = f32::from(source[3]) / 255.0;
+    let backdrop_alpha = f32::from(destination[3]) / 255.0;
+    let output_alpha = source_alpha + backdrop_alpha - source_alpha * backdrop_alpha;
+    if output_alpha <= 0.0 {
+        destination.fill(0);
+        return;
+    }
+    let source_color = std::array::from_fn(|channel| f32::from(source[channel]) / 255.0);
+    let backdrop_color = std::array::from_fn(|channel| f32::from(destination[channel]) / 255.0);
+    let blended_color = blend_background_color(backdrop_color, source_color, mode);
+    for channel in 0..3 {
+        let premultiplied = (1.0 - source_alpha) * backdrop_alpha * backdrop_color[channel]
+            + (1.0 - backdrop_alpha) * source_alpha * source_color[channel]
+            + source_alpha * backdrop_alpha * blended_color[channel];
+        destination[channel] = (premultiplied / output_alpha * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+    }
+    destination[3] = (output_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+}
+
+fn blend_background_color(backdrop: [f32; 3], source: [f32; 3], mode: &str) -> [f32; 3] {
+    match mode.to_ascii_lowercase().as_str() {
+        "hue" => set_blend_luminosity(
+            set_blend_saturation(source, blend_saturation(backdrop)),
+            blend_luminosity(backdrop),
+        ),
+        "saturation" => set_blend_luminosity(
+            set_blend_saturation(backdrop, blend_saturation(source)),
+            blend_luminosity(backdrop),
+        ),
+        "color" => set_blend_luminosity(source, blend_luminosity(backdrop)),
+        "luminosity" => set_blend_luminosity(backdrop, blend_luminosity(source)),
+        _ => std::array::from_fn(|channel| {
+            blend_background_channel(backdrop[channel], source[channel], mode)
+        }),
+    }
+}
+
+fn blend_luminosity(color: [f32; 3]) -> f32 {
+    0.3 * color[0] + 0.59 * color[1] + 0.11 * color[2]
+}
+
+fn blend_saturation(color: [f32; 3]) -> f32 {
+    color.into_iter().fold(f32::NEG_INFINITY, f32::max)
+        - color.into_iter().fold(f32::INFINITY, f32::min)
+}
+
+fn set_blend_luminosity(mut color: [f32; 3], luminosity: f32) -> [f32; 3] {
+    let delta = luminosity - blend_luminosity(color);
+    for channel in &mut color {
+        *channel += delta;
+    }
+    let minimum = color.into_iter().fold(f32::INFINITY, f32::min);
+    let maximum = color.into_iter().fold(f32::NEG_INFINITY, f32::max);
+    let luminosity = blend_luminosity(color);
+    if minimum < 0.0 {
+        for channel in &mut color {
+            *channel = luminosity + (*channel - luminosity) * luminosity / (luminosity - minimum);
+        }
+    }
+    if maximum > 1.0 {
+        for channel in &mut color {
+            *channel =
+                luminosity + (*channel - luminosity) * (1.0 - luminosity) / (maximum - luminosity);
+        }
+    }
+    color
+}
+
+fn set_blend_saturation(mut color: [f32; 3], saturation: f32) -> [f32; 3] {
+    let mut indices = [0usize, 1, 2];
+    indices.sort_by(|left, right| color[*left].total_cmp(&color[*right]));
+    let [minimum, middle, maximum] = indices;
+    if color[maximum] > color[minimum] {
+        color[middle] =
+            (color[middle] - color[minimum]) * saturation / (color[maximum] - color[minimum]);
+        color[maximum] = saturation;
+    } else {
+        color[middle] = 0.0;
+        color[maximum] = 0.0;
+    }
+    color[minimum] = 0.0;
+    color
+}
+
+fn blend_background_channel(backdrop: f32, source: f32, mode: &str) -> f32 {
+    match mode.to_ascii_lowercase().as_str() {
+        "multiply" => backdrop * source,
+        "screen" => backdrop + source - backdrop * source,
+        "overlay" => {
+            if backdrop <= 0.5 {
+                2.0 * backdrop * source
+            } else {
+                1.0 - 2.0 * (1.0 - backdrop) * (1.0 - source)
+            }
+        }
+        "darken" => backdrop.min(source),
+        "lighten" => backdrop.max(source),
+        "color-dodge" => {
+            if source >= 1.0 {
+                1.0
+            } else {
+                (backdrop / (1.0 - source)).min(1.0)
+            }
+        }
+        "color-burn" => {
+            if source <= 0.0 {
+                0.0
+            } else {
+                1.0 - ((1.0 - backdrop) / source).min(1.0)
+            }
+        }
+        "hard-light" => {
+            if source <= 0.5 {
+                2.0 * backdrop * source
+            } else {
+                1.0 - 2.0 * (1.0 - backdrop) * (1.0 - source)
+            }
+        }
+        "soft-light" => {
+            if source <= 0.5 {
+                backdrop - (1.0 - 2.0 * source) * backdrop * (1.0 - backdrop)
+            } else {
+                let d = if backdrop <= 0.25 {
+                    ((16.0 * backdrop - 12.0) * backdrop + 4.0) * backdrop
+                } else {
+                    backdrop.sqrt()
+                };
+                backdrop + (2.0 * source - 1.0) * (d - backdrop)
+            }
+        }
+        "difference" => (backdrop - source).abs(),
+        "exclusion" => backdrop + source - 2.0 * backdrop * source,
+        "plus-darker" => (backdrop + source - 1.0).max(0.0),
+        "plus-lighter" => (backdrop + source).min(1.0),
+        _ => source,
     }
 }
 
@@ -8622,6 +9281,16 @@ fn paint_prepared_background_image(
         return;
     };
 
+    if let PreparedBackgroundImage::CrossFade(sources) = background {
+        paint_cross_fade_background(canvas, style, area, clip, viewport, sources);
+        return;
+    }
+
+    if let PreparedBackgroundImage::Color(color) = background {
+        canvas.fill_rect_clipped(area, *color, clip);
+        return;
+    }
+
     // CSS gradients share the same background tiling, positioning and clipping path.
     if let PreparedBackgroundImage::Gradient(gradient) = background {
         let has_explicit_size = match style.get_by_id(PropertyId::BackgroundSize) {
@@ -8645,6 +9314,62 @@ fn paint_prepared_background_image(
         return;
     };
     paint_tiled_image_background(canvas, style, area, clip, viewport, image);
+}
+
+fn paint_cross_fade_background(
+    canvas: &mut Canvas,
+    style: &ComputedStyle,
+    area: Rect,
+    clip: Option<Rect>,
+    viewport: Rect,
+    sources: &[(PreparedBackgroundImage, f32)],
+) {
+    let width = area.width.ceil().max(1.0) as u32;
+    let height = area.height.ceil().max(1.0) as u32;
+    if u64::from(width) * u64::from(height) > MAX_TILE_PIXELS {
+        return;
+    }
+    let translate = |rect: Rect| Rect {
+        x: rect.x - area.x,
+        y: rect.y - area.y,
+        ..rect
+    };
+    let local_area = translate(area);
+    let local_clip = clip.map(translate);
+    let local_viewport = translate(viewport);
+    let mut accumulated = vec![[0.0f32; 4]; width as usize * height as usize];
+    for (source, weight) in sources {
+        if *weight <= 0.0 {
+            continue;
+        }
+        let mut layer = Canvas::new(width, height);
+        paint_prepared_background_image(
+            &mut layer,
+            style,
+            local_area,
+            local_clip,
+            local_viewport,
+            source,
+        );
+        for (sum, pixel) in accumulated.iter_mut().zip(layer.pixels.chunks_exact(4)) {
+            let alpha = f32::from(pixel[3]) / 255.0 * *weight;
+            sum[0] += f32::from(pixel[0]) / 255.0 * alpha;
+            sum[1] += f32::from(pixel[1]) / 255.0 * alpha;
+            sum[2] += f32::from(pixel[2]) / 255.0 * alpha;
+            sum[3] += alpha;
+        }
+    }
+    let mut layer = Canvas::new(width, height);
+    for (output, sum) in layer.pixels.chunks_exact_mut(4).zip(accumulated) {
+        let alpha = sum[3].clamp(0.0, 1.0);
+        if alpha > 0.0 {
+            output[0] = (sum[0] / alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+            output[1] = (sum[1] / alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+            output[2] = (sum[2] / alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+            output[3] = (alpha * 255.0).round() as u8;
+        }
+    }
+    canvas.draw_image(&layer.into_image(), area.x, area.y);
 }
 
 /// Paints a repeating/positioned CSS gradient background when
@@ -8821,6 +9546,13 @@ fn paint_tiled_image_background(
     viewport: Rect,
     image: &Image,
 ) {
+    let oriented = matches!(
+        style.get_by_id(PropertyId::ImageOrientation),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("from-image")
+    )
+    .then(|| orient_content_image(image, style))
+    .flatten();
+    let image = oriented.as_ref().unwrap_or(image);
     let (tile_width, tile_height) = background_size(
         style,
         area,
@@ -8887,7 +9619,12 @@ fn paint_tiled_image_background(
                 width: tile_width,
                 height: tile_height,
             };
-            canvas.draw_image_scaled_clipped(image, dest, clip.or(Some(area)));
+            canvas.draw_image_scaled_clipped_with_sampling(
+                image,
+                dest,
+                clip.or(Some(area)),
+                image_sampling(style),
+            );
             if !repeat_x {
                 break;
             }
