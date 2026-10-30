@@ -97,7 +97,9 @@ pub(crate) fn transition_cache_scope(property: &str) -> TransitionCacheScope {
     };
     if matches!(
         property_id,
-        PropertyId::Color
+        PropertyId::AccentColor
+            | PropertyId::CaretColor
+            | PropertyId::Color
             | PropertyId::BorderBlockEndColor
             | PropertyId::BorderBlockStartColor
             | PropertyId::BorderBottomColor
@@ -1921,6 +1923,7 @@ mod tests {
         assert_eq!(
             localized,
             [
+                "accent-color",
                 "backdrop-filter",
                 "background-attachment",
                 "background-clip",
@@ -1939,6 +1942,7 @@ mod tests {
                 "border-left-color",
                 "border-right-color",
                 "border-top-color",
+                "caret-color",
                 "color",
                 "column-rule-color",
                 "filter",
@@ -1974,7 +1978,6 @@ mod tests {
             "text-shadow",
             "box-shadow",
             "--accent-color",
-            "caret-color",
             "-webkit-text-fill-color",
             "future-color",
             "background-future",

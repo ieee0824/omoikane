@@ -1024,6 +1024,8 @@ export const __omoikane_service_worker_lifecycle = {};
   });
   const validatesSpecialStyleProperties = new Set([
     "order", "grid-auto-flow", "grid-auto-rows", "grid-auto-columns",
+    "accent-color", "appearance", "caret-color", "color-scheme",
+    "field-sizing", "resize", "touch-action", "user-select",
     "translate", "rotate", "scale",
     "text-shadow",
     "all",
@@ -8654,6 +8656,13 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     return false;
   }
+  function pointerSelectionSuppressed(target) {
+    for (let current = target; current; current = internalParentNode(current)) {
+      if (internalNodeType(current) !== 1) continue;
+      if (platformGetComputedStyleForInnerText(current).userSelect === "none") return true;
+    }
+    return false;
+  }
   function performMouseTextSelection(doc, target, type, init, notCanceled) {
     if (type === "mouseup") {
       safeWeakMapDelete(mouseSelectionByDocument, doc);
@@ -8665,7 +8674,7 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     if (type === "mousedown") {
       safeWeakMapDelete(mouseSelectionByDocument, doc);
-      if (!notCanceled || Number(init.button || 0) !== 0 || pointerInsideTextControl(target)) return;
+      if (!notCanceled || Number(init.button || 0) !== 0 || pointerInsideTextControl(target) || pointerSelectionSuppressed(target)) return;
       let boundary = pointerTextBoundary(doc, init, target);
       if (!boundary) return;
       const selection = selectionForDocument(doc);
@@ -21168,6 +21177,41 @@ export const __omoikane_service_worker_lifecycle = {};
     return false;
   };
 
+  const nativeResizeGetBoundingClientRect = Element.prototype.getBoundingClientRect;
+  let nativeResizeDrag = null;
+  function performCssResizeDefault(target, type, init, notCanceled, locked) {
+    if (type === "mouseup") {
+      const active = nativeResizeDrag !== null;
+      nativeResizeDrag = null;
+      return active;
+    }
+    if (locked || !notCanceled) return false;
+    if (type === "mousedown") {
+      nativeResizeDrag = null;
+      if (Number(init.button || 0) !== 0 || !(target instanceof Element)) return false;
+      const style = platformGetComputedStyleForInnerText(target);
+      const resize = style.resize;
+      if (resize === "none" || [style.overflowX, style.overflowY].every(value => value === "visible" || value === "clip")) return false;
+      const rect = safeApply(nativeResizeGetBoundingClientRect, target, []);
+      const handle = 12;
+      if (Number(init.clientX) < rect.right - handle || Number(init.clientY) < rect.bottom - handle) return false;
+      nativeResizeDrag = {
+        target,
+        x: Number(init.clientX), y: Number(init.clientY),
+        width: Number.parseFloat(style.width) || rect.width,
+        height: Number.parseFloat(style.height) || rect.height,
+        horizontal: resize === "both" || resize === "horizontal" || resize === "inline",
+        vertical: resize === "both" || resize === "vertical" || resize === "block",
+      };
+      return true;
+    }
+    if (type !== "mousemove" || !nativeResizeDrag || !(Number(init.buttons) & 1)) return false;
+    const drag = nativeResizeDrag;
+    if (drag.horizontal) drag.target.style.width = Math.max(1, drag.width + Number(init.clientX) - drag.x) + "px";
+    if (drag.vertical) drag.target.style.height = Math.max(1, drag.height + Number(init.clientY) - drag.y) + "px";
+    return true;
+  }
+
   globalThis.__omoikane_dispatch_mouse_input = function(id, type, init, focusTarget) {
     const locked = nativePointerLockTarget() !== null;
     if (locked && ["mouseover", "mouseout", "mouseenter", "mouseleave"].includes(type)) return true;
@@ -21221,7 +21265,8 @@ export const __omoikane_service_worker_lifecycle = {};
       try { target.focus(); }
       finally { browsingInput.pointerFocusInProgress = false; }
     }
-    performMouseTextSelection(inputDocument, target, type, init || {}, notCanceled);
+    const resized = performCssResizeDefault(target, type, init || {}, notCanceled, locked);
+    if (!resized) performMouseTextSelection(inputDocument, target, type, init || {}, notCanceled);
     return notCanceled;
   };
   function performScrollBoundaryDefault(target, deltaX, deltaY) {
@@ -21374,6 +21419,20 @@ export const __omoikane_service_worker_lifecycle = {};
     if (locked) return 1;
     return 1 | performScrollBoundaryDefault(target, init.deltaX, init.deltaY);
   };
+  function touchActionAllowsDefault(target, deltaX, deltaY) {
+    let allowX = true, allowY = true;
+    for (let current = target; current; current = internalParentNode(current)) {
+      if (internalNodeType(current) !== 1) continue;
+      const action = platformGetComputedStyleForInnerText(current).touchAction;
+      if (action === "none") return false;
+      if (action === "auto" || action === "manipulation") continue;
+      const tokens = action.split(/\s+/);
+      allowX &&= tokens.some(token => token === "pan-x" || token === "pan-left" || token === "pan-right");
+      allowY &&= tokens.some(token => token === "pan-y" || token === "pan-up" || token === "pan-down");
+    }
+    const horizontal = Math.abs(Number(deltaX) || 0) > Math.abs(Number(deltaY) || 0);
+    return horizontal ? allowX : allowY;
+  }
   globalThis.__omoikane_dispatch_touch_input = function(id, type, init) {
     const target = wrapNode(id) || document;
     const inputDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
@@ -21411,7 +21470,8 @@ export const __omoikane_service_worker_lifecycle = {};
     });
     const notCanceled = target.dispatchEvent(event);
     if (!notCanceled) return 0;
-    if (type !== "touchmove" || init.defaultAllowed === false) return 1;
+    if (type !== "touchmove" || init.defaultAllowed === false ||
+        !touchActionAllowsDefault(target, init.deltaX, init.deltaY)) return 1;
     return 1 | performScrollBoundaryDefault(target, init.deltaX, init.deltaY);
   };
   globalThis.__omoikane_dispatch_keyboard_input = function(type, init) {

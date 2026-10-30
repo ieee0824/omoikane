@@ -316,6 +316,11 @@ pub(crate) enum PreparedPageNavigation {
 }
 
 impl CdpSession {
+    /// Returns the computed CSS cursor at viewport coordinates.
+    pub fn css_cursor_at(&mut self, x: f32, y: f32) -> Option<String> {
+        self.runtime.css_cursor_at(x, y)
+    }
+
     /// Wakes a host when the session's shared cookie jar changes, including
     /// mutations from another runtime or an HTTP response. Retain the returned
     /// subscription and acknowledge notifications before advancing page tasks.

@@ -2,7 +2,15 @@
 
 const VALIDATED_PROPERTIES: &[&str] = &[
     "all",
+    "accent-color",
+    "appearance",
+    "caret-color",
     "color",
+    "color-scheme",
+    "field-sizing",
+    "resize",
+    "touch-action",
+    "user-select",
     "background-color",
     "border-color",
     "border-top-color",
@@ -121,6 +129,19 @@ const VALIDATED_PROPERTIES: &[&str] = &[
 ];
 
 pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
+    if matches!(
+        property,
+        "accent-color"
+            | "appearance"
+            | "caret-color"
+            | "color-scheme"
+            | "field-sizing"
+            | "resize"
+            | "touch-action"
+            | "user-select"
+    ) {
+        return crate::css::style::normalize_css_ui_specified(property, value);
+    }
     if matches!(
         property,
         "border-image-slice"
@@ -409,5 +430,23 @@ mod tests {
             .as_deref(),
             Some("lch(calc(150) calc(-0.5) calc(40deg) / calc(0.5))")
         );
+    }
+
+    #[test]
+    fn css_ui_values_validate_and_use_canonical_specified_serialization() {
+        assert_eq!(
+            normalize("accent-color", "#fff").as_deref(),
+            Some("rgb(255, 255, 255)")
+        );
+        assert_eq!(
+            normalize("color-scheme", "only light").as_deref(),
+            Some("light only")
+        );
+        assert_eq!(
+            normalize("touch-action", "pan-y pan-x").as_deref(),
+            Some("pan-x pan-y")
+        );
+        assert_eq!(normalize("field-sizing", "auto"), None);
+        assert_eq!(normalize("user-select", "contain"), None);
     }
 }

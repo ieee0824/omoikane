@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CSS UI controls fixture</title>
+<style>
+  * { box-sizing: border-box }
+  html, body { margin: 0; background: #fff; color: #111; font: 16px sans-serif }
+  main { width: 420px; padding: 16px }
+  section { display: flex; align-items: center; gap: 14px; height: 52px }
+  .dark { color-scheme: dark; background: #222; color: #eee; padding: 8px }
+  input[type=checkbox], input[type=radio], input[type=range] { accent-color: #d22 }
+  .plain { appearance: none; width: 18px; height: 18px; border: 2px solid #168 }
+  .content { field-sizing: content }
+  textarea { width: 150px; height: 46px; resize: both; overflow: auto; caret-color: #d22 }
+  .selection { user-select: none; cursor: grab; border: 1px solid #999; padding: 6px }
+</style>
+<main>
+  <section><input type="checkbox" checked><input type="radio" checked><input type="range" value="70"></section>
+  <section class="dark"><input type="checkbox" checked><input type="range" value="35"></section>
+  <section><input class="plain" type="checkbox" checked><input class="content" value="short"><textarea>two
+lines</textarea></section>
+  <section><span class="selection">selection and cursor target</span></section>
+</main>

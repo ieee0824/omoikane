@@ -6116,6 +6116,40 @@ fn textarea_size_derives_from_cols_and_rows() {
 }
 
 #[test]
+fn field_sizing_content_uses_rendered_control_content() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    let fixed_input = NodeHandle::element("input");
+    let content_input = NodeHandle::element("input");
+    let fixed_textarea = NodeHandle::element("textarea");
+    let content_textarea = NodeHandle::element("textarea");
+    for input in [&fixed_input, &content_input] {
+        input.set_attribute("value", "x");
+    }
+    fixed_textarea.append_child(NodeHandle::text("x"));
+    content_textarea.append_child(NodeHandle::text("x\ny"));
+    content_input.set_attribute("class", "content");
+    content_textarea.set_attribute("class", "content");
+    document.append_child(body.clone());
+    body.append_child(div.clone());
+    for control in [fixed_input, content_input, fixed_textarea, content_textarea] {
+        div.append_child(control);
+    }
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(".content { field-sizing: content; }").unwrap(),
+    );
+    let fragments = form_control_fragments(&layout_control_container(&body, &mut resolver));
+    assert_eq!(fragments.len(), 4);
+    assert!(fragments[1].0.width < fragments[0].0.width);
+    assert!(fragments[3].0.width < fragments[2].0.width);
+    assert!(fragments[3].0.height >= fragments[2].0.height);
+}
+
+#[test]
 fn textarea_initial_value_is_text_content() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

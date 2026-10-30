@@ -1396,6 +1396,52 @@ fn mouse_selection_selectstart_uses_text_boundary_and_honors_cancellation() {
 }
 
 #[test]
+fn user_select_none_suppresses_pointer_selection() {
+    check(
+        r#"(() => {
+        const p = document.createElement('p');
+        p.style.userSelect = 'none';
+        p.textContent = 'not selectable';
+        document.body.append(p);
+        const text = p.firstChild, selection = getSelection();
+        selection.collapse(text, 3);
+        const rect = p.getBoundingClientRect(), y = rect.top + rect.height / 2;
+        let selectstart = 0;
+        p.addEventListener('selectstart', () => selectstart++);
+        __omoikane_dispatch_mouse_input(p.__id, 'mousedown', {button:0,buttons:1,clientX:rect.left + .1,clientY:y}, true);
+        __omoikane_dispatch_mouse_input(p.__id, 'mousemove', {button:0,buttons:1,clientX:rect.right - .1,clientY:y}, false);
+        __omoikane_dispatch_mouse_input(p.__id, 'mouseup', {button:0,buttons:0,clientX:rect.right - .1,clientY:y}, false);
+        return selectstart === 0 && selection.isCollapsed && selection.anchorNode === text && selection.anchorOffset === 3;
+    })()"#,
+    );
+}
+
+#[test]
+fn resize_hit_target_updates_the_enabled_axes() {
+    check(
+        r#"(() => {
+        const resize = value => {
+            const box = document.createElement('div');
+            box.style.cssText = `width:100px;height:80px;box-sizing:border-box;overflow:auto;resize:${value}`;
+            document.body.append(box);
+            const rect = box.getBoundingClientRect();
+            const start = {button:0,buttons:1,clientX:rect.right-1,clientY:rect.bottom-1};
+            __omoikane_dispatch_mouse_input(box.__id, 'mousedown', start, true);
+            __omoikane_dispatch_mouse_input(box.__id, 'mousemove', {...start,clientX:start.clientX+30,clientY:start.clientY+20}, false);
+            __omoikane_dispatch_mouse_input(box.__id, 'mouseup', {...start,buttons:0}, false);
+            const result = [box.getBoundingClientRect().width, box.getBoundingClientRect().height];
+            box.remove();
+            return result;
+        };
+        const horizontal = resize('horizontal'), vertical = resize('vertical'), both = resize('both');
+        return horizontal[0] === 130 && horizontal[1] === 80 &&
+            vertical[0] === 100 && vertical[1] === 100 &&
+            both[0] === 130 && both[1] === 100;
+    })()"#,
+    );
+}
+
+#[test]
 fn mouse_selection_ignores_author_range_and_selection_setter_overrides() {
     check(
         r#"(() => {

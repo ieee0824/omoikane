@@ -4497,6 +4497,7 @@ impl StyleResolver {
             &self.media_environment,
         );
         apply_initial_values(&mut properties);
+        resolve_accent_current_color(&mut properties);
         resolve_text_emphasis_style(&mut properties);
         properties.insert(
             "text-emphasis".to_string(),
@@ -7530,6 +7531,39 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
                 _ => DeclarationValidation::Invalid,
             };
         }
+        "accent-color" | "caret-color" => {
+            if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("auto") || is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+            {
+                return DeclarationValidation::Valid(ComputedValue::Keyword(
+                    render_value(value).to_ascii_lowercase(),
+                ));
+            }
+            return validate_color_value(value);
+        }
+        "appearance" => {
+            return validate_keyword_value(
+                value,
+                &[
+                    "none",
+                    "auto",
+                    "base-select",
+                    "textfield",
+                    "menulist-button",
+                ],
+            );
+        }
+        "color-scheme" => return validate_color_scheme_declaration(value),
+        "field-sizing" => return validate_keyword_value(value, &["fixed", "content"]),
+        "resize" => {
+            return validate_keyword_value(
+                value,
+                &["none", "both", "horizontal", "vertical", "block", "inline"],
+            );
+        }
+        "touch-action" => return validate_touch_action_declaration(value),
+        "user-select" => {
+            return validate_keyword_value(value, &["auto", "text", "none", "all"]);
+        }
         "cursor" => {
             return match compute_cursor_value(value) {
                 Some(computed) => DeclarationValidation::Valid(computed),
@@ -8777,6 +8811,148 @@ fn is_position_offset_property(name: &str) -> bool {
             | "inset-block-start"
             | "inset-block-end"
     )
+}
+
+fn validate_color_scheme_declaration(value: &Value) -> DeclarationValidation {
+    let rendered = render_value(value);
+    let words = rendered.split_ascii_whitespace().collect::<Vec<_>>();
+    if words.len() == 1
+        && (is_css_wide_keyword(&words[0].to_ascii_lowercase())
+            || words[0].eq_ignore_ascii_case("normal"))
+    {
+        return DeclarationValidation::Valid(ComputedValue::Keyword(words[0].to_ascii_lowercase()));
+    }
+    if words.is_empty() {
+        return DeclarationValidation::Invalid;
+    }
+    let mut schemes = Vec::new();
+    let mut only = false;
+    for word in words {
+        if word.eq_ignore_ascii_case("only") {
+            if only {
+                return DeclarationValidation::Invalid;
+            }
+            only = true;
+            continue;
+        }
+        if is_css_wide_keyword(&word.to_ascii_lowercase()) || word.eq_ignore_ascii_case("normal") {
+            return DeclarationValidation::Invalid;
+        }
+        schemes.push(word.to_ascii_lowercase());
+    }
+    if schemes.is_empty() {
+        return DeclarationValidation::Invalid;
+    }
+    if only {
+        schemes.push("only".to_string());
+    }
+    DeclarationValidation::Valid(ComputedValue::Keyword(schemes.join(" ")))
+}
+
+fn validate_touch_action_declaration(value: &Value) -> DeclarationValidation {
+    let rendered = render_value(value).to_ascii_lowercase();
+    if is_css_wide_keyword(&rendered) {
+        return DeclarationValidation::Valid(ComputedValue::Keyword(rendered));
+    }
+    if matches!(rendered.as_str(), "auto" | "none" | "manipulation") {
+        return DeclarationValidation::Valid(ComputedValue::Keyword(rendered));
+    }
+    let words = rendered.split_ascii_whitespace().collect::<Vec<_>>();
+    if words.is_empty()
+        || words.iter().any(|word| {
+            !matches!(
+                *word,
+                "pan-x" | "pan-y" | "pan-left" | "pan-right" | "pan-up" | "pan-down" | "pinch-zoom"
+            )
+        })
+    {
+        return DeclarationValidation::Invalid;
+    }
+    let horizontal = words
+        .iter()
+        .filter(|&&word| matches!(word, "pan-x" | "pan-left" | "pan-right"))
+        .count();
+    let vertical = words
+        .iter()
+        .filter(|&&word| matches!(word, "pan-y" | "pan-up" | "pan-down"))
+        .count();
+    let pinch = words.iter().filter(|&&word| word == "pinch-zoom").count();
+    if horizontal > 1 || vertical > 1 || pinch > 1 {
+        return DeclarationValidation::Invalid;
+    }
+    let canonical = [
+        "pan-x",
+        "pan-left",
+        "pan-right",
+        "pan-y",
+        "pan-up",
+        "pan-down",
+        "pinch-zoom",
+    ]
+    .into_iter()
+    .filter(|candidate| words.contains(candidate))
+    .collect::<Vec<_>>()
+    .join(" ");
+    DeclarationValidation::Valid(ComputedValue::Keyword(canonical))
+}
+
+pub(crate) fn normalize_css_ui_specified(property: &str, text: &str) -> Option<String> {
+    if !matches!(
+        property,
+        "accent-color"
+            | "appearance"
+            | "caret-color"
+            | "color-scheme"
+            | "field-sizing"
+            | "resize"
+            | "touch-action"
+            | "user-select"
+    ) {
+        return None;
+    }
+    let lower = text.trim().to_ascii_lowercase();
+    if matches!(property, "accent-color" | "caret-color")
+        && !matches!(
+            lower.as_str(),
+            "auto" | "currentcolor" | "initial" | "inherit" | "unset" | "revert" | "revert-layer"
+        )
+    {
+        if lower.starts_with('#') {
+            let color = crate::paint::color::parse_color(&lower)?;
+            return Some(if color.a == 255 {
+                format!("rgb({}, {}, {})", color.r, color.g, color.b)
+            } else {
+                format!(
+                    "rgba({}, {}, {}, {})",
+                    color.r,
+                    color.g,
+                    color.b,
+                    super::tokenizer::trimmed_number(color.a as f32 / 255.0)
+                )
+            });
+        }
+        return crate::paint::color4::CssColor::parse(text)
+            .map(|color| color.serialize())
+            .or_else(|| crate::paint::color::parse_color(text).map(|_| lower));
+    }
+    if !supports_declaration(property, text) {
+        return None;
+    }
+    if matches!(property, "color-scheme" | "touch-action") {
+        let declaration = crate::css::parse_style_attribute(&format!("{property}: {text}"))
+            .into_iter()
+            .find(|declaration| declaration.name == property)?;
+        let validation = if property == "color-scheme" {
+            validate_color_scheme_declaration(&declaration.value)
+        } else {
+            validate_touch_action_declaration(&declaration.value)
+        };
+        return match validation {
+            DeclarationValidation::Valid(value) => Some(value.css_text()),
+            _ => None,
+        };
+    }
+    Some(lower)
 }
 
 /// Valid `cursor` keyword set: the CSS 2.1 values plus the CSS UI Level 3 / 4
@@ -15224,6 +15400,15 @@ fn apply_input_ua_defaults(node: &NodeHandle, properties: &mut PropertyMap) {
         .entry(PropertyId::Display)
         .or_insert(ComputedValue::Keyword("inline-block".to_string()));
     properties
+        .entry(PropertyId::Appearance)
+        .or_insert(ComputedValue::Keyword("auto".to_string()));
+    if matches!(input_type.as_str(), "checkbox" | "radio" | "range") {
+        properties
+            .entry(PropertyId::BackgroundColor)
+            .or_insert(ComputedValue::Color("transparent".to_string()));
+        return;
+    }
+    properties
         .entry(PropertyId::BackgroundColor)
         .or_insert(ComputedValue::Color("white".to_string()));
     apply_uniform_border(properties, "solid", 2.0, Some("#767676"));
@@ -15246,6 +15431,9 @@ fn apply_button_ua_defaults(properties: &mut PropertyMap) {
     properties
         .entry(PropertyId::Display)
         .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+    properties
+        .entry(PropertyId::Appearance)
+        .or_insert(ComputedValue::Keyword("auto".to_string()));
     properties
         .entry(PropertyId::BackgroundColor)
         .or_insert(ComputedValue::Color("#efefef".to_string()));
@@ -15273,6 +15461,9 @@ fn apply_textarea_ua_defaults(properties: &mut PropertyMap) {
         .entry(PropertyId::Display)
         .or_insert(ComputedValue::Keyword("inline-block".to_string()));
     properties
+        .entry(PropertyId::Appearance)
+        .or_insert(ComputedValue::Keyword("auto".to_string()));
+    properties
         .entry(PropertyId::BackgroundColor)
         .or_insert(ComputedValue::Color("white".to_string()));
     apply_uniform_border(properties, "solid", 1.0, Some("#767676"));
@@ -15288,6 +15479,9 @@ fn apply_select_ua_defaults(properties: &mut PropertyMap) {
     properties
         .entry(PropertyId::Display)
         .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+    properties
+        .entry(PropertyId::Appearance)
+        .or_insert(ComputedValue::Keyword("auto".to_string()));
     properties
         .entry(PropertyId::BackgroundColor)
         .or_insert(ComputedValue::Color("#efefef".to_string()));
@@ -15588,6 +15782,14 @@ impl InitialValue {
 /// depends on another property's resolved value or on the number of layers
 /// in a shorthand — those stay as explicit code in `apply_initial_values`.
 const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
+    (PropertyId::AccentColor, InitialValue::Keyword("auto")),
+    (PropertyId::Appearance, InitialValue::Keyword("none")),
+    (PropertyId::CaretColor, InitialValue::Keyword("auto")),
+    (PropertyId::ColorScheme, InitialValue::Keyword("normal")),
+    (PropertyId::FieldSizing, InitialValue::Keyword("fixed")),
+    (PropertyId::Resize, InitialValue::Keyword("none")),
+    (PropertyId::TouchAction, InitialValue::Keyword("auto")),
+    (PropertyId::UserSelect, InitialValue::Keyword("auto")),
     (PropertyId::Translate, InitialValue::Keyword("none")),
     (PropertyId::Rotate, InitialValue::Keyword("none")),
     (PropertyId::Scale, InitialValue::Keyword("none")),
@@ -16077,6 +16279,17 @@ fn resolve_column_rule_current_color(properties: &mut PropertyMap) {
     }
 }
 
+fn resolve_accent_current_color(properties: &mut PropertyMap) {
+    let is_current_color = matches!(
+        properties.get(&PropertyId::AccentColor),
+        Some(ComputedValue::Color(value) | ComputedValue::Keyword(value))
+            if value.eq_ignore_ascii_case("currentcolor")
+    );
+    if is_current_color {
+        properties.copy_property("color", "accent-color");
+    }
+}
+
 fn resolve_outline_auto_color(properties: &mut PropertyMap) {
     let color_is_auto = matches!(
         properties.get(&PropertyId::OutlineColor),
@@ -16138,6 +16351,9 @@ fn apply_inheritance(properties: &mut PropertyMap, parent_style: Option<&Compute
 // Inherited CSS properties supported by this engine. Keeping this as shared
 // metadata lets both natural inheritance and `all: unset` use the same rule.
 const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
+    PropertyId::AccentColor,
+    PropertyId::CaretColor,
+    PropertyId::ColorScheme,
     PropertyId::ForcedColorAdjust,
     PropertyId::BorderCollapse,
     PropertyId::BorderSpacing,
