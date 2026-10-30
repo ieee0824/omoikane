@@ -176,6 +176,13 @@ use crate::layout::{
 pub use color::Color;
 pub use image::parse_data_uri;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImageSampling {
+    Legacy,
+    Smooth,
+    Pixelated,
+}
+
 // Re-export crate-internal items so that `use crate::paint::*` in tests and sibling modules works.
 // Many of these are only referenced from test code, hence the allow.
 #[allow(unused_imports)]
@@ -414,6 +421,46 @@ fn box_filter_sample(
         channel(green_sum),
         channel(blue_sum),
         (alpha_sum / total_weight).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
+fn bilinear_image_sample(image: &Image, destination: Rect, x: i32, y: i32) -> Color {
+    let source_x = ((x as f32 + 0.5 - destination.x) * image.width as f32 / destination.width
+        - 0.5)
+        .clamp(0.0, image.width.saturating_sub(1) as f32);
+    let source_y = ((y as f32 + 0.5 - destination.y) * image.height as f32 / destination.height
+        - 0.5)
+        .clamp(0.0, image.height.saturating_sub(1) as f32);
+    let x0 = source_x.floor() as u32;
+    let y0 = source_y.floor() as u32;
+    let x1 = (x0 + 1).min(image.width.saturating_sub(1));
+    let y1 = (y0 + 1).min(image.height.saturating_sub(1));
+    let fx = source_x - x0 as f32;
+    let fy = source_y - y0 as f32;
+    let weights = [
+        ((1.0 - fx) * (1.0 - fy), x0, y0),
+        (fx * (1.0 - fy), x1, y0),
+        ((1.0 - fx) * fy, x0, y1),
+        (fx * fy, x1, y1),
+    ];
+    let mut premultiplied = [0.0f32; 4];
+    for (weight, source_x, source_y) in weights {
+        let index = ((source_y * image.width + source_x) * 4) as usize;
+        let alpha = f32::from(image.pixels[index + 3]) / 255.0;
+        premultiplied[0] += f32::from(image.pixels[index]) * alpha * weight;
+        premultiplied[1] += f32::from(image.pixels[index + 1]) * alpha * weight;
+        premultiplied[2] += f32::from(image.pixels[index + 2]) * alpha * weight;
+        premultiplied[3] += alpha * weight;
+    }
+    let alpha = premultiplied[3];
+    if alpha <= 0.0 {
+        return Color::rgba(0, 0, 0, 0);
+    }
+    Color::rgba(
+        (premultiplied[0] / alpha).round().clamp(0.0, 255.0) as u8,
+        (premultiplied[1] / alpha).round().clamp(0.0, 255.0) as u8,
+        (premultiplied[2] / alpha).round().clamp(0.0, 255.0) as u8,
+        (alpha * 255.0).round().clamp(0.0, 255.0) as u8,
     )
 }
 
@@ -1251,6 +1298,16 @@ impl Canvas {
         self.draw_image_scaled_clipped_with_opacity(image, destination, clip, 1.0);
     }
 
+    fn draw_image_scaled_clipped_with_sampling(
+        &mut self,
+        image: &Image,
+        destination: Rect,
+        clip: Option<Rect>,
+        sampling: ImageSampling,
+    ) {
+        self.draw_image_scaled_clipped_internal(image, destination, clip, 1.0, sampling);
+    }
+
     pub(crate) fn draw_image_scaled_clipped_with_opacity(
         &mut self,
         image: &Image,
@@ -1258,11 +1315,34 @@ impl Canvas {
         clip: Option<Rect>,
         opacity: f32,
     ) {
+        self.draw_image_scaled_clipped_internal(
+            image,
+            destination,
+            clip,
+            opacity,
+            ImageSampling::Legacy,
+        );
+    }
+
+    fn draw_image_scaled_clipped_internal(
+        &mut self,
+        image: &Image,
+        destination: Rect,
+        clip: Option<Rect>,
+        opacity: f32,
+        sampling: ImageSampling,
+    ) {
         if self.with_retained_operation(
             retained_layers::RetainedPrimitiveKind::Image,
             destination,
             |canvas| {
-                canvas.draw_image_scaled_clipped_with_opacity(image, destination, clip, opacity);
+                canvas.draw_image_scaled_clipped_internal(
+                    image,
+                    destination,
+                    clip,
+                    opacity,
+                    sampling,
+                );
             },
         ) {
             return;
@@ -1302,7 +1382,7 @@ impl Canvas {
         if self.try_draw_unscaled_image(image, destination, opacity, x0..x1, y0..y1) {
             return;
         }
-        self.draw_scaled_image_pixels(image, destination, opacity, x0..x1, y0..y1);
+        self.draw_scaled_image_pixels(image, destination, opacity, sampling, x0..x1, y0..y1);
     }
 
     /// Paints sampled image pixels after normalization and animation registration.
@@ -1311,6 +1391,7 @@ impl Canvas {
         image: &Image,
         destination: Rect,
         opacity: f32,
+        sampling: ImageSampling,
         x_range: std::ops::Range<i32>,
         y_range: std::ops::Range<i32>,
     ) {
@@ -1320,7 +1401,7 @@ impl Canvas {
         let shrink_y = destination.height < image.height as f32;
         let source_per_dest_x = image.width as f32 / destination.width;
         let source_per_dest_y = image.height as f32 / destination.height;
-        let scale_plan = if shrink_x || shrink_y {
+        let scale_plan = if (shrink_x || shrink_y) && sampling != ImageSampling::Pixelated {
             image_scale::ImageScalePlan::try_new(
                 x0..x1,
                 y0..y1,
@@ -1364,7 +1445,9 @@ impl Canvas {
                     continue;
                 }
 
-                let mut color = if shrink_x || shrink_y {
+                let mut color = if sampling == ImageSampling::Smooth && !shrink_x && !shrink_y {
+                    bilinear_image_sample(image, destination, dest_x, dest_y)
+                } else if (shrink_x || shrink_y) && sampling != ImageSampling::Pixelated {
                     if let Some(plan) = &scale_plan {
                         plan.sample(image, dest_x, dest_y)
                     } else {
@@ -5401,7 +5484,26 @@ fn paint_replaced_image_box(
         },
         None => content_box,
     };
-    canvas.draw_image_scaled_clipped(&image, destination, Some(clip));
+    canvas.draw_image_scaled_clipped_with_sampling(
+        &image,
+        destination,
+        Some(clip),
+        image_sampling(style),
+    );
+}
+
+fn image_sampling(style: &ComputedStyle) -> ImageSampling {
+    match style.get_by_id(PropertyId::ImageRendering) {
+        Some(ComputedValue::Keyword(value))
+            if matches!(
+                value.to_ascii_lowercase().as_str(),
+                "pixelated" | "crisp-edges"
+            ) =>
+        {
+            ImageSampling::Pixelated
+        }
+        _ => ImageSampling::Smooth,
+    }
 }
 
 fn overflow_clip_rect(
@@ -8553,7 +8655,7 @@ fn paint_background_image(
         let Some(layer_clip) = layer_clip else {
             continue;
         };
-        let layer_style = background_layer_style(
+        let mut layer_style = background_layer_style(
             &images[index],
             &positions_x[index % positions_x.len()],
             &positions_y[index % positions_y.len()],
@@ -8561,6 +8663,9 @@ fn paint_background_image(
             &repeats[index % repeats.len()],
             &attachments[index % attachments.len()],
         );
+        if let Some(value) = style.get_by_id(PropertyId::ImageRendering) {
+            layer_style.set_paint_value("image-rendering", value.css_text());
+        }
         paint_background_image_rounded(
             canvas,
             &layer_style,
@@ -9093,7 +9198,12 @@ fn paint_tiled_image_background(
                 width: tile_width,
                 height: tile_height,
             };
-            canvas.draw_image_scaled_clipped(image, dest, clip.or(Some(area)));
+            canvas.draw_image_scaled_clipped_with_sampling(
+                image,
+                dest,
+                clip.or(Some(area)),
+                image_sampling(style),
+            );
             if !repeat_x {
                 break;
             }

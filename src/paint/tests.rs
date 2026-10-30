@@ -1819,6 +1819,33 @@ fn image_set_selects_the_smallest_supported_density_at_or_above_dpr() {
 }
 
 #[test]
+fn image_rendering_switches_between_smooth_and_pixelated_sampling() {
+    let image = Image::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
+    let destination = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 4.0,
+        height: 1.0,
+    };
+    let mut smooth = Canvas::new(4, 1);
+    smooth.draw_image_scaled_clipped_with_sampling(
+        &image,
+        destination,
+        None,
+        ImageSampling::Smooth,
+    );
+    let mut pixelated = Canvas::new(4, 1);
+    pixelated.draw_image_scaled_clipped_with_sampling(
+        &image,
+        destination,
+        None,
+        ImageSampling::Pixelated,
+    );
+    assert_eq!(smooth.pixel(1, 0), Some(Color::rgb(191, 0, 64)));
+    assert_eq!(pixelated.pixel(1, 0), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
 fn paints_selected_image_set_candidate_as_a_background_layer() {
     let red = pixel_data_uri(Color::rgb(255, 0, 0));
     let blue = pixel_data_uri(Color::rgb(0, 0, 255));
