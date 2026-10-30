@@ -1893,6 +1893,9 @@ fn is_background_image_function(name: &str) -> bool {
             | "repeating-linear-gradient"
             | "repeating-radial-gradient"
             | "repeating-conic-gradient"
+            | "image-set"
+            | "-webkit-image-set"
+            | "cross-fade"
     )
 }
 

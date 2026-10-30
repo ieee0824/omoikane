@@ -27,7 +27,10 @@ use unicode_vo::{Orientation, char_orientation};
 use super::border::{EdgeSizesForPaint, paint_rect_borders};
 use super::color::{Color, parse_color};
 use super::form_control::paint_textarea_value_with_candidates;
-use super::{Canvas, Image, background_color, length_property, paint_background_image};
+use super::{
+    Canvas, Image, background_color, image_sampling, length_property, orient_content_image,
+    paint_background_image,
+};
 
 mod shadow;
 pub(super) use shadow::text_shadow_paint_bounds;
@@ -3740,6 +3743,8 @@ pub(crate) fn paint_inline_image_fragment(
     }
 
     let content_rect = inline_fragment_content_rect(rect, style, border);
+    let oriented = orient_content_image(image, style);
+    let image = oriented.as_ref().unwrap_or(image);
     let destination = super::image::object_fit_destination(
         content_rect,
         image.width as f32,
@@ -3754,7 +3759,12 @@ pub(crate) fn paint_inline_image_fragment(
         },
         None => content_rect,
     };
-    canvas.draw_image_scaled_clipped(image, destination, Some(clip));
+    canvas.draw_image_scaled_clipped_with_sampling(
+        image,
+        destination,
+        Some(clip),
+        image_sampling(style),
+    );
 }
 
 pub(crate) fn inline_fragment_content_rect(

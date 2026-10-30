@@ -246,12 +246,16 @@ pub struct Image {
     pixels: Vec<u8>,
     animation_regions: Vec<animation::AnimationRegion>,
     animated_pixels: Option<animation::AnimatedPixels>,
+    encoded_orientation: u8,
 }
 
 // Equality compares dimensions and pixels, excluding playback metadata.
 impl PartialEq for Image {
     fn eq(&self, other: &Self) -> bool {
-        self.width == other.width && self.height == other.height && self.pixels == other.pixels
+        self.width == other.width
+            && self.height == other.height
+            && self.pixels == other.pixels
+            && self.encoded_orientation == other.encoded_orientation
     }
 }
 impl Eq for Image {}
@@ -344,6 +348,7 @@ impl Image {
             pixels,
             animation_regions: Vec::new(),
             animated_pixels: None,
+            encoded_orientation: 1,
         })
     }
 
@@ -608,6 +613,7 @@ impl Canvas {
             pixels: self.pixels,
             animation_regions: self.animation_regions,
             animated_pixels: None,
+            encoded_orientation: 1,
         }
     }
 
@@ -5513,20 +5519,48 @@ fn paint_replaced_image_box(
     );
 }
 
-fn orient_content_image(image: &Image, style: &ComputedStyle) -> Option<Image> {
+fn content_image_orientation(image: &Image, style: &ComputedStyle) -> Option<(i32, bool)> {
     let value = match style.get_by_id(PropertyId::ImageOrientation) {
         Some(ComputedValue::Keyword(value)) => value.to_ascii_lowercase(),
         _ => return None,
     };
-    let flip = value.split_ascii_whitespace().any(|part| part == "flip");
-    let quarter_turns = value
-        .split_ascii_whitespace()
-        .find_map(|part| part.strip_suffix("deg"))
-        .and_then(|degrees| degrees.parse::<i32>().ok())
-        .map(|degrees| degrees.rem_euclid(360) / 90)?;
-    if quarter_turns == 0 && !flip {
+    let (quarter_turns, flip) = if value == "from-image" {
+        match image.encoded_orientation {
+            2 => (0, true),
+            3 => (2, false),
+            4 => (2, true),
+            5 => (1, true),
+            6 => (1, false),
+            7 => (3, true),
+            8 => (3, false),
+            _ => return None,
+        }
+    } else if value == "none" {
         return None;
+    } else {
+        let flip = value.split_ascii_whitespace().any(|part| part == "flip");
+        let quarter_turns = value
+            .split_ascii_whitespace()
+            .find_map(|part| part.strip_suffix("deg"))
+            .and_then(|degrees| degrees.parse::<i32>().ok())
+            .map(|degrees| degrees.rem_euclid(360) / 90)?;
+        (quarter_turns, flip)
+    };
+    (quarter_turns != 0 || flip).then_some((quarter_turns, flip))
+}
+
+pub(crate) fn oriented_image_dimensions(image: &Image, style: &ComputedStyle) -> (f32, f32) {
+    let swaps_axes = content_image_orientation(image, style)
+        .is_some_and(|(quarter_turns, _)| quarter_turns % 2 != 0);
+    if swaps_axes {
+        (image.height as f32, image.width as f32)
+    } else {
+        (image.width as f32, image.height as f32)
     }
+}
+
+pub(crate) fn orient_content_image(image: &Image, style: &ComputedStyle) -> Option<Image> {
+    let (quarter_turns, flip) = content_image_orientation(image, style)?;
     let (width, height) = if quarter_turns % 2 == 0 {
         (image.width, image.height)
     } else {
@@ -8832,8 +8866,10 @@ fn paint_background_image(
             &repeats[index % repeats.len()],
             &attachments[index % attachments.len()],
         );
-        if let Some(value) = style.get_by_id(PropertyId::ImageRendering) {
-            layer_style.set_paint_value("image-rendering", value.css_text());
+        for property in [PropertyId::ImageRendering, PropertyId::ImageOrientation] {
+            if let Some(value) = style.get_by_id(property) {
+                layer_style.set_paint_value(property.as_str(), value.css_text());
+            }
         }
         paint_background_image_rounded(
             canvas,
@@ -8940,8 +8976,10 @@ fn paint_background_images_for_box(
             &repeats[index % repeats.len()],
             &attachments[index % attachments.len()],
         );
-        if let Some(value) = style.get_by_id(PropertyId::ImageRendering) {
-            layer_style.set_paint_value("image-rendering", value.css_text());
+        for property in [PropertyId::ImageRendering, PropertyId::ImageOrientation] {
+            if let Some(value) = style.get_by_id(property) {
+                layer_style.set_paint_value(property.as_str(), value.css_text());
+            }
         }
         if background_attachment(&layer_style) == BackgroundAttachment::Local
             && layout.is_scroll_container()
@@ -9500,6 +9538,13 @@ fn paint_tiled_image_background(
     viewport: Rect,
     image: &Image,
 ) {
+    let oriented = matches!(
+        style.get_by_id(PropertyId::ImageOrientation),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("from-image")
+    )
+    .then(|| orient_content_image(image, style))
+    .flatten();
+    let image = oriented.as_ref().unwrap_or(image);
     let (tile_width, tile_height) = background_size(
         style,
         area,

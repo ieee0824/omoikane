@@ -1856,6 +1856,26 @@ fn explicit_image_orientation_rotates_content_image_before_sizing() {
 }
 
 #[test]
+fn from_image_reads_owned_exif_orientation_at_decode_boundary() {
+    let tiff = [
+        b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1, 0, 34];
+    jpeg.extend_from_slice(b"Exif\0\0");
+    jpeg.extend_from_slice(&tiff);
+    jpeg.extend_from_slice(&[0xff, 0xd9]);
+    assert_eq!(image::encoded_image_orientation(&jpeg), 6);
+
+    let mut image = Image::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
+    image.encoded_orientation = 6;
+    let mut style = ComputedStyle::default();
+    style.set_paint_value("image-orientation", "from-image".to_string());
+    let oriented = orient_content_image(&image, &style).unwrap();
+    assert_eq!((oriented.width(), oriented.height()), (1, 2));
+    assert_eq!(oriented.pixels(), &[255, 0, 0, 255, 0, 0, 255, 255]);
+}
+
+#[test]
 fn paints_selected_image_set_candidate_as_a_background_layer() {
     let red = pixel_data_uri(Color::rgb(255, 0, 0));
     let blue = pixel_data_uri(Color::rgb(0, 0, 255));
