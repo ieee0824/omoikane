@@ -1,0 +1,13 @@
+{
+  "tests": [
+    { "path": "css/css-values/round-mod-rem-computed.html" },
+    { "path": "css/css-values/round-mod-rem-invalid.html" },
+    { "path": "css/css-values/round-mod-rem-serialize.html" },
+    { "path": "css/css-values/hypot-pow-sqrt-computed.html" },
+    { "path": "css/css-values/hypot-pow-sqrt-invalid.html" },
+    { "path": "css/css-values/hypot-pow-sqrt-serialize.html" },
+    { "path": "css/css-values/exp-log-compute.html" },
+    { "path": "css/css-values/exp-log-invalid.html" },
+    { "path": "css/css-values/exp-log-serialize.html" }
+  ]
+}

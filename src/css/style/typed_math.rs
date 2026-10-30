@@ -79,8 +79,41 @@ fn function(name: &str, arguments: &[Value], hint: Option<NumericType>) -> Optio
         }
         "atan2" if arguments.len() == 2 => consistent(arguments, hint).map(|_| NumericType::ANGLE),
         "mod" | "rem" if arguments.len() == 2 => consistent(arguments, hint),
+        "round" => round_type(arguments, hint),
+        "pow" if arguments.len() == 2 => {
+            all_numbers(arguments, hint).then_some(NumericType::NUMBER)
+        }
+        "sqrt" | "exp" if arguments.len() == 1 => {
+            all_numbers(arguments, hint).then_some(NumericType::NUMBER)
+        }
+        "log" if matches!(arguments.len(), 1 | 2) => {
+            all_numbers(arguments, hint).then_some(NumericType::NUMBER)
+        }
         _ => None,
     }
+}
+
+fn all_numbers(arguments: &[Value], hint: Option<NumericType>) -> bool {
+    arguments
+        .iter()
+        .all(|argument| infer(argument, hint) == Some(NumericType::NUMBER))
+}
+
+fn round_type(arguments: &[Value], hint: Option<NumericType>) -> Option<NumericType> {
+    let (value, step) = match arguments {
+        [value, step] => (value, step),
+        [Value::Keyword(strategy), value, step]
+            if matches!(
+                strategy.to_ascii_lowercase().as_str(),
+                "nearest" | "up" | "down" | "to-zero"
+            ) =>
+        {
+            (value, step)
+        }
+        _ => return None,
+    };
+    let kind = infer(value, hint)?;
+    (infer(step, hint) == Some(kind)).then_some(kind)
 }
 
 fn argument_expression(arguments: &[Value], hint: Option<NumericType>) -> Option<NumericType> {
@@ -187,5 +220,19 @@ mod tests {
             infer(&container_expression, None),
             Some(NumericType::NUMBER)
         );
+    }
+
+    #[test]
+    fn stepped_and_exponential_functions_enforce_numeric_types() {
+        assert_eq!(
+            infer(&value("round(up, 10.5px, 1px)"), Some(NumericType::LENGTH)),
+            Some(NumericType::LENGTH)
+        );
+        assert_eq!(infer(&value("round(10px, 1deg)"), None), None);
+        for expression in ["pow(2, 3)", "sqrt(9)", "log(8, 2)", "log(e)", "exp(1)"] {
+            assert_eq!(infer(&value(expression), None), Some(NumericType::NUMBER));
+        }
+        assert_eq!(infer(&value("pow(2px, 3)"), None), None);
+        assert_eq!(infer(&value("log(8, 2px)"), None), None);
     }
 }

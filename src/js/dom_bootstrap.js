@@ -1108,12 +1108,15 @@ export const __omoikane_service_worker_lifecycle = {};
     "margin-block-start", "margin-block-end", "margin-inline-start", "margin-inline-end",
     "padding-block-start", "padding-block-end", "padding-inline-start", "padding-inline-end",
   ]);
+  const numericMathFunctionPattern =
+    /(?:^|[^\w-])(?:calc|min|max|clamp|round|mod|rem|hypot|abs|sign|sin|cos|tan|asin|acos|atan|atan2|pow|sqrt|log|exp)\s*\(/i;
   const needsStyleValueNormalization = (name, value) =>
     name === "transition" || name.startsWith("transition-") ||
     name === "hyphenate-character" ||
     name === "initial-letter" || name === "text-box-edge" ||
     logicalBoxStyleProperties.has(name) ||
     validatesSpecialStyleProperties.has(name) ||
+    (!name.startsWith("--") && numericMathFunctionPattern.test(value)) ||
     (!name.startsWith("--") && /sibling-(?:index|count)\s*\(/i.test(value));
   const styleShorthandLonghands = Object.freeze({
     "margin-block": ["margin-block-start", "margin-block-end"],

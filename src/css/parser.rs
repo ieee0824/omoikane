@@ -1534,6 +1534,9 @@ impl Parser {
     }
 
     fn parse_style_attribute(&mut self) -> Vec<Declaration> {
+        if has_nested_important_marker(&self.tokens) {
+            return Vec::new();
+        }
         let mut declarations = Vec::new();
         loop {
             self.skip_whitespace();
@@ -1578,7 +1581,7 @@ impl Parser {
         }
     }
 
-    fn parse_declaration_value_tokens(&mut self, close_functions_at_eof: bool) -> Vec<CssToken> {
+    fn parse_declaration_value_tokens(&mut self) -> (Vec<CssToken>, usize) {
         let mut value_tokens = Vec::new();
         let mut paren_depth = 0usize;
         let mut bracket_depth = 0usize;
@@ -1606,12 +1609,11 @@ impl Parser {
             }
         }
 
-        // CSS component values close unfinished functions at end of input.
-        // Individual transforms require this for CSSOM assignment/supports.
-        if close_functions_at_eof && self.peek().is_none() {
-            value_tokens.extend(std::iter::repeat_n(CssToken::ParenClose, paren_depth));
-        }
-        value_tokens
+        // CSS component values close unfinished functions at the end of their
+        // containing declaration, including before `;` and `}` delimiters.
+        let source_len = value_tokens.len();
+        value_tokens.extend(std::iter::repeat_n(CssToken::ParenClose, paren_depth));
+        (value_tokens, source_len)
     }
 
     fn parse_declaration(&mut self) -> Result<Vec<Declaration>, CssParseError> {
@@ -1625,10 +1627,11 @@ impl Parser {
         self.expect_colon()?;
         self.skip_whitespace();
 
-        let value_tokens = self.parse_declaration_value_tokens(matches!(
-            name.as_str(),
-            "translate" | "rotate" | "scale"
-        ));
+        let (value_tokens, source_len) = self.parse_declaration_value_tokens();
+
+        if has_nested_important_suffix(&value_tokens[..source_len]) {
+            return Err(CssParseError::InvalidDeclaration);
+        }
 
         let (value_tokens, important) = split_important(&value_tokens);
         let contains_var = tokens_contain_var_function(&value_tokens);
@@ -1671,12 +1674,17 @@ impl Parser {
                     | "rotate"
                     | "scale"
                     | "will-change"
+                    | "transition-duration"
+                    | "transition-delay"
             )
             || contains_var && matches!(name.as_str(), "font" | "transition"))
             && has_top_level_comma(&value_tokens)
         {
             parse_comma_separated_value(&value_tokens)?
-        } else if (name == "transition" || name.starts_with("transition-")) && !contains_var {
+        } else if (name == "transition" || name.starts_with("transition-"))
+            && !matches!(name.as_str(), "transition-duration" | "transition-delay")
+            && !contains_var
+        {
             // Transition lists need their top-level commas. The generic Value
             // parser intentionally discards commas, so retain the declaration
             // text for the dedicated transition grammar instead.
@@ -2157,7 +2165,27 @@ fn parse_value_sequence_with_mode(
                 } else {
                     let is_math_function = matches!(
                         name.to_ascii_lowercase().as_str(),
-                        "calc" | "min" | "max" | "clamp" | "sign" | "abs"
+                        "calc"
+                            | "min"
+                            | "max"
+                            | "clamp"
+                            | "round"
+                            | "mod"
+                            | "rem"
+                            | "hypot"
+                            | "abs"
+                            | "sign"
+                            | "sin"
+                            | "cos"
+                            | "tan"
+                            | "asin"
+                            | "acos"
+                            | "atan"
+                            | "atan2"
+                            | "pow"
+                            | "sqrt"
+                            | "log"
+                            | "exp"
                     );
                     if ((name.eq_ignore_ascii_case("rgb")
                         || name.eq_ignore_ascii_case("rgba")
@@ -2567,6 +2595,44 @@ fn split_important(tokens: &[CssToken]) -> (Vec<CssToken>, bool) {
     }
 
     (tokens.to_vec(), false)
+}
+
+fn has_nested_important_suffix(tokens: &[CssToken]) -> bool {
+    let Some(important_index) = tokens
+        .iter()
+        .rposition(|token| !matches!(token, CssToken::Whitespace))
+    else {
+        return false;
+    };
+    if !matches!(
+        &tokens[important_index],
+        CssToken::Ident(keyword) if keyword.eq_ignore_ascii_case("important")
+    ) {
+        return false;
+    }
+    let Some(bang_index) = tokens[..important_index]
+        .iter()
+        .rposition(|token| !matches!(token, CssToken::Whitespace))
+    else {
+        return false;
+    };
+    matches!(tokens[bang_index], CssToken::Delim('!')) && !token_is_at_top_level(tokens, bang_index)
+}
+
+fn has_nested_important_marker(tokens: &[CssToken]) -> bool {
+    tokens.iter().enumerate().any(|(important_index, token)| {
+        if !matches!(token, CssToken::Ident(keyword) if keyword.eq_ignore_ascii_case("important")) {
+            return false;
+        }
+        let Some(bang_index) = tokens[..important_index]
+            .iter()
+            .rposition(|token| !matches!(token, CssToken::Whitespace))
+        else {
+            return false;
+        };
+        matches!(tokens[bang_index], CssToken::Delim('!'))
+            && !token_is_at_top_level(tokens, bang_index)
+    })
 }
 
 fn token_is_at_top_level(tokens: &[CssToken], index: usize) -> bool {
@@ -2989,5 +3055,14 @@ mod selector_list_tests {
                 .iter()
                 .any(|declaration| declaration.name == "margin-left")
         );
+    }
+
+    #[test]
+    fn numeric_math_comma_arguments_reject_only_empty_segments() {
+        let tokens = tokenize("10s, 6s").unwrap();
+        assert!(!has_empty_top_level_comma_segment(&tokens));
+        for value in [", 1", "1,", "1, , 2"] {
+            assert!(has_empty_top_level_comma_segment(&tokenize(value).unwrap()));
+        }
     }
 }

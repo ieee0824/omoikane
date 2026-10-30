@@ -9195,6 +9195,30 @@ fn style_normalization_host_call_is_limited_to_grammar_sensitive_properties() {
 }
 
 #[test]
+fn style_numeric_math_uses_the_cssom_normalization_boundary() {
+    let mut runtime = JsRuntime::new().unwrap();
+    TEST_STYLE_NORMALIZATION_CALLS.with(|count| count.set(0));
+    assert_eq!(
+        runtime
+            .eval(
+                r#"(() => {
+                      const target = document.createElement("div");
+                      target.style.opacity = "round(1.1, 1)";
+                      target.style.transform = "scale(calc(log(0)))";
+                      target.style.setProperty("--math", "round(1.1, 1)");
+                      return target.style.opacity === "calc(1)" &&
+                        target.style.transform === "scale(calc(-infinity))" &&
+                        target.style.getPropertyValue("--math") === "round(1.1, 1)";
+                    })()"#,
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    assert_eq!(TEST_STYLE_NORMALIZATION_CALLS.with(Cell::get), 2);
+}
+
+#[test]
 fn style_custom_property_preserves_case_across_roundtrip() {
     // Custom properties are case-sensitive: `--Foo` must not be folded to
     // lowercase or camelCase→kebab mangled into `---foo`. The value set via

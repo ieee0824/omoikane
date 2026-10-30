@@ -1,0 +1,12 @@
+{
+  "tests": [
+    { "path": "css/css-conditional/container-queries/container-units-basic.html" },
+    { "path": "css/css-conditional/container-queries/container-units-auto.html" },
+    { "path": "css/css-conditional/container-queries/container-units-content-box.html" },
+    { "path": "css/css-conditional/container-queries/container-units-ineligible-container.html" },
+    { "path": "css/css-conditional/container-queries/container-units-invalidation.html" },
+    { "path": "css/css-conditional/container-queries/container-units-small-viewport-fallback.html" },
+    { "path": "css/css-conditional/container-queries/container-units-shadow.html" },
+    { "path": "css/css-conditional/container-queries/container-units-selection.html" }
+  ]
+}

@@ -9083,6 +9083,135 @@ fn typed_length_percentage_math_preserves_functions_until_used_value_resolution(
 }
 
 #[test]
+fn stepped_and_exponential_math_reaches_supports_and_computed_lengths() {
+    for value in [
+        "round(10.5px, 1px)",
+        "round(to-zero, -10.5px, 1px)",
+        "calc(pow(2, 3) * 1px)",
+        "calc(sqrt(9) * 1px)",
+        "calc(log(8, 2) * 1px)",
+        "calc(exp(1) * 1px)",
+    ] {
+        assert!(supports_declaration("width", value), "{value}");
+    }
+    for value in [
+        "round(sideways, 10px, 1px)",
+        "round(10px, 1deg)",
+        "calc(pow(2px, 3) * 1px)",
+        "calc(log(8, 2px) * 1px)",
+    ] {
+        assert!(!supports_declaration("width", value), "{value}");
+    }
+    for value in [
+        "round()",
+        "hypot(, 1)",
+        "sqrt(, 1)",
+        "round(1, 1px)",
+        "hypot()",
+        "pow(2px, 3)",
+        "sqrt(1, 2)",
+        "log(1px)",
+        "exp(1 +)",
+        "exp(, 1)",
+        "log(, 1)",
+    ] {
+        assert!(!supports_declaration("opacity", value), "{value}");
+    }
+    for value in [
+        "round(1, 0.25)",
+        "hypot(3, 4)",
+        "pow(2, 3)",
+        "sqrt(9)",
+        "log(8, 2)",
+        "exp(0)",
+    ] {
+        assert!(supports_declaration("opacity", value), "{value}");
+    }
+    for value in [
+        "round(10s, 6s)",
+        "mod(10s, 6000ms)",
+        "rem(10000ms, 6s)",
+        "hypot(1000ms)",
+    ] {
+        assert!(supports_declaration("transition-delay", value), "{value}");
+    }
+    assert!(!supports_declaration(
+        "transition-duration",
+        "round(-10s, 6s)"
+    ));
+    for value in [
+        "calc(1px * pow(1))",
+        "calc(1px * pow(2px, 3px))",
+        "hypot(2px, 3)",
+        "hypot()",
+        "calc(sqrt())",
+        "pow(10px, 1)",
+    ] {
+        assert!(!supports_declaration("outline-offset", value), "{value}");
+    }
+    assert!(supports_declaration(
+        "margin-left",
+        "calc(1px * pow(2, sqrt(100))"
+    ));
+
+    let document = NodeHandle::document();
+    let div = NodeHandle::element("div");
+    document.append_child(div.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "div { \
+                width: round(52%, 10%); \
+                height: calc(pow(2, 3) * 1px); \
+                left: round(up, 10.2px, 1px); \
+                top: calc(log(8, 2) * 1px); \
+                margin-left: round(10Q, 6Q); \
+                transition-delay: round(10s, 6s); \
+            }",
+        )
+        .unwrap(),
+    );
+    let style = resolver.computed_style(&div);
+    assert_eq!(style.get("width"), Some(&ComputedValue::Percentage(50.0)));
+    assert_eq!(style.get("height"), Some(&ComputedValue::Px(8.0)));
+    assert_eq!(style.get("left"), Some(&ComputedValue::Px(11.0)));
+    assert_eq!(style.get("top"), Some(&ComputedValue::Px(3.0)));
+    let Some(ComputedValue::Px(margin_left)) = style.get("margin-left") else {
+        panic!("round() with Q units must compute to a length");
+    };
+    assert!((margin_left - 12.0 * (96.0 / 101.6)).abs() < 0.000_1);
+    assert_eq!(
+        style.get("transition-delay"),
+        Some(&ComputedValue::Keyword("12s".into()))
+    );
+}
+
+#[test]
+fn specified_number_math_folds_once_inside_properties_and_transforms() {
+    for (property, input, expected) in [
+        ("opacity", "round(1.1, 1)", "calc(1)"),
+        ("opacity", "calc(mod(1, 0))", "calc(NaN)"),
+        ("opacity", "calc(log(0))", "calc(-infinity)"),
+        (
+            "transform",
+            "scale(calc(pow(1, 1) - 0.5))",
+            "scale(calc(0.5))",
+        ),
+    ] {
+        assert_eq!(
+            normalize_numeric_math_specified(property, input).as_deref(),
+            Some(expected),
+            "{property}: {input}"
+        );
+    }
+    assert_eq!(
+        normalize_numeric_math_specified("margin-left", "hypot(2px, 40%)"),
+        None
+    );
+}
+
+#[test]
 fn length_percentage_math_uses_one_grammar_for_supports_shorthands_and_cascade() {
     for (property, value) in [
         ("width", "min(80px, 50%)"),
@@ -14615,7 +14744,7 @@ fn inline_display_toggle_updates_external_counter_and_geometry_like_full_clear()
     target.append_child(child.clone());
     parent.append_child(observer.clone());
     target.set_attribute("style", "display:block");
-    let stylesheet = "#parent{width:200px;container-type:inline-size}\
+    let stylesheet = "#parent{display:block;width:200px;container-type:inline-size}\
         #target{height:20px;width:180px;container-type:inline-size;counter-reset:item 7}\
         #observer{display:block;height:10px;color:color(srgb calc(sign(2cqh - .4px)) 0 0)}\
         #observer::before{content:counter(item)}\
@@ -14680,9 +14809,9 @@ fn inline_display_toggle_updates_external_counter_and_geometry_like_full_clear()
         );
         if current == "display:none" {
             assert_ne!(actual, initial, "hidden subtree must change full geometry");
-            assert_ne!(
+            assert_eq!(
                 color, visible_observer_color,
-                "external sibling's cqh color must track ancestor auto height"
+                "cqh must use the viewport fallback for an inline-size container"
             );
         } else {
             assert_eq!(actual, initial, "showing subtree must restore geometry");
