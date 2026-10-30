@@ -96,14 +96,15 @@ jobs:
       # rust-cache sees only the root workspace and drops the nested Boa path
       # dependencies from target/debug. Restore them after rust-cache cleanup.
       # The key covers every file these crates read (sources and ICU data under
-      # their directories) and the build configuration, because an exact hit
+      # their directories) and the build configuration, including the
+      # rustflags in .cargo/config.toml, because an exact hit
       # is then marked fresh below instead of being rebuilt (#1537).
       - name: Compute Boa suite cache key
         if: matrix.kind == 'suite'
         id: boa-key
         run: echo "key=$KEY" >> "$GITHUB_OUTPUT"
         env:
-          KEY: boa-gate5-v2-${{ matrix.target }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.github/workflows/jit-release-gate.yml', 'scripts/jit-gate5.py', 'engine/boa/Cargo.toml', 'engine/boa/Cargo.lock', 'engine/boa/core/**', 'engine/boa/utils/**', 'engine/regress/**') }}
+          KEY: boa-gate5-v2-${{ matrix.target }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.cargo/config.toml', '.github/workflows/jit-release-gate.yml', 'scripts/jit-gate5.py', 'engine/boa/Cargo.toml', 'engine/boa/Cargo.lock', 'engine/boa/core/**', 'engine/boa/utils/**', 'engine/regress/**') }}
       - name: Restore Boa suite artifacts
         if: matrix.kind == 'suite'
         id: boa-cache
