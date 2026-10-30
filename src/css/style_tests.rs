@@ -2251,11 +2251,7 @@ fn scroll_ui_properties_validate_compute_and_inherit_at_the_style_boundary() {
         ("scrollbar-gutter", "both-edges stable", "both-edges"),
         ("scrollbar-color", "red blue", "red"),
         ("overflow-anchor", "none", "always"),
-        (
-            "overflow-clip-margin",
-            "padding-box 8px",
-            "padding-box -1px",
-        ),
+        ("overflow-clip-margin", "padding-box 8px", "padding-box 1%"),
     ] {
         assert!(supports_declaration(property, valid), "{property}: {valid}");
         assert!(

@@ -471,6 +471,10 @@ mod tests {
             Some("red blue")
         );
         assert_eq!(
+            normalize("scrollbar-color", "#ff0000 #00ff00").as_deref(),
+            Some("rgb(255, 0, 0) rgb(0, 255, 0)")
+        );
+        assert_eq!(
             normalize("overflow-clip-margin", "padding-box 2em").as_deref(),
             Some("padding-box 2em")
         );

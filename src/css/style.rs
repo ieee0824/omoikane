@@ -8972,13 +8972,20 @@ fn validate_overflow_clip_margin_declaration(value: &Value) -> DeclarationValida
                 boxes += 1;
             }
             Value::Length(number, unit)
-                if *number >= 0.0
+                if number.is_finite()
                     && resolve_length_to_px(*number, unit, ResolutionContext::default())
                         .is_some() =>
             {
                 lengths += 1;
             }
             Value::Number(number) if *number == 0.0 => lengths += 1,
+            Value::Function { name, .. }
+                if is_length_percentage_math_function(name)
+                    && typed_math::infer(component, Some(typed_math::NumericType::LENGTH))
+                        == Some(typed_math::NumericType::LENGTH) =>
+            {
+                lengths += 1;
+            }
             _ => return DeclarationValidation::Invalid,
         }
     }
@@ -9065,6 +9072,43 @@ pub(crate) fn normalize_scroll_ui_specified(property: &str, text: &str) -> Optio
     let validation = validate_declaration(property, &declaration.value);
     match validation {
         DeclarationValidation::Invalid => None,
+        DeclarationValidation::Valid(value) if property == "scrollbar-gutter" => {
+            let words = value.css_text();
+            Some(if words.split_ascii_whitespace().count() == 2 {
+                "stable both-edges".to_string()
+            } else {
+                words
+            })
+        }
+        DeclarationValidation::Valid(value) if property == "scrollbar-color" => {
+            if value.css_text().eq_ignore_ascii_case("auto")
+                || is_css_wide_keyword(&value.css_text().to_ascii_lowercase())
+            {
+                return Some(value.css_text());
+            }
+            let css_text = value.css_text();
+            let colors = crate::css::split_top_level_whitespace(&css_text);
+            Some(
+                colors
+                    .into_iter()
+                    .map(|color| {
+                        crate::paint::color4::CssColor::parse(color)
+                            .map(|color| color.serialize())
+                            .or_else(|| {
+                                crate::paint::color::parse_color(color).map(|parsed| {
+                                    if color.starts_with('#') {
+                                        format!("rgb({}, {}, {})", parsed.r, parsed.g, parsed.b)
+                                    } else {
+                                        color.to_ascii_lowercase()
+                                    }
+                                })
+                            })
+                            .unwrap_or_else(|| color.to_ascii_lowercase())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        }
         DeclarationValidation::Valid(value) => Some(value.css_text()),
         DeclarationValidation::Unvalidated => {
             Some(render_value(&declaration.value).to_ascii_lowercase())
@@ -13425,17 +13469,40 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
             Value::List(values) => values.as_slice(),
             value => std::slice::from_ref(value),
         };
-        let rendered = components
-            .iter()
-            .map(|component| match component {
-                Value::Length(number, unit) => resolve_length_to_px(*number, unit, ctx)
-                    .map(|px| format!("{}px", super::tokenizer::trimmed_number(px)))
-                    .unwrap_or_else(|| render_value(component)),
-                Value::Number(number) if *number == 0.0 => "0px".to_string(),
-                _ => render_value(component).to_ascii_lowercase(),
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
+        let mut visual_box = "padding-box";
+        let mut length = 0.0;
+        for component in components {
+            match component {
+                Value::Keyword(keyword)
+                    if matches!(
+                        keyword.to_ascii_lowercase().as_str(),
+                        "content-box" | "padding-box" | "border-box"
+                    ) =>
+                {
+                    visual_box = match keyword.to_ascii_lowercase().as_str() {
+                        "content-box" => "content-box",
+                        "border-box" => "border-box",
+                        _ => "padding-box",
+                    };
+                }
+                Value::Length(number, unit) => {
+                    length = resolve_length_to_px(*number, unit, ctx).unwrap_or(0.0);
+                }
+                Value::Number(number) if *number == 0.0 => length = 0.0,
+                Value::Function { .. } => {
+                    length = evaluate_length_percentage_math(component, ctx)
+                        .map(|value| value.resolve(0.0))
+                        .unwrap_or(0.0);
+                }
+                _ => {}
+            }
+        }
+        let length = format!("{}px", super::tokenizer::trimmed_number(length));
+        let rendered = match (visual_box, length.as_str()) {
+            ("padding-box", length) => length.to_string(),
+            (visual_box, "0px") => visual_box.to_string(),
+            (visual_box, length) => format!("{visual_box} {length}"),
+        };
         return ComputedValue::Keyword(rendered);
     }
     if property_name.starts_with("contain-intrinsic-") {

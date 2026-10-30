@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Scroll UI fixture</title>
+<style>
+  * { box-sizing: border-box }
+  html, body { margin: 0; background: #f4f1e8; color: #202735; font: 14px sans-serif }
+  main { width: 500px; height: 260px; padding: 16px; display: grid; grid-template-columns: 220px 220px; gap: 20px }
+  h2 { margin: 0 0 8px; font-size: 14px }
+  .scroller { width: 220px; height: 86px; overflow: auto; scrollbar-width: thin;
+    scrollbar-color: #c43d5b #e2d9c7; border: 2px solid #202735; background: white }
+  .stable { scrollbar-gutter: stable both-edges }
+  .row { height: 32px; padding: 7px 9px; border-bottom: 1px solid #ccd2d9 }
+  .clip { width: 150px; height: 58px; padding: 6px; border: 4px solid #202735;
+    overflow: clip; overflow-clip-margin: border-box 7px; background: white }
+  .spill { width: 170px; height: 72px; background: linear-gradient(90deg, #3478c5 0 82%, #e6a33b 82%) }
+  .anchor { margin-top: 14px; width: 220px; height: 72px; overflow: auto;
+    border: 2px solid #202735; background: white }
+  .anchor > div { height: 32px; padding: 7px }
+  .anchor .selected { background: #b9d7ae }
+</style>
+<main>
+  <section><h2>thin / custom colors</h2><div id="colored" class="scroller">
+    <div class="row">alpha</div><div class="row">beta</div><div class="row">gamma</div><div class="row">delta</div>
+  </div></section>
+  <section><h2>stable both edges</h2><div class="scroller stable">
+    <div class="row">reserved</div><div class="row">gutter</div><div class="row">geometry</div><div class="row">fixed</div>
+  </div></section>
+  <section><h2>border clip margin</h2><div class="clip"><div class="spill"></div></div></section>
+  <section><h2>anchored after insertion</h2><div id="anchored" class="anchor">
+    <div></div><div id="target" class="selected">anchor</div><div></div><div></div>
+  </div></section>
+</main>
+<script>
+  colored.scrollTop = 28;
+  anchored.scrollTop = 32;
+  const inserted = document.createElement('div');
+  inserted.textContent = 'inserted';
+  target.before(inserted);
+</script>
