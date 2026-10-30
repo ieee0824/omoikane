@@ -20,7 +20,7 @@ The reusable gate also runs directly after pushes to main.
 | --- | --- | --- | --- |
 | x86_64-unknown-linux-gnu | ubuntu-24.04 | libomoikane.so | System V x86-64 |
 | aarch64-unknown-linux-gnu | ubuntu-24.04-arm | libomoikane.so | AAPCS64 |
-| aarch64-apple-darwin | macos-14 | libomoikane.dylib | Apple arm64 / macOS code-memory policy |
+| aarch64-apple-darwin | macos-15 | libomoikane.dylib | Apple arm64 / macOS code-memory policy |
 
 This table identifies the tested support matrix; the matching revision's
 `jit-gate5-report/gate.json` records its actual pass/fail decision. A green

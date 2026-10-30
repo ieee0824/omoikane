@@ -42,7 +42,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -85,7 +85,7 @@ jobs:
   macos-wpt-asan:
     if: github.event_name == 'workflow_dispatch' && inputs.macos_wpt_diagnostics
     name: Diagnostic WPT ASan (aarch64-apple-darwin)
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 90
     env:
       CARGO_BUILD_JOBS: '2'
