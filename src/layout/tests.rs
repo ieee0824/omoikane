@@ -433,6 +433,71 @@ fn positioned_block_pseudo_does_not_advance_normal_flow() {
 }
 
 #[test]
+fn absolute_box_with_opposing_insets_distributes_auto_margins() {
+    let (_document, _html, body, host) = sample_tree();
+    host.set_attribute("class", "host");
+    let centered = NodeHandle::element("div");
+    centered.set_attribute("class", "centered");
+    let start = NodeHandle::element("div");
+    start.set_attribute("class", "start");
+    let wide = NodeHandle::element("div");
+    wide.set_attribute("class", "wide");
+    let rtl = NodeHandle::element("div");
+    rtl.set_attribute("class", "wide rtl");
+    let one_inset = NodeHandle::element("div");
+    one_inset.set_attribute("class", "one-inset");
+    for child in [&centered, &start, &wide, &rtl, &one_inset] {
+        host.append_child(child.clone());
+    }
+
+    let mut resolver = resolver_without_body_ua_margin();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            ".host { position: relative; width: 200px; height: 100px; } \
+             .centered { position: absolute; inset: 0; margin: auto; width: 40px; height: 20px; } \
+             .start { position: absolute; left: 10px; right: 10px; top: 0; bottom: 0; \
+               margin: auto 0 auto auto; width: 30px; height: 10px; } \
+             .wide { position: absolute; left: 0; right: 0; top: 0; margin: 0 auto; \
+               width: 300px; height: 10px; } \
+             .rtl { direction: rtl; } \
+             .one-inset { position: absolute; left: 5px; top: 0; margin: auto; width: 50px; height: 10px; }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 400.0,
+            height: 300.0,
+        },
+    )
+    .unwrap();
+    let host_box = find_layout_box(&layout, &host).expect("host must be laid out");
+    let origin = host_box.dimensions.padding_box();
+    let border_box = |node: &NodeHandle| {
+        find_layout_box(&layout, node)
+            .expect("positioned child must be laid out")
+            .dimensions
+            .border_box()
+    };
+    // Two auto margins split the free space on both axes.
+    let centered = border_box(&centered);
+    assert_eq!((centered.x - origin.x, centered.y - origin.y), (80.0, 40.0));
+    // A single auto start margin absorbs all free space.
+    let start = border_box(&start);
+    assert_eq!((start.x - origin.x, start.y - origin.y), (160.0, 45.0));
+    // Overconstrained boxes keep the start edge for ltr and the end edge for rtl.
+    assert_eq!(border_box(&wide).x - origin.x, 0.0);
+    assert_eq!(border_box(&rtl).x - origin.x, -100.0);
+    // With one auto inset, auto margins are zero instead of centering.
+    assert_eq!(border_box(&one_inset).x - origin.x, 5.0);
+}
+
+#[test]
 fn block_pseudo_uses_vertical_writing_mode_flow_axis() {
     let (_document, _html, body, host) = sample_tree();
     let child = NodeHandle::element("div");

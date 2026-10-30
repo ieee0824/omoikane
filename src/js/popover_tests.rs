@@ -125,6 +125,9 @@ fn popover_auto_manual_nesting_focus_escape_disconnect_and_dialog() {
               document.body.appendChild(manualPopover);
               const disconnectedHides = !manualPopover.matches(":popover-open");
               dialogElement.showModal();
+              // A user activation (the invoker press) starts a new close
+              // watcher group, so Escape reaches the popover before the dialog.
+              __omoikane_dispatch_keyboard_input("keydown", { key: "Control", code: "ControlLeft" });
               dialogPopoverElement.showPopover({ source: dialogButtonElement });
               __omoikane_dispatch_keyboard_input("keydown", { key: "Escape", code: "Escape" });
               const dialogPopoverFirst = dialogElement.open && !dialogPopoverElement.matches(":popover-open");
