@@ -10039,6 +10039,24 @@ impl JsRuntime {
         Some(state.retarget_content_visibility_hit(target))
     }
 
+    pub(crate) fn css_cursor_at(&mut self, x: f32, y: f32) -> Option<String> {
+        let target = self.hit_test(x, y)?;
+        let document = document_root_for_node(&target)?;
+        let document_id = document.identity();
+        let mut state = self.host_state.borrow_mut();
+        state.ensure_style_resolver(&document);
+        let style = state
+            .document_styles
+            .get_mut(&document_id)?
+            .resolver
+            .as_mut()?
+            .computed_style(&target);
+        match style.get("cursor") {
+            Some(ComputedValue::Keyword(value)) => Some(value.clone()),
+            _ => Some("auto".to_string()),
+        }
+    }
+
     /// Converts embedder pointer coordinates to the target document's viewport
     /// and returns that document's scroll offset and native identity for input.
     pub(crate) fn input_position_for_node(

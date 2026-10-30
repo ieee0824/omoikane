@@ -5243,6 +5243,21 @@ fn touch_action_controls_native_touch_scrolling() {
 }
 
 #[test]
+fn css_cursor_at_uses_the_topmost_computed_style() {
+    let mut session = CdpSession::new().unwrap();
+    session.set_viewport(100, 100);
+    session
+        .install_document(
+            "https://example.test/cursor",
+            "<style>*{margin:0}#target{width:100px;height:100px;cursor:grab}</style><div id=target></div>",
+            1,
+            "null",
+        )
+        .unwrap();
+    assert_eq!(session.css_cursor_at(20.0, 20.0).as_deref(), Some("grab"));
+}
+
+#[test]
 fn input_realm_evaluation_restores_the_main_realm_after_an_error() {
     let (mut session, _, target_document_id) = cross_origin_wheel_session(
         "<style>*{margin:0}#target{height:1000px}</style><div id=target>child</div>\

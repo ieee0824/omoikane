@@ -39,7 +39,46 @@ use winit::event::{
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey, PhysicalKey};
-use winit::window::{Fullscreen as WindowFullscreen, Window, WindowId};
+use winit::window::{CursorIcon, Fullscreen as WindowFullscreen, Window, WindowId};
+
+fn css_cursor_icon(value: &str) -> CursorIcon {
+    match value.split_ascii_whitespace().last().unwrap_or("auto") {
+        "context-menu" => CursorIcon::ContextMenu,
+        "help" => CursorIcon::Help,
+        "pointer" => CursorIcon::Pointer,
+        "progress" => CursorIcon::Progress,
+        "wait" => CursorIcon::Wait,
+        "cell" => CursorIcon::Cell,
+        "crosshair" => CursorIcon::Crosshair,
+        "text" => CursorIcon::Text,
+        "vertical-text" => CursorIcon::VerticalText,
+        "alias" => CursorIcon::Alias,
+        "copy" => CursorIcon::Copy,
+        "move" => CursorIcon::Move,
+        "no-drop" => CursorIcon::NoDrop,
+        "not-allowed" => CursorIcon::NotAllowed,
+        "grab" => CursorIcon::Grab,
+        "grabbing" => CursorIcon::Grabbing,
+        "all-scroll" => CursorIcon::AllScroll,
+        "col-resize" => CursorIcon::ColResize,
+        "row-resize" => CursorIcon::RowResize,
+        "n-resize" => CursorIcon::NResize,
+        "e-resize" => CursorIcon::EResize,
+        "s-resize" => CursorIcon::SResize,
+        "w-resize" => CursorIcon::WResize,
+        "ne-resize" => CursorIcon::NeResize,
+        "nw-resize" => CursorIcon::NwResize,
+        "se-resize" => CursorIcon::SeResize,
+        "sw-resize" => CursorIcon::SwResize,
+        "ew-resize" => CursorIcon::EwResize,
+        "ns-resize" => CursorIcon::NsResize,
+        "nesw-resize" => CursorIcon::NeswResize,
+        "nwse-resize" => CursorIcon::NwseResize,
+        "zoom-in" => CursorIcon::ZoomIn,
+        "zoom-out" => CursorIcon::ZoomOut,
+        _ => CursorIcon::Default,
+    }
+}
 
 #[path = "omoikane/build_info.rs"]
 mod build_info;
@@ -655,9 +694,24 @@ impl BrowserApp {
         let result = match event {
             WindowEvent::CursorMoved { position, .. } => {
                 match self.route_cursor(self.chrome_layout(), position.x, position.y) {
-                    PagePointer::Move(x, y) => self.input.cursor_moved(&mut self.session, x, y),
+                    PagePointer::Move(x, y) => {
+                        let result = self.input.cursor_moved(&mut self.session, x, y);
+                        if !self.native_pointer_lock
+                            && let Some(window) = self.window.as_ref()
+                        {
+                            let cursor = self
+                                .session
+                                .css_cursor_at(x as f32, y as f32)
+                                .unwrap_or_else(|| "auto".to_string());
+                            window.set_cursor(css_cursor_icon(&cursor));
+                        }
+                        result
+                    }
                     PagePointer::Leave => {
                         self.input.cursor_left(&mut self.session);
+                        if let Some(window) = self.window.as_ref() {
+                            window.set_cursor(CursorIcon::Default);
+                        }
                         Ok(())
                     }
                     PagePointer::Ignore => Ok(()),

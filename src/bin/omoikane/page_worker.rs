@@ -273,6 +273,7 @@ pub(super) struct PageUpdate {
     pub(super) viewport: (u32, u32),
     pub(super) fullscreen: Option<FullscreenTransition>,
     pub(super) pointer_lock: Option<PointerLockTransition>,
+    pub(super) cursor: Option<String>,
     pub(super) find: Option<FindInPageResult>,
     pub(super) error: Option<String>,
 }
@@ -472,6 +473,7 @@ impl PageWorker {
                             viewport: (0, 0),
                             fullscreen: None,
                             pointer_lock: None,
+                            cursor: None,
                             find: None,
                             error: Some(error.to_string()),
                         });
@@ -1241,6 +1243,9 @@ impl PageOwner {
         }
         let title = super::document_window_title(&mut self.session)
             .unwrap_or_else(|_| super::DEFAULT_WINDOW_TITLE.to_string());
+        let cursor = self
+            .native_scroll_cursor
+            .and_then(|(x, y)| self.session.css_cursor_at(x as f32, y as f32));
         PageUpdate {
             frame_completed,
             navigation_completed,
@@ -1256,6 +1261,7 @@ impl PageOwner {
             viewport: self.viewport,
             fullscreen: self.session.take_fullscreen_transition(),
             pointer_lock: self.session.take_pointer_lock_transition(),
+            cursor,
             find: self.find.clone(),
             error,
         }

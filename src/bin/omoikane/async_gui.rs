@@ -860,6 +860,13 @@ impl AsyncBrowserApp {
         if let Some(transition) = update.pointer_lock {
             self.apply_pointer_lock(transition);
         }
+        if !self.pointer_locked
+            && let Some(window) = self.window.as_ref()
+        {
+            window.set_cursor(super::css_cursor_icon(
+                update.cursor.as_deref().unwrap_or("auto"),
+            ));
+        }
         self.update_title();
         self.redraw_visible_content(redraw_required);
         let now = Instant::now();
