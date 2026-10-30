@@ -6826,6 +6826,11 @@ fn prepare_cross_fade(
                 explicit_sum += weight;
                 (image, Some(weight))
             }
+            [Value::Percentage(weight), image] if weight.is_finite() => {
+                let weight = (*weight / 100.0).clamp(0.0, 1.0);
+                explicit_sum += weight;
+                (image, Some(weight))
+            }
             _ => return None,
         };
         prepared.push((

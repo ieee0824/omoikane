@@ -1846,16 +1846,6 @@ fn image_rendering_switches_between_smooth_and_pixelated_sampling() {
 }
 
 #[test]
-fn explicit_image_orientation_rotates_content_image_before_sizing() {
-    let image = Image::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
-    let mut style = ComputedStyle::default();
-    style.set_paint_value("image-orientation", "90deg".to_string());
-    let oriented = orient_content_image(&image, &style).unwrap();
-    assert_eq!((oriented.width(), oriented.height()), (1, 2));
-    assert_eq!(oriented.pixels(), &[255, 0, 0, 255, 0, 0, 255, 255]);
-}
-
-#[test]
 fn from_image_reads_owned_exif_orientation_at_decode_boundary() {
     let tiff = [
         b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0,
@@ -1962,7 +1952,7 @@ fn paints_cross_fade_as_a_premultiplied_generated_background_image() {
     let blue = pixel_data_uri(Color::rgb(0, 0, 255));
     let stylesheet = format!(
         "body {{ margin: 0; }} div {{ width: 2px; height: 2px; \
-         background-image: cross-fade(url(\"{red}\") 50%, url(\"{blue}\") 50%); \
+         background-image: cross-fade(50% url(\"{red}\"), 50% url(\"{blue}\")); \
          background-repeat: no-repeat; }}"
     );
     let document = NodeHandle::document();

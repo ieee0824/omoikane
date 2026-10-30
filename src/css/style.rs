@@ -7892,6 +7892,7 @@ fn valid_composite_image(value: &Value) -> bool {
                 [image, Value::Percentage(amount)] => {
                     amount.is_finite() && *amount >= 0.0 && image_valid(image)
                 }
+                [Value::Percentage(amount), image] => amount.is_finite() && image_valid(image),
                 _ => false,
             }
         }),
@@ -7957,44 +7958,8 @@ fn validate_image_orientation(value: &Value) -> DeclarationValidation {
         if is_css_wide_keyword(&keyword) || matches!(keyword.as_str(), "from-image" | "none") {
             return DeclarationValidation::Valid(ComputedValue::Keyword(keyword));
         }
-        if keyword == "flip" {
-            return DeclarationValidation::Valid(ComputedValue::Keyword("0deg flip".to_string()));
-        }
-        return DeclarationValidation::Invalid;
     }
-    let components = match value {
-        Value::List(values) => values.as_slice(),
-        value => std::slice::from_ref(value),
-    };
-    let mut angle = None;
-    let mut flip = false;
-    for component in components {
-        match component {
-            Value::Length(value, unit) if angle.is_none() && value.is_finite() => {
-                let turns = match unit.to_ascii_lowercase().as_str() {
-                    "deg" => *value / 360.0,
-                    "grad" => *value / 400.0,
-                    "rad" => *value / std::f32::consts::TAU,
-                    "turn" => *value,
-                    _ => return DeclarationValidation::Invalid,
-                };
-                let quarter_turns = ((turns * 4.0 + 0.5).floor() as i32).rem_euclid(4);
-                angle = Some(quarter_turns * 90);
-            }
-            Value::Keyword(keyword) if !flip && keyword.eq_ignore_ascii_case("flip") => {
-                flip = true;
-            }
-            _ => return DeclarationValidation::Invalid,
-        }
-    }
-    let Some(angle) = angle else {
-        return DeclarationValidation::Invalid;
-    };
-    DeclarationValidation::Valid(ComputedValue::Keyword(if flip {
-        format!("{angle}deg flip")
-    } else {
-        format!("{angle}deg")
-    }))
+    DeclarationValidation::Invalid
 }
 
 fn valid_image_component(value: &Value) -> bool {
@@ -16492,7 +16457,6 @@ fn normalize_background_layer_lists(properties: &mut PropertyMap) {
         ("background-attachment", "scroll"),
         ("background-origin", "padding-box"),
         ("background-clip", "border-box"),
-        ("background-blend-mode", "normal"),
     ] {
         let raw = properties
             .get(name)

@@ -1,0 +1,13 @@
+{
+  "tests": [
+    { "path": "css/css-images/parsing/image-orientation-valid.html" },
+    { "path": "css/css-images/parsing/image-orientation-invalid.html" },
+    { "path": "css/css-images/parsing/image-orientation-computed.html" },
+    { "path": "css/css-images/image-orientation/image-orientation-from-image-computed-style.html" },
+    { "path": "css/css-images/image-orientation/image-orientation-none-computed-style.html" },
+    { "path": "css/compositing/parsing/background-blend-mode-valid.html" },
+    { "path": "css/compositing/parsing/background-blend-mode-invalid.html" },
+    { "path": "css/compositing/parsing/background-blend-mode-computed.html" },
+    { "path": "css/compositing/parsing/background-blend-mode-computed-multiple.html" }
+  ]
+}
