@@ -127,6 +127,8 @@ mod leaf_background_paint_tests;
 mod leaf_paint;
 #[cfg(test)]
 mod native_scroll_clock_tests;
+#[cfg(test)]
+mod scroll_anchor_tests;
 mod trusted_types;
 #[cfg(test)]
 mod trusted_types_tests;
@@ -2121,6 +2123,12 @@ struct AdjustedLayoutCache {
     hit_test: crate::paint::HitTestTree,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ScrollAnchorSnapshot {
+    anchor_node_id: usize,
+    relative_y: f32,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct DocumentPaintRevision {
     source: u64,
@@ -2418,6 +2426,7 @@ struct HostState {
     /// Effective element offsets captured before invalidating layout. Reflow
     /// compares these with the rebuilt scrolling extents to detect clamps.
     scroll_offsets_before_layout: HashMap<usize, (f32, f32)>,
+    scroll_anchors_before_layout: HashMap<usize, ScrollAnchorSnapshot>,
     /// Per-document cached style resolvers, keyed by the identity of each
     /// document's root [`Document`] node (the top-level document and every
     /// `<iframe>` sub-browsing-context document). Each entry is rebuilt on
@@ -3366,6 +3375,7 @@ impl HostState {
             pending_layout_observer_documents: Vec::new(),
             smooth_scrolls: Vec::new(),
             scroll_offsets_before_layout: HashMap::new(),
+            scroll_anchors_before_layout: HashMap::new(),
             document_styles,
             main_shadow_masks: main_shadow_mask_cache::MainDocumentShadowMaskOwner::new(
                 document.identity(),
@@ -7466,6 +7476,79 @@ impl HostState {
             }
         }
         capture(layout_root, &mut self.scroll_offsets_before_layout);
+
+        let document_id = self.document.identity();
+        let Some(resolver) = self
+            .document_styles
+            .get_mut(&document_id)
+            .and_then(|entry| entry.resolver.as_mut())
+        else {
+            return;
+        };
+        fn anchor_enabled(layout: &LayoutBox, resolver: &mut StyleResolver) -> bool {
+            !matches!(
+                resolver
+                    .computed_style(&layout.node)
+                    .get("overflow-anchor"),
+                Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none")
+            )
+        }
+        fn first_visible_anchor<'a>(
+            layout: &'a LayoutBox,
+            resolver: &mut StyleResolver,
+            visible_top: f32,
+            visible_bottom: f32,
+            excluded: bool,
+        ) -> Option<&'a LayoutBox> {
+            let excluded = excluded || !anchor_enabled(layout, resolver);
+            if excluded {
+                return None;
+            }
+            let border = layout.dimensions.border_box();
+            if border.y < visible_bottom && border.y + border.height > visible_top {
+                return Some(layout);
+            }
+            layout.children.iter().find_map(|child| {
+                first_visible_anchor(child, resolver, visible_top, visible_bottom, excluded)
+            })
+        }
+        fn capture_anchors(
+            layout: &LayoutBox,
+            resolver: &mut StyleResolver,
+            anchors: &mut HashMap<usize, ScrollAnchorSnapshot>,
+        ) {
+            if layout.is_scroll_container() {
+                let (_, scroll_y) = layout.scroll_offset();
+                if scroll_y > 0.0 && anchor_enabled(layout, resolver) {
+                    let padding_top = layout.dimensions.content.y - layout.dimensions.padding.top;
+                    let visible_top = padding_top + scroll_y;
+                    let visible_bottom = visible_top
+                        + layout.dimensions.content.height
+                        + layout.dimensions.padding.top
+                        + layout.dimensions.padding.bottom;
+                    if let Some(anchor) = layout.children.iter().find_map(|child| {
+                        first_visible_anchor(child, resolver, visible_top, visible_bottom, false)
+                    }) {
+                        anchors
+                            .entry(layout.node.identity())
+                            .or_insert(ScrollAnchorSnapshot {
+                                anchor_node_id: anchor.node.identity(),
+                                relative_y: anchor.dimensions.border_box().y
+                                    - padding_top
+                                    - scroll_y,
+                            });
+                    }
+                }
+            }
+            for child in &layout.children {
+                capture_anchors(child, resolver, anchors);
+            }
+        }
+        capture_anchors(
+            layout_root,
+            resolver,
+            &mut self.scroll_anchors_before_layout,
+        );
     }
 
     fn queue_scroll_target(&mut self, node_id: usize) {
@@ -8125,15 +8208,51 @@ impl HostState {
         self.scroll_snap_cache.clear();
         self.invalidate_layout_metrics_cache();
         self.layout_root = layout;
+        let anchor_snapshots = std::mem::take(&mut self.scroll_anchors_before_layout);
+        let mut anchor_adjustments = Vec::new();
+        if let Some(layout_root) = self.layout_root.as_ref() {
+            for (container_id, snapshot) in anchor_snapshots {
+                let (Some(container_node), Some(anchor_node)) = (
+                    self.nodes.get(&container_id),
+                    self.nodes.get(&snapshot.anchor_node_id),
+                ) else {
+                    continue;
+                };
+                let (Some(container), Some(anchor)) = (
+                    find_layout_box(layout_root, container_node),
+                    find_layout_box(layout_root, anchor_node),
+                ) else {
+                    continue;
+                };
+                if !container.is_scroll_container() {
+                    continue;
+                }
+                let padding_top = container.dimensions.content.y - container.dimensions.padding.top;
+                let desired_y =
+                    anchor.dimensions.border_box().y - padding_top - snapshot.relative_y;
+                let (current_x, current_y) = container.scroll_offset();
+                let next_y = desired_y.clamp(0.0, container.max_scroll_offset().1);
+                if (next_y - current_y).abs() > f32::EPSILON {
+                    anchor_adjustments.push((container_node.clone(), current_x, next_y));
+                }
+            }
+        }
+        for (node, x, y) in &anchor_adjustments {
+            node.set_scroll_offset(*x, *y);
+            self.scroll_generation = self.scroll_generation.saturating_add(1);
+        }
         let previous_scroll_offsets = std::mem::take(&mut self.scroll_offsets_before_layout);
         let mut resnap_targets: Vec<_> = previous_scroll_offsets.keys().copied().collect();
         if self.window_scroll != (0.0, 0.0) {
             resnap_targets.push(document_id);
         }
-        let mut clamped_targets = Vec::new();
-        let mut paint_invalidated = false;
+        let mut clamped_targets = anchor_adjustments
+            .iter()
+            .map(|(node, _, _)| node.identity())
+            .collect::<Vec<_>>();
+        let mut paint_invalidated = !anchor_adjustments.is_empty();
         if let Some(layout_root) = self.layout_root.as_ref() {
-            for (node_id, previous) in previous_scroll_offsets {
+            for (node_id, _previous) in previous_scroll_offsets {
                 let Some(node) = self.nodes.get(&node_id) else {
                     continue;
                 };
@@ -8144,7 +8263,7 @@ impl HostState {
                     continue;
                 }
                 let next = layout.scroll_offset();
-                if previous != next {
+                if node.scroll_offset() != next {
                     node.set_scroll_offset(next.0, next.1);
                     self.scroll_generation = self.scroll_generation.saturating_add(1);
                     paint_invalidated = true;

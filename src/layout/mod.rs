@@ -5714,12 +5714,63 @@ fn edge_sizes_using_basis(style: &ComputedStyle, prefix: &str, basis: Option<f32
             })
             .unwrap_or(shorthand)
     });
-    EdgeSizes {
+    let mut edges = EdgeSizes {
         top: sides[0],
         right: sides[1],
         bottom: sides[2],
         left: sides[3],
+    };
+    if prefix == "padding" {
+        let gutter = scrollbar_gutter_edges(style);
+        edges.top += gutter.top;
+        edges.right += gutter.right;
+        edges.bottom += gutter.bottom;
+        edges.left += gutter.left;
     }
+    edges
+}
+
+pub(crate) fn scrollbar_thickness(style: &ComputedStyle) -> f32 {
+    match style.get_by_id(PropertyId::ScrollbarWidth) {
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("none") => 0.0,
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("thin") => 6.0,
+        _ => 12.0,
+    }
+}
+
+fn scrollbar_gutter_edges(style: &ComputedStyle) -> EdgeSizes {
+    let stable = matches!(
+        style.get_by_id(PropertyId::ScrollbarGutter),
+        Some(ComputedValue::Keyword(value)) if value.split_ascii_whitespace().any(|word| word.eq_ignore_ascii_case("stable"))
+    );
+    if !stable || overflow(style) != Overflow::Hidden {
+        return EdgeSizes::default();
+    }
+    let thickness = scrollbar_thickness(style);
+    if thickness == 0.0 {
+        return EdgeSizes::default();
+    }
+    let both_edges = matches!(
+        style.get_by_id(PropertyId::ScrollbarGutter),
+        Some(ComputedValue::Keyword(value)) if value.split_ascii_whitespace().any(|word| word.eq_ignore_ascii_case("both-edges"))
+    );
+    let rtl = matches!(
+        style.get_by_id(PropertyId::Direction),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("rtl")
+    );
+    let mut edges = EdgeSizes::default();
+    if rtl {
+        edges.left = thickness;
+        if both_edges {
+            edges.right = thickness;
+        }
+    } else {
+        edges.right = thickness;
+        if both_edges {
+            edges.left = thickness;
+        }
+    }
+    edges
 }
 
 /// Resolves one already-looked-up value with the existing definite-basis policy.
