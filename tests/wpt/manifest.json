@@ -1,5 +1,7 @@
 {
   "tests": [
+    { "path": "css/css-ui/accent-color-parsing.html" },
+    { "path": "css/css-ui/accent-color-computed.html" },
     { "path": "css/css-logical/parsing/margin-block-inline-computed.html" },
     { "path": "css/css-logical/parsing/margin-block-inline-invalid.html" },
     { "path": "css/css-logical/parsing/margin-block-inline-shorthand.html" },

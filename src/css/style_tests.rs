@@ -2232,6 +2232,19 @@ fn css_ui_properties_validate_initial_values_and_inheritance() {
 }
 
 #[test]
+fn accent_color_currentcolor_resolves_at_computed_value_time() {
+    let element = NodeHandle::element("div");
+    element.set_attribute("style", "color: blue; accent-color: currentcolor");
+    let mut resolver = StyleResolver::new();
+    let style = resolver.computed_style(&element);
+    assert_eq!(
+        style.get("accent-color"),
+        style.get("color"),
+        "accent-color currentcolor must resolve to the element's computed color"
+    );
+}
+
+#[test]
 fn scroll_boundary_properties_validate_and_compute() {
     for (property, value) in [
         ("scroll-behavior", "smooth"),

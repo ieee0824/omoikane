@@ -4497,6 +4497,7 @@ impl StyleResolver {
             &self.media_environment,
         );
         apply_initial_values(&mut properties);
+        resolve_accent_current_color(&mut properties);
         resolve_text_emphasis_style(&mut properties);
         properties.insert(
             "text-emphasis".to_string(),
@@ -16275,6 +16276,17 @@ fn resolve_column_rule_current_color(properties: &mut PropertyMap) {
     );
     if is_current_color {
         properties.copy_property("color", "column-rule-color");
+    }
+}
+
+fn resolve_accent_current_color(properties: &mut PropertyMap) {
+    let is_current_color = matches!(
+        properties.get(&PropertyId::AccentColor),
+        Some(ComputedValue::Color(value) | ComputedValue::Keyword(value))
+            if value.eq_ignore_ascii_case("currentcolor")
+    );
+    if is_current_color {
+        properties.copy_property("color", "accent-color");
     }
 }
 
