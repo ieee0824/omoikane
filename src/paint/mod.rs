@@ -12,6 +12,7 @@ pub(crate) mod color;
 pub(crate) mod color4;
 pub(crate) mod form_control;
 mod gradient_tiles;
+mod highlight;
 mod hit_test_order;
 use hit_test_order::HitTestPhaseCache;
 pub(crate) use hit_test_order::HitTestTree;

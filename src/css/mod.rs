@@ -27,11 +27,12 @@ pub(crate) use filter::{
     FilterFunction, interpolate_filter_lists, normalize_filter_list, parse_filter_list,
 };
 pub use matcher::{
-    PseudoElement, Specificity, matches_selector, matches_selector_with_pseudo,
+    PseudoElement, Specificity, highlight_name_key, matches_selector, matches_selector_with_pseudo,
     selector_pseudo_element, specificity,
 };
 pub(crate) use matcher::{
-    SelectorMatchCache, matches_selector_boundary_cached, matches_selector_cached,
+    SelectorMatchCache, highlight_pseudo_from_name, matches_selector_boundary_cached,
+    matches_selector_cached,
 };
 pub use media::{
     ForcedColorPalette, MediaEnvironment, MediaType, evaluate_media_query,

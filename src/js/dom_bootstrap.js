@@ -289,10 +289,12 @@ let omoikaneUserActivationState;
         "window", "self", "frames", "closed", "length", "top", "parent",
         "opener", "location", "close", "focus", "blur", "postMessage",
       ]);
+      // Window property access must not depend on page-mutable Set methods.
+      const isReportableProperty = Function.prototype.call.bind(Set.prototype.has, reportableProperties);
       let proxy;
       proxy = new Proxy(backingWindow, {
         get(target, property, receiver) {
-          if (reportableProperties.has(property)) nativeReportMainWindowAccess(property);
+          if (isReportableProperty(property)) nativeReportMainWindowAccess(property);
           return Reflect.get(target, property,
             windowHandlerReceiver(target, property, receiver, proxy));
         },
@@ -8334,6 +8336,7 @@ let omoikaneUserActivationState;
   }
 
   function selectionRangeMutated(range, kind = "reset", node = null, offset = 0) {
+    if (highlightChangeHook) highlightChangeHook();
     const state = traversalByDocument.get(traversalDocumentKey(range.__doc));
     if (state) state.documentBoundaryRangesOnly = undefined;
     if (!range.__selectionDocument) return;
@@ -23840,6 +23843,41 @@ let omoikaneUserActivationState;
   const mutationObservers = [];
   let hasLayoutObservers = false;
   let xpathMutationHook = null;
+  // CSS Custom Highlight API: highlight.js re-resolves its ranges after DOM
+  // or Range changes and reads Text intervals through these internals.
+  let highlightChangeHook = null;
+  globalThis.__omoikane_install_highlight_hooks = hook => {
+    highlightChangeHook = hook;
+    delete globalThis.__omoikane_install_highlight_hooks;
+    return { textIntervals: highlightTextIntervals, nodeId: node => internalNodeId(node) };
+  };
+  // Returns [[textNode, start, end], ...] for the Text data a boundary pair
+  // covers, in tree order. Invalid static boundaries yield no intervals.
+  function highlightTextIntervals(startNode, startOffset, endNode, endOffset) {
+    if (!startNode || !endNode || nodeRoot(startNode) !== nodeRoot(endNode)) return [];
+    startOffset = Math.min(startOffset, nodeLength(startNode));
+    endOffset = Math.min(endOffset, nodeLength(endNode));
+    if (boundaryCompare(startNode, startOffset, endNode, endOffset) >= 0) return [];
+    const result = [];
+    const pending = [commonAncestor(startNode, endNode)];
+    while (pending.length) {
+      const node = pending.pop();
+      const type = internalNodeType(node);
+      if (type === 3 || type === 4) {
+        const length = nodeLength(node);
+        const from = node === startNode ? startOffset : 0;
+        const to = node === endNode ? endOffset : length;
+        if (from < to && boundaryCompare(node, from, endNode, endOffset) < 0 &&
+            boundaryCompare(node, to, startNode, startOffset) > 0) {
+          result.push([node, from, to]);
+        }
+        continue;
+      }
+      const children = internalChildNodes(node);
+      for (let index = children.length - 1; index >= 0; index--) pending.push(children[index]);
+    }
+    return result;
+  }
   globalThis.__omoikane_install_xpath_mutation_hook = hook => {
     xpathMutationHook = hook;
     delete globalThis.__omoikane_install_xpath_mutation_hook;
@@ -23946,6 +23984,7 @@ let omoikaneUserActivationState;
   function queueMutation(target, type, init = {}, suppressObservers = false) {
     refreshWindowNamesForMutation(target, type, init);
     if (xpathMutationHook) xpathMutationHook(target);
+    if (highlightChangeHook) highlightChangeHook();
     if (type === "childList") customFormChildrenChanged(target, init);
     if (!suppressObservers) notifyFontMutation(target, type, init);
     for (const observer of suppressObservers ? [] : mutationObservers) {

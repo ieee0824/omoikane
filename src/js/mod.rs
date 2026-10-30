@@ -70,6 +70,7 @@ mod custom_states;
 mod dom_removal_trace;
 mod editability;
 mod frame_diagnostics;
+mod highlight;
 mod language;
 mod layout_structure;
 mod main_shadow_mask_cache;
@@ -648,6 +649,8 @@ const DOM_BOOTSTRAP: &str = concat!(
     include_str!("font_loading.js"),
     "\n",
     include_str!("window_members.js"),
+    "\n",
+    include_str!("highlight.js"),
     "\n",
     include_str!("find_in_page.js")
 );
@@ -16542,6 +16545,7 @@ fn register_host_bindings(
     )?;
     language::register(context, &mut bindings)?;
     window_members::register(context, &mut bindings)?;
+    highlight::register(context, &mut bindings)?;
     register_private_callable(
         context,
         &mut bindings,
@@ -20274,7 +20278,13 @@ fn resolve_native_computed_style(
     let pseudo = match args.get(1) {
         Some(value) if !value.is_null_or_undefined() => {
             let name = value.to_string(context)?.to_std_string_escaped();
-            if name.starts_with(':') {
+            if name.len() > 12 && name[..12].eq_ignore_ascii_case("::highlight(") {
+                // The custom highlight name stays case-sensitive.
+                match crate::css::highlight_pseudo_from_name(&name[2..]) {
+                    Some(pseudo) => Some(pseudo),
+                    None => return Ok(None),
+                }
+            } else if name.starts_with(':') {
                 match name.trim().to_ascii_lowercase().as_str() {
                     ":before" | "::before" => Some(PseudoElement::Before),
                     ":after" | "::after" => Some(PseudoElement::After),
