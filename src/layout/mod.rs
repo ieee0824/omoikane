@@ -6687,17 +6687,35 @@ fn layout_positioned_child_mode(
         layout_child.dimensions.content.width =
             positioned_auto_content_width(child, resolver, style, &layout_child, origin.width);
     }
+    // Block layout centers a definite width with auto margins, but an
+    // absolutely positioned box only distributes them between two definite
+    // insets; otherwise they are zero (CSS 2.1 §10.3.7).
+    if left.is_none() || right.is_none() {
+        if margin_start_is_auto(style) {
+            layout_child.dimensions.margin.left = 0.0;
+        }
+        if margin_end_is_auto(style) {
+            layout_child.dimensions.margin.right = 0.0;
+        }
+    }
     let outer_width = layout_child.total_width();
     let outer_height = layout_child.total_height();
+    let (auto_margin_x, auto_margin_y) = positioned_auto_margin_offsets(
+        style,
+        origin,
+        (left, right, top, bottom),
+        outer_width,
+        outer_height,
+    );
     let outer_x = if let Some(left) = left {
-        origin.x + left
+        origin.x + left + auto_margin_x
     } else if let Some(right) = right {
         origin.x + origin.width - outer_width - right
     } else {
         static_outer.x
     };
     let outer_y = if let Some(top) = top {
-        origin.y + top
+        origin.y + top + auto_margin_y
     } else if let Some(bottom) = bottom {
         origin.y + origin.height - outer_height - bottom
     } else {
@@ -6706,6 +6724,66 @@ fn layout_positioned_child_mode(
     translate_layout_box_to_outer(&mut layout_child, outer_x, outer_y, resolver);
     layout_child.z_index = z_index(style);
     Some(layout_child)
+}
+
+/// Resolves `auto` margins of an absolutely positioned box whose opposing
+/// insets are both definite (CSS 2.1 §10.3.7 and §10.6.4).
+///
+/// Returns the extra offsets from the start insets. Auto margins were laid out
+/// as zero, so the free space is what remains after the insets and the outer
+/// box. Two auto margins share it equally; on the horizontal axis a negative
+/// free space instead overflows the end side (right for `ltr`, left for `rtl`).
+fn positioned_auto_margin_offsets(
+    style: &ComputedStyle,
+    origin: Rect,
+    (left, right, top, bottom): (Option<f32>, Option<f32>, Option<f32>, Option<f32>),
+    outer_width: f32,
+    outer_height: f32,
+) -> (f32, f32) {
+    // `None` keeps an equal negative share; `Some(true)` clamps the start
+    // margin to zero, `Some(false)` clamps the end margin to zero.
+    let resolve = |start: Option<f32>,
+                   end: Option<f32>,
+                   available: f32,
+                   outer: f32,
+                   start_auto: bool,
+                   end_auto: bool,
+                   clamp_start: Option<bool>| {
+        let (Some(start), Some(end)) = (start, end) else {
+            return 0.0;
+        };
+        let free = available - start - end - outer;
+        match (start_auto, end_auto) {
+            (true, true) if free < 0.0 && clamp_start == Some(true) => 0.0,
+            (true, true) if free < 0.0 && clamp_start == Some(false) => free,
+            (true, true) => free / 2.0,
+            (true, false) => free,
+            _ => 0.0,
+        }
+    };
+    let rtl = matches!(
+        style.get("direction"),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("rtl")
+    );
+    let x = resolve(
+        left,
+        right,
+        origin.width,
+        outer_width,
+        margin_start_is_auto(style),
+        margin_end_is_auto(style),
+        Some(!rtl),
+    );
+    let y = resolve(
+        top,
+        bottom,
+        origin.height,
+        outer_height,
+        is_auto(style.get("margin-top")),
+        is_auto(style.get("margin-bottom")),
+        None,
+    );
+    (x, y)
 }
 
 fn relayout_fixed_descendants(

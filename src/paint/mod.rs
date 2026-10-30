@@ -3982,6 +3982,42 @@ fn hit_test_box(
     phase_cache: &mut HitTestPhaseCache,
 ) -> bool {
     if layout.node.is_inert() {
+        // A modal dialog makes the document inert, but its top-layer box is
+        // laid out as a child of the inert root and remains hit-testable.
+        for child in layout
+            .children
+            .iter()
+            .rev()
+            .filter(|child| child.node.top_layer_order().is_some())
+        {
+            if hit_test_box(
+                child,
+                resolver,
+                ancestor_transform,
+                inherited_clip,
+                viewport,
+                x,
+                y,
+                hits,
+                include_descendants,
+                phase_cache,
+            ) {
+                return true;
+            }
+            // The modal dialog's ::backdrop covers the viewport and targets
+            // its originating dialog; everything beneath it is inert.
+            if child.node.is_modal_dialog() && !child.node.is_inert() {
+                let backdrop_receives_events = accepts_pointer_events_value(
+                    resolver
+                        .computed_pseudo_style(&child.node, PseudoElement::Backdrop)
+                        .and_then(|style| style.get("pointer-events").cloned()),
+                );
+                if backdrop_receives_events && rect_contains_point(viewport, x, y) {
+                    hits.record(child.node.clone(), Some(PseudoElement::Backdrop));
+                    return true;
+                }
+            }
+        }
         return false;
     }
     let Some(HitTestGeometry {

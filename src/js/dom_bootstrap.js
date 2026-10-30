@@ -3321,6 +3321,11 @@ let omoikaneUserActivationState;
       }
     },
     focusWindow() { focusWindowAcrossDocuments(); },
+    consumeHistoryActivation() { consumeHistoryActionActivationInTree(); },
+    userActivation(descendants) {
+      grantLocalUserActivation();
+      if (descendants) activateSameOriginDescendants();
+    },
     enableEditing() { enableDocumentEditing(focusDocument); },
     commit(id, previousId, previousVisible, preventScroll) {
       const node = wrapNode(id);
@@ -3346,7 +3351,10 @@ let omoikaneUserActivationState;
   };
 
   function focusAcrossDocuments(doc, node, preventScroll) {
-    const docId = internalNodeId(doc);
+    focusAcrossDocumentIds(internalNodeId(doc), node, preventScroll);
+  }
+
+  function focusAcrossDocumentIds(docId, node, preventScroll) {
     if (!documentFocusChain(docId)) return;
     if (!nativePermissionsPolicyQuery(docId, "allowsFeature", "focus-without-user-activation") &&
         !fullscreenTransientActivation) return;
@@ -3387,7 +3395,18 @@ let omoikaneUserActivationState;
   }
 
   function focusElementAcrossDocuments(node, preventScroll) {
-    if (canBeFocused(node)) focusAcrossDocuments(internalOwnerDocument(node), node, preventScroll);
+    if (!canBeFocused(node)) return;
+    // HTML focusing steps: a navigable container with a content navigable
+    // focuses that navigable's active document viewport instead.
+    const tag = internalNodeType(node) === 1 ? String(node.localName) : "";
+    if ((tag === "iframe" || tag === "frame") && node.namespaceURI === HTML_NAMESPACE) {
+      const childId = nativeIframeContentDocument(internalNodeId(node));
+      if (childId !== null && childId !== undefined && documentFocusChain(childId)) {
+        focusAcrossDocumentIds(childId, null, preventScroll);
+        return;
+      }
+    }
+    focusAcrossDocuments(internalOwnerDocument(node), node, preventScroll);
   }
 
   function focusWindowAcrossDocuments() {
@@ -6480,6 +6499,19 @@ let omoikaneUserActivationState;
     return null;
   }
 
+  // The highest open auto popover that is a flat-tree ancestor of `node`.
+  function topmostAutoPopoverAncestor(node) {
+    const stack = autoPopoverStack(node.ownerDocument);
+    const ancestors = new Set();
+    for (let current = node.parentNode || node.host; current; current = current.parentNode || current.host) {
+      ancestors.add(current);
+    }
+    for (let index = stack.length - 1; index >= 0; index--) {
+      if (ancestors.has(stack[index])) return stack[index];
+    }
+    return null;
+  }
+
   function lightDismissAutoPopovers(doc, boundary) {
     const stack = autoPopoverStack(doc);
     const boundaryIndex = boundary ? stack.indexOf(boundary) : -1;
@@ -6876,6 +6908,25 @@ let omoikaneUserActivationState;
       closeWatcherManager.nextUserInteractionAllowsNewGroup = false;
     }
   }
+  // HTML "consume history-action user activation" clears the flag in every
+  // document of the top-level traversable; only same-origin documents are
+  // reachable from script here.
+  function consumeHistoryActionActivation() {
+    let top = __omoikane_document_id;
+    for (const [, parent] of documentFocusChain(__omoikane_document_id) || []) {
+      if (parent !== null) top = parent;
+    }
+    focusDocumentCommand(top, "consumeHistoryActivation");
+  }
+  function consumeHistoryActionActivationInTree() {
+    historyActionActivation = false;
+    for (const frameId of nativeIframeNodesInSubtree(__omoikane_document_id)) {
+      const childId = nativeIframeContentDocument(frameId);
+      if (childId !== null && childId !== undefined && childId !== __omoikane_document_id) {
+        focusDocumentCommand(childId, "consumeHistoryActivation");
+      }
+    }
+  }
   // Watchers whose owner left the document are destroyed lazily; `stale`
   // reports that state, standing in for the owners' removing steps.
   function pruneCloseWatchers() {
@@ -6934,7 +6985,7 @@ let omoikaneUserActivationState;
     finally { watcher.runningCancelAction = false; }
     if (!closeWatcherIsActive(watcher)) return true;
     if (!shouldContinue) {
-      historyActionActivation = false;
+      consumeHistoryActionActivation();
       return false;
     }
     closeCloseWatcher(watcher);
@@ -6966,7 +7017,27 @@ let omoikaneUserActivationState;
   // fullscreen, focus, pickers and Storage Access.
   let stickyUserActivation = false;
   omoikaneUserActivationState = () => [stickyUserActivation, fullscreenTransientActivation];
+  // HTML activation notification: an activation-triggering input activates
+  // this Window, every ancestor Window and each same-origin descendant.
   function grantFullscreenTransientActivation() {
+    grantLocalUserActivation();
+    for (const [, parent] of documentFocusChain(__omoikane_document_id) || []) {
+      if (parent !== null) focusDocumentCommand(parent, "userActivation", [false]);
+    }
+    activateSameOriginDescendants();
+  }
+
+  function activateSameOriginDescendants() {
+    for (const frameId of nativeIframeNodesInSubtree(__omoikane_document_id)) {
+      // The native lookup only returns a same-origin content document.
+      const childId = nativeIframeContentDocument(frameId);
+      if (childId !== null && childId !== undefined && childId !== __omoikane_document_id) {
+        focusDocumentCommand(childId, "userActivation", [true]);
+      }
+    }
+  }
+
+  function grantLocalUserActivation() {
     fullscreenTransientActivation = true;
     stickyUserActivation = true;
     notifyCloseWatchersOfUserActivation();
@@ -7168,7 +7239,9 @@ let omoikaneUserActivationState;
         }
         return;
       }
-      hideAllAutoPopovers(this.ownerDocument);
+      // HTML: hide popovers until the dialog's topmost popover ancestor, so a
+      // modal dialog inside an open popover keeps that popover open.
+      lightDismissAutoPopovers(this.ownerDocument, topmostAutoPopoverAncestor(this));
       this.__dialogPreviouslyFocused = focusedElementOf(this.ownerDocument);
       this.__dialogModal = true;
       this.open = true;
