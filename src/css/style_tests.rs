@@ -10939,6 +10939,53 @@ fn background_clip_resolves_initial_unset_and_inherit() {
 }
 
 #[test]
+fn css_images_ui_properties_validate_and_compute() {
+    let style = image_computed_style(
+        "background-image: none, none; \
+         background-clip: text, content-box; \
+         background-blend-mode: multiply, screen; \
+         image-rendering: pixelated; \
+         image-orientation: none;",
+    );
+    assert_eq!(
+        style.get("background-clip"),
+        Some(&ComputedValue::Keyword("text, content-box".to_string()))
+    );
+    assert_eq!(
+        style.get("background-blend-mode"),
+        Some(&ComputedValue::Keyword("multiply, screen".to_string()))
+    );
+    assert_eq!(
+        style.get("image-rendering"),
+        Some(&ComputedValue::Keyword("pixelated".to_string()))
+    );
+    assert_eq!(
+        style.get("image-orientation"),
+        Some(&ComputedValue::Keyword("none".to_string()))
+    );
+    for (property, value) in [
+        ("background-clip", "margin-box"),
+        ("background-blend-mode", "multiply bogus"),
+        ("image-rendering", "nearest-neighbor"),
+        ("image-orientation", "sideways"),
+    ] {
+        assert!(!supports_declaration(property, value));
+    }
+}
+
+#[test]
+fn image_set_keeps_typed_density_candidates_in_computed_style() {
+    let value = image_computed_keyword(
+        "background-image: image-set(url(\"one.png\") 1x, url(\"two.png\") 192dpi)",
+        "background-image",
+    );
+    assert_eq!(
+        value,
+        "image-set(url(\"one.png\") 1dppx, url(\"two.png\") 192dpi)"
+    );
+}
+
+#[test]
 fn invalid_conic_angle_syntax_drops_the_whole_declaration() {
     for invalid in [
         "conic-gradient(from to right, red, blue)",

@@ -1,5 +1,5 @@
 //! Exact integer image copies; callers retain animation and recording ownership.
-use super::{Canvas, Color, Image, Rect, blend_pixel};
+use super::{Canvas, Color, Image, ImageSampling, Rect, blend_pixel};
 use std::ops::Range;
 
 impl Canvas {
@@ -97,7 +97,7 @@ mod tests {
             ..(area.x + area.width).ceil().min(canvas.width as f32) as i32;
         let ys = area.y.floor().max(0.0) as i32
             ..(area.y + area.height).ceil().min(canvas.height as f32) as i32;
-        canvas.draw_scaled_image_pixels(image, rect, opacity, xs, ys);
+        canvas.draw_scaled_image_pixels(image, rect, opacity, ImageSampling::Legacy, xs, ys);
     }
 
     #[test]

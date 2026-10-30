@@ -114,6 +114,7 @@ pub(crate) fn transition_cache_scope(property: &str) -> TransitionCacheScope {
             | PropertyId::TextDecorationColor
             | PropertyId::TextEmphasisColor
             | PropertyId::BackgroundAttachment
+            | PropertyId::BackgroundBlendMode
             | PropertyId::BackgroundClip
             | PropertyId::BackgroundColor
             | PropertyId::BackgroundImage
@@ -1927,6 +1928,7 @@ mod tests {
                 "accent-color",
                 "backdrop-filter",
                 "background-attachment",
+                "background-blend-mode",
                 "background-clip",
                 "background-color",
                 "background-image",

@@ -928,7 +928,7 @@ let omoikaneUserActivationState;
       element, callbackName, oldValue, newValue, callbackNamespace
     );
     if (callbackName === "popover") popoverAttributeChanged(element, oldValue, newValue);
-    if (callbackName === "popovertarget") clearPopoverTargetOverride(element);
+    clearElementReflectionOverride(element, callbackName);
     if (callbackName === "slot" ||
         (callbackName === "name" && element instanceof HTMLSlotElement)) {
       refreshSlotAssignments();
@@ -2649,6 +2649,24 @@ let omoikaneUserActivationState;
     get [Symbol.toStringTag]() { return "ToggleEvent"; }
   }
 
+  // HTML Invoker Commands: fired at a commandfor target before its command runs.
+  class CommandEvent extends Event {
+    constructor(type, init = {}) {
+      if (arguments.length === 0) throw new TypeError("CommandEvent requires an event type");
+      init = init ?? {};
+      const source = init.source ?? null;
+      if (source !== null && !(source instanceof Element)) {
+        throw new TypeError("CommandEvent source must be an Element or null");
+      }
+      super(type, init);
+      this.__source = source;
+      this.__command = init.command === undefined ? "" : String(init.command);
+    }
+    get source() { return retargetNode(this.__source, this.currentTarget); }
+    get command() { return this.__command; }
+    get [Symbol.toStringTag]() { return "CommandEvent"; }
+  }
+
   class MessageEvent extends Event {
     constructor(type, init = {}) {
       init = init ?? {};
@@ -2972,7 +2990,8 @@ let omoikaneUserActivationState;
 
   function setEventPathRelatedTarget(event, value) {
     if (safeWeakMapGet(submissionRelatedTargets, event) === undefined) {
-      event.relatedTarget = value;
+      // Only event interfaces with a relatedTarget attribute expose one.
+      if ("relatedTarget" in event) event.relatedTarget = value;
     } else {
       safeWeakMapSet(submissionRelatedTargets, event, value);
     }
@@ -3304,6 +3323,11 @@ let omoikaneUserActivationState;
       }
     },
     focusWindow() { focusWindowAcrossDocuments(); },
+    consumeHistoryActivation() { consumeHistoryActionActivationInTree(); },
+    userActivation(descendants) {
+      grantLocalUserActivation();
+      if (descendants) activateSameOriginDescendants();
+    },
     enableEditing() { enableDocumentEditing(focusDocument); },
     commit(id, previousId, previousVisible, preventScroll) {
       const node = wrapNode(id);
@@ -3329,7 +3353,10 @@ let omoikaneUserActivationState;
   };
 
   function focusAcrossDocuments(doc, node, preventScroll) {
-    const docId = internalNodeId(doc);
+    focusAcrossDocumentIds(internalNodeId(doc), node, preventScroll);
+  }
+
+  function focusAcrossDocumentIds(docId, node, preventScroll) {
     if (!documentFocusChain(docId)) return;
     if (!nativePermissionsPolicyQuery(docId, "allowsFeature", "focus-without-user-activation") &&
         !fullscreenTransientActivation) return;
@@ -3370,7 +3397,18 @@ let omoikaneUserActivationState;
   }
 
   function focusElementAcrossDocuments(node, preventScroll) {
-    if (canBeFocused(node)) focusAcrossDocuments(internalOwnerDocument(node), node, preventScroll);
+    if (!canBeFocused(node)) return;
+    // HTML focusing steps: a navigable container with a content navigable
+    // focuses that navigable's active document viewport instead.
+    const tag = internalNodeType(node) === 1 ? String(node.localName) : "";
+    if ((tag === "iframe" || tag === "frame") && node.namespaceURI === HTML_NAMESPACE) {
+      const childId = nativeIframeContentDocument(internalNodeId(node));
+      if (childId !== null && childId !== undefined && documentFocusChain(childId)) {
+        focusAcrossDocumentIds(childId, null, preventScroll);
+        return;
+      }
+    }
+    focusAcrossDocuments(internalOwnerDocument(node), node, preventScroll);
   }
 
   function focusWindowAcrossDocuments() {
@@ -4766,7 +4804,7 @@ let omoikaneUserActivationState;
       });
       notifyCustomElementAttributeChanged(this, record[2], oldValue, null, record[1]);
       if (record[2] === "popover") popoverAttributeChanged(this, oldValue, null);
-      if (record[2] === "popovertarget") clearPopoverTargetOverride(this);
+      clearElementReflectionOverride(this, record[2]);
       if (record[2] === "slot" ||
           (record[2] === "name" && this instanceof HTMLSlotElement)) {
         refreshSlotAssignments();
@@ -4825,7 +4863,7 @@ let omoikaneUserActivationState;
       notifyCustomElementAttributeChanged(this, entry[2], entry[3], null, ns);
       if (ns === null) {
         if (entry[2] === "popover") popoverAttributeChanged(this, entry[3], null);
-        if (entry[2] === "popovertarget") clearPopoverTargetOverride(this);
+        clearElementReflectionOverride(this, entry[2]);
         if (entry[2] === "slot" ||
             (entry[2] === "name" && this instanceof HTMLSlotElement)) {
           refreshSlotAssignments();
@@ -5366,6 +5404,23 @@ let omoikaneUserActivationState;
         type = (this.type || "").toLowerCase();
       } catch (_e) {
         type = "";
+      }
+      if (tag === "BUTTON") {
+        const form = this.__owningForm();
+        if (form && (type === "submit" || type === "reset")) {
+          // Submit and reset buttons with a form owner keep their form behavior.
+        } else {
+          // An Auto-state button (missing or invalid type) with command
+          // attributes inside a form is ambiguous and does nothing.
+          const rawType = (this.getAttribute("type") || "").toLowerCase();
+          if (form && !["submit", "reset", "button"].includes(rawType) &&
+              (this.hasAttribute("command") || this.hasAttribute("commandfor"))) return;
+          const commandTarget = commandForElementFor(this);
+          if (commandTarget) {
+            runButtonCommand(this, commandTarget);
+            return;
+          }
+        }
       }
       const popoverTarget = popoverTargetElementFor(this);
       const isPopoverInvoker = isPopoverInvokerControl(this);
@@ -6305,6 +6360,7 @@ let omoikaneUserActivationState;
   const popoverData = new WeakMap();
   const autoPopoversByDocument = new WeakMap();
   const popoverTargetOverrides = new WeakMap();
+  const commandForOverrides = new WeakMap();
   let lightDismissPointerDown = null;
 
   function popoverType(element) {
@@ -6322,6 +6378,7 @@ let omoikaneUserActivationState;
         topLayerOrder: -1,
         transition: null,
         pendingToggle: null,
+        closeWatcher: null,
       };
       popoverData.set(element, data);
     }
@@ -6444,6 +6501,19 @@ let omoikaneUserActivationState;
     return null;
   }
 
+  // The highest open auto popover that is a flat-tree ancestor of `node`.
+  function topmostAutoPopoverAncestor(node) {
+    const stack = autoPopoverStack(node.ownerDocument);
+    const ancestors = new Set();
+    for (let current = node.parentNode || node.host; current; current = current.parentNode || current.host) {
+      ancestors.add(current);
+    }
+    for (let index = stack.length - 1; index >= 0; index--) {
+      if (ancestors.has(stack[index])) return stack[index];
+    }
+    return null;
+  }
+
   function lightDismissAutoPopovers(doc, boundary) {
     const stack = autoPopoverStack(doc);
     const boundaryIndex = boundary ? stack.indexOf(boundary) : -1;
@@ -6498,7 +6568,14 @@ let omoikaneUserActivationState;
       data.previouslyFocused = focusedElementOf(element.ownerDocument);
       browsingInput.removalMayAffectTopLayer = true;
       data.topLayerOrder = nativeSetPopoverOpen(element.__id, true);
-      if (popoverType(element) === "auto") autoPopoverStack(element.ownerDocument).push(element);
+      if (popoverType(element) === "auto") {
+        autoPopoverStack(element.ownerDocument).push(element);
+        data.closeWatcher = establishCloseWatcher({
+          cancelAction: () => true,
+          closeAction: () => hidePopoverInternal(element, { restoreFocus: true }),
+          stale: () => !isPopoverOpen(element) || !element.isConnected,
+        });
+      }
       focusPopover(element);
       queuePopoverToggle(element, "closed", "open", source);
     } finally {
@@ -6523,6 +6600,10 @@ let omoikaneUserActivationState;
       const doc = element.ownerDocument;
       const focused = doc ? focusedElementOf(doc) : null;
       nativeSetPopoverOpen(element.__id, false);
+      if (data.closeWatcher) {
+        destroyCloseWatcher(data.closeWatcher);
+        data.closeWatcher = null;
+      }
       const stack = doc ? autoPopoverStack(doc) : [];
       const index = stack.indexOf(element);
       if (index >= 0) stack.splice(index, 1);
@@ -6596,8 +6677,10 @@ let omoikaneUserActivationState;
     }
   }
 
-  function clearPopoverTargetOverride(control) {
-    popoverTargetOverrides.delete(control);
+  // Setting a reflected content attribute drops its explicitly set element.
+  function clearElementReflectionOverride(control, attributeName) {
+    if (attributeName === "popovertarget") popoverTargetOverrides.delete(control);
+    else if (attributeName === "commandfor") commandForOverrides.delete(control);
   }
   class HTMLHtmlElement extends HTMLElement {
     constructor(...args) {
@@ -6707,13 +6790,223 @@ let omoikaneUserActivationState;
     }
   }
 
-  function performDialogEscapeDefault(doc) {
-    const stack = modalDialogStack(doc);
-    const dialog = stack[stack.length - 1];
-    if (!dialog) return false;
-    const notCanceled = dialog.dispatchEvent(new Event("cancel", { cancelable: true }));
-    if (notCanceled) dialog.close();
+  // Open dialogs in show order, per Document (HTML "open dialogs list").
+  const openDialogsByDocument = new WeakMap();
+  function openDialogsList(doc) {
+    let list = openDialogsByDocument.get(doc);
+    if (!list) {
+      list = [];
+      openDialogsByDocument.set(doc, list);
+    }
+    for (let index = list.length - 1; index >= 0; index--) {
+      if (!list[index].isConnected || !list[index].open) list.splice(index, 1);
+    }
+    return list;
+  }
+  function dialogComputedClosedBy(dialog) {
+    const value = (dialog.getAttribute("closedby") || "").trim().toLowerCase();
+    if (value === "any" || value === "closerequest" || value === "none") return value;
+    return dialog.__dialogModal ? "closerequest" : "none";
+  }
+  // Dialogs made open by their attribute (markup or setAttribute) get the
+  // close watcher and open-dialogs entry HTML gives them when they connect.
+  // Omoikane registers them lazily before handling a close request.
+  function registerOpenAttributeDialogs(doc) {
+    if (!doc || typeof doc.querySelectorAll !== "function") return;
+    const list = openDialogsList(doc);
+    for (const dialog of doc.querySelectorAll("dialog[open]")) {
+      if (!(dialog instanceof HTMLDialogElement) || list.includes(dialog)) continue;
+      list.push(dialog);
+      if (!dialog.__dialogCloseWatcher || !closeWatcherIsActive(dialog.__dialogCloseWatcher)) {
+        setDialogCloseWatcher(dialog);
+      }
+    }
+  }
+  function setDialogCloseWatcher(dialog) {
+    dialog.__dialogCloseWatcher = establishCloseWatcher({
+      cancelAction: canPreventClose =>
+        dialog.dispatchEvent(new Event("cancel", { cancelable: canPreventClose })),
+      closeAction: () => {
+        const result = dialog.__dialogRequestCloseReturnValue ?? null;
+        if (result === null) dialog.close();
+        else dialog.close(result);
+      },
+      enabled: () => Boolean(dialog.__dialogRequestCloseEnabled) ||
+        dialogComputedClosedBy(dialog) !== "none",
+      stale: () => !dialog.open || !dialog.isConnected,
+    });
+  }
+  function requestCloseDialog(dialog, result) {
+    // A disconnected dialog keeps its open attribute but cannot be closed by request.
+    if (!dialog.open || !dialog.isConnected) return;
+    const watcher = dialog.__dialogCloseWatcher;
+    if (!watcher || !closeWatcherIsActive(watcher)) {
+      // Inactive documents have no close watcher to request.
+      if (dialog.ownerDocument?.defaultView === null) return;
+      registerOpenAttributeDialogs(dialog.ownerDocument);
+      if (!dialog.__dialogCloseWatcher || !closeWatcherIsActive(dialog.__dialogCloseWatcher)) return;
+      return requestCloseDialog(dialog, result);
+    }
+    dialog.__dialogRequestCloseEnabled = true;
+    dialog.__dialogRequestCloseReturnValue = result;
+    try { requestCloseWatcherClose(watcher, false); }
+    finally { dialog.__dialogRequestCloseEnabled = false; }
+  }
+  // HTML "nearest clicked dialog": the open dialog containing the pointer
+  // target, or null for a click on a modal dialog's backdrop.
+  function nearestClickedDialog(target, init) {
+    if (target instanceof HTMLDialogElement && target.open && target.__dialogModal &&
+        init && Number.isFinite(Number(init.clientX)) && Number.isFinite(Number(init.clientY))) {
+      const rect = target.getBoundingClientRect();
+      const x = Number(init.clientX), y = Number(init.clientY);
+      if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return null;
+    }
+    for (let node = target; node; node = node.parentNode || node.host || null) {
+      if (node instanceof HTMLDialogElement && node.open) return node;
+    }
+    return null;
+  }
+  // HTML "light dismiss open dialogs" for closedby=any.
+  // `undefined` means no pointerdown is pending, so a pointerup/mouseup pair
+  // from one press dismisses at most once.
+  let dialogPointerDownTarget;
+  function lightDismissOpenDialogs(doc, type, target, init) {
+    registerOpenAttributeDialogs(doc);
+    const dialogs = openDialogsList(doc);
+    if (!dialogs.length) {
+      dialogPointerDownTarget = undefined;
+      return;
+    }
+    const ancestor = nearestClickedDialog(target, init);
+    if (type === "pointerdown" || type === "mousedown") {
+      dialogPointerDownTarget = ancestor;
+      return;
+    }
+    if (dialogPointerDownTarget === undefined) return;
+    const sameTarget = ancestor === dialogPointerDownTarget;
+    dialogPointerDownTarget = undefined;
+    if (!sameTarget) return;
+    const topmost = dialogs[dialogs.length - 1];
+    if (ancestor === topmost || dialogComputedClosedBy(topmost) !== "any") return;
+    requestCloseDialog(topmost, null);
+  }
+
+  // HTML §6.10.1 close watchers. Each Window owns one manager; dialogs, auto
+  // popovers and CloseWatcher objects share it, so a close request (Escape)
+  // reaches the most recently established watchers first. Without user
+  // activation between them, watchers join one group and close together.
+  const closeWatcherManager = {
+    groups: [],
+    allowedNumberOfGroups: 1,
+    nextUserInteractionAllowsNewGroup: true,
+  };
+  // History-action activation: granted by user activation, consumed when a
+  // cancel listener prevents a close request.
+  let historyActionActivation = false;
+  function notifyCloseWatchersOfUserActivation() {
+    historyActionActivation = true;
+    if (closeWatcherManager.nextUserInteractionAllowsNewGroup) {
+      closeWatcherManager.allowedNumberOfGroups++;
+      closeWatcherManager.nextUserInteractionAllowsNewGroup = false;
+    }
+  }
+  // HTML "consume history-action user activation" clears the flag in every
+  // document of the top-level traversable; only same-origin documents are
+  // reachable from script here.
+  function consumeHistoryActionActivation() {
+    let top = __omoikane_document_id;
+    for (const [, parent] of documentFocusChain(__omoikane_document_id) || []) {
+      if (parent !== null) top = parent;
+    }
+    focusDocumentCommand(top, "consumeHistoryActivation");
+  }
+  function consumeHistoryActionActivationInTree() {
+    historyActionActivation = false;
+    for (const frameId of nativeIframeNodesInSubtree(__omoikane_document_id)) {
+      const childId = nativeIframeContentDocument(frameId);
+      if (childId !== null && childId !== undefined && childId !== __omoikane_document_id) {
+        focusDocumentCommand(childId, "consumeHistoryActivation");
+      }
+    }
+  }
+  // Watchers whose owner left the document are destroyed lazily; `stale`
+  // reports that state, standing in for the owners' removing steps.
+  function pruneCloseWatchers() {
+    const groups = closeWatcherManager.groups;
+    for (let index = groups.length - 1; index >= 0; index--) {
+      const group = groups[index];
+      for (let position = group.length - 1; position >= 0; position--) {
+        if (group[position].stale()) group.splice(position, 1);
+      }
+      if (!group.length) groups.splice(index, 1);
+    }
+  }
+  function establishCloseWatcher({ cancelAction, closeAction, enabled, stale }) {
+    pruneCloseWatchers();
+    const watcher = {
+      cancelAction, closeAction,
+      enabled: enabled || (() => true),
+      stale: stale || (() => false),
+      runningCancelAction: false,
+    };
+    const groups = closeWatcherManager.groups;
+    if (groups.length < closeWatcherManager.allowedNumberOfGroups) groups.push([watcher]);
+    else groups[groups.length - 1].push(watcher);
+    closeWatcherManager.nextUserInteractionAllowsNewGroup = true;
+    return watcher;
+  }
+  function closeWatcherIsActive(watcher) {
+    return closeWatcherManager.groups.some(group => group.includes(watcher));
+  }
+  function destroyCloseWatcher(watcher) {
+    const groups = closeWatcherManager.groups;
+    for (let index = groups.length - 1; index >= 0; index--) {
+      const position = groups[index].indexOf(watcher);
+      if (position < 0) continue;
+      groups[index].splice(position, 1);
+      if (!groups[index].length) groups.splice(index, 1);
+      return;
+    }
+  }
+  function closeCloseWatcher(watcher) {
+    if (!closeWatcherIsActive(watcher) || !watcher.enabled()) return;
+    destroyCloseWatcher(watcher);
+    watcher.closeAction();
+  }
+  // Returns false only when a cancel listener prevented the close.
+  function requestCloseWatcherClose(watcher, requireHistoryActionActivation) {
+    if (!closeWatcherIsActive(watcher) || !watcher.enabled() || watcher.runningCancelAction) {
+      return true;
+    }
+    const canPreventClose = !requireHistoryActionActivation ||
+      (closeWatcherManager.groups.length < closeWatcherManager.allowedNumberOfGroups &&
+        historyActionActivation);
+    watcher.runningCancelAction = true;
+    let shouldContinue;
+    try { shouldContinue = watcher.cancelAction(canPreventClose); }
+    finally { watcher.runningCancelAction = false; }
+    if (!closeWatcherIsActive(watcher)) return true;
+    if (!shouldContinue) {
+      consumeHistoryActionActivation();
+      return false;
+    }
+    closeCloseWatcher(watcher);
     return true;
+  }
+  // Handles a close request; returns whether any watcher received it.
+  function processCloseWatchers() {
+    pruneCloseWatchers();
+    let processed = false;
+    const groups = closeWatcherManager.groups;
+    if (groups.length) {
+      const group = groups[groups.length - 1].slice();
+      for (let index = group.length - 1; index >= 0; index--) {
+        processed = true;
+        if (!requestCloseWatcherClose(group[index], true)) break;
+      }
+    }
+    if (closeWatcherManager.allowedNumberOfGroups > 1) closeWatcherManager.allowedNumberOfGroups--;
+    return processed;
   }
 
   let fullscreenTransientActivation = false;
@@ -6726,9 +7019,30 @@ let omoikaneUserActivationState;
   // fullscreen, focus, pickers and Storage Access.
   let stickyUserActivation = false;
   omoikaneUserActivationState = () => [stickyUserActivation, fullscreenTransientActivation];
+  // HTML activation notification: an activation-triggering input activates
+  // this Window, every ancestor Window and each same-origin descendant.
   function grantFullscreenTransientActivation() {
+    grantLocalUserActivation();
+    for (const [, parent] of documentFocusChain(__omoikane_document_id) || []) {
+      if (parent !== null) focusDocumentCommand(parent, "userActivation", [false]);
+    }
+    activateSameOriginDescendants();
+  }
+
+  function activateSameOriginDescendants() {
+    for (const frameId of nativeIframeNodesInSubtree(__omoikane_document_id)) {
+      // The native lookup only returns a same-origin content document.
+      const childId = nativeIframeContentDocument(frameId);
+      if (childId !== null && childId !== undefined && childId !== __omoikane_document_id) {
+        focusDocumentCommand(childId, "userActivation", [true]);
+      }
+    }
+  }
+
+  function grantLocalUserActivation() {
     fullscreenTransientActivation = true;
     stickyUserActivation = true;
+    notifyCloseWatchersOfUserActivation();
     const generation = ++fullscreenActivationGeneration;
     const pointerGeneration = nativePointerLockActivation(true, 0);
     scheduleFullscreenActivationExpiry(() => {
@@ -6871,19 +7185,11 @@ let omoikaneUserActivationState;
     }
   }
 
+  // Escape first leaves fullscreen; otherwise it is a close request.
   function performTopLayerEscapeDefault(doc) {
     if (fullyExitFullscreenForUser(doc)) return true;
-    const popoverStack = autoPopoverStack(doc);
-    const popover = popoverStack[popoverStack.length - 1] || null;
-    const dialogs = modalDialogStack(doc);
-    const dialog = dialogs[dialogs.length - 1] || null;
-    const popoverOrder = popover ? popoverDataFor(popover).topLayerOrder : -1;
-    const dialogOrder = dialog ? Number(dialog.__dialogTopLayerOrder ?? -1) : -1;
-    if (popover && popoverOrder > dialogOrder) {
-      hidePopoverInternal(popover, { restoreFocus: true });
-      return true;
-    }
-    return performDialogEscapeDefault(doc);
+    registerOpenAttributeDialogs(doc);
+    return processCloseWatchers();
   }
 
   class HTMLDialogElement extends HTMLElement {
@@ -6921,6 +7227,8 @@ let omoikaneUserActivationState;
       nativeSetModalDialog(this.__id, false);
       this.__dialogPreviouslyFocused = focusedElementOf(this.ownerDocument);
       this.open = true;
+      openDialogsList(this.ownerDocument).push(this);
+      setDialogCloseWatcher(this);
       focusDialog(this);
     }
     showModal() {
@@ -6933,19 +7241,31 @@ let omoikaneUserActivationState;
         }
         return;
       }
-      hideAllAutoPopovers(this.ownerDocument);
+      // HTML: hide popovers until the dialog's topmost popover ancestor, so a
+      // modal dialog inside an open popover keeps that popover open.
+      lightDismissAutoPopovers(this.ownerDocument, topmostAutoPopoverAncestor(this));
       this.__dialogPreviouslyFocused = focusedElementOf(this.ownerDocument);
       this.__dialogModal = true;
       this.open = true;
       browsingInput.removalMayAffectTopLayer = true;
       this.__dialogTopLayerOrder = nativeSetModalDialog(this.__id, true);
       modalDialogStack(this.ownerDocument).push(this);
+      openDialogsList(this.ownerDocument).push(this);
+      setDialogCloseWatcher(this);
       focusDialog(this);
     }
     close(result) {
       if (!this.open) return;
-      if (arguments.length > 0) this.returnValue = result;
+      if (arguments.length > 0 && result !== null && result !== undefined) this.returnValue = result;
       const doc = this.ownerDocument;
+      if (this.__dialogCloseWatcher) {
+        destroyCloseWatcher(this.__dialogCloseWatcher);
+        this.__dialogCloseWatcher = null;
+      }
+      this.__dialogRequestCloseReturnValue = null;
+      const openDialogs = openDialogsList(doc);
+      const openIndex = openDialogs.indexOf(this);
+      if (openIndex >= 0) openDialogs.splice(openIndex, 1);
       const stack = modalDialogStack(doc);
       const index = stack.indexOf(this);
       if (index >= 0) stack.splice(index, 1);
@@ -6961,16 +7281,19 @@ let omoikaneUserActivationState;
           (wasModal || (focused && this.contains(focused)))) {
         previous.focus();
       }
-      this.dispatchEvent(new Event("close"));
-    }
-    requestClose(result) {
-      if (!this.open) return;
-      const notCanceled = this.dispatchEvent(new Event("cancel", { cancelable: true }));
-      if (notCanceled) {
-        if (arguments.length > 0) this.close(result);
-        else this.close();
+      // HTML queues the close event as an element task.
+      const fireClose = () => this.dispatchEvent(new Event("close"));
+      if (typeof __omoikane_queue_dom_manipulation_task === "function") {
+        __omoikane_queue_dom_manipulation_task(fireClose);
+      } else {
+        setTimeout(fireClose, 0);
       }
     }
+    requestClose(result) {
+      requestCloseDialog(this, result === undefined || result === null ? null : String(result));
+    }
+    get closedBy() { return dialogComputedClosedBy(this); }
+    set closedBy(value) { this.setAttribute("closedby", String(value)); }
   }
 
   const pendingDetailsToggles = new WeakMap();
@@ -7327,7 +7650,7 @@ let omoikaneUserActivationState;
     notifyCustomElementAttributeChanged(element, localName, oldValue, value, namespace);
     if (namespace === null) {
       if (localName === "popover") popoverAttributeChanged(element, oldValue, value);
-      if (localName === "popovertarget") clearPopoverTargetOverride(element);
+      clearElementReflectionOverride(element, localName);
       if (localName === "slot" ||
           (localName === "name" && element instanceof HTMLSlotElement)) {
         refreshSlotAssignments();
@@ -16163,7 +16486,7 @@ let omoikaneUserActivationState;
 
   function popoverTargetElementFor(control) {
     const override = popoverTargetOverrides.get(control);
-    if (override && nodeRoot(override) === nodeRoot(control)) return override;
+    if (override && reflectedElementInScope(control, override)) return override;
     const id = control.getAttribute("popovertarget");
     if (!id) return null;
     return findElementByIdInRoot(nodeRoot(control), id);
@@ -16183,6 +16506,86 @@ let omoikaneUserActivationState;
   function popoverTargetActionFor(control) {
     const value = (control.getAttribute("popovertargetaction") || "").trim().toLowerCase();
     return value === "show" || value === "hide" ? value : "toggle";
+  }
+
+  const POPOVER_COMMANDS = ["toggle-popover", "show-popover", "hide-popover"];
+  const DIALOG_COMMANDS = ["close", "request-close", "show-modal"];
+  // The button's command attribute state and its IDL value.
+  function buttonCommandState(button) {
+    const raw = button.getAttribute("command");
+    if (raw === null) return { state: "unknown", value: "" };
+    if (raw.startsWith("--")) return { state: "custom", value: raw };
+    const keyword = raw.replace(/[A-Z]/g, letter => letter.toLowerCase());
+    return POPOVER_COMMANDS.includes(keyword) || DIALOG_COMMANDS.includes(keyword)
+      ? { state: keyword, value: keyword } : { state: "unknown", value: "" };
+  }
+
+  // Element reflection: an explicitly set element is exposed while it is in
+  // the control's tree or in a tree containing one of its shadow hosts.
+  function reflectedElementInScope(control, element) {
+    const elementRoot = nodeRoot(element);
+    for (let root = nodeRoot(control); root; root = root.host ? nodeRoot(root.host) : null) {
+      if (root === elementRoot) return true;
+    }
+    return false;
+  }
+
+  function commandForElementFor(button) {
+    const override = commandForOverrides.get(button);
+    if (override && reflectedElementInScope(button, override)) return override;
+    const id = button.getAttribute("commandfor");
+    if (!id) return null;
+    return findElementByIdInRoot(nodeRoot(button), id);
+  }
+
+  function setCommandForElement(button, target) {
+    if (target === null || target === undefined) {
+      commandForOverrides.delete(button);
+      button.removeAttribute("commandfor");
+      return;
+    }
+    if (!(target instanceof Element)) throw new TypeError("commandForElement must be an Element or null");
+    button.setAttribute("commandfor", "");
+    commandForOverrides.set(button, target);
+  }
+
+  // HTML button activation behavior for a commandfor target.
+  function runButtonCommand(button, target) {
+    const { state, value } = buttonCommandState(button);
+    if (state === "unknown") return;
+    // Custom commands are valid for any element, popover commands for HTML
+    // elements and dialog commands for dialogs. Invalid commands fire no event.
+    if (state !== "custom" && !(target instanceof HTMLElement)) return;
+    if (DIALOG_COMMANDS.includes(state) && !(target instanceof HTMLDialogElement)) return;
+    const event = new CommandEvent("command", {
+      cancelable: true, composed: true, source: button, command: value,
+    });
+    event.isTrusted = true;
+    dispatchEventOnTarget(target, event);
+    // The command read before dispatch runs even if a listener changes it.
+    if (event.defaultPrevented || state === "custom") return;
+    const isPopover = popoverType(target) !== null;
+    if (POPOVER_COMMANDS.includes(state)) {
+      if (!isPopover) return;
+      try {
+        if (state === "toggle-popover") togglePopoverElement(target, { source: button });
+        else if (state === "show-popover" && !isPopoverOpen(target)) {
+          showPopoverElement(target, { source: button });
+        } else if (state === "hide-popover" && isPopoverOpen(target)) {
+          hidePopoverInternal(target, { restoreFocus: true });
+        }
+      } catch (_) { /* invalid popover state: commands do not throw */ }
+      return;
+    }
+    const optionalValue = button.hasAttribute("value") ? button.getAttribute("value") : null;
+    if (state === "close" && target.open) {
+      if (optionalValue === null) target.close();
+      else target.close(optionalValue);
+    } else if (state === "request-close" && target.open) {
+      requestCloseDialog(target, optionalValue);
+    } else if (state === "show-modal" && !target.open) {
+      try { target.showModal(); } catch (_) { /* disconnected or popover-showing dialog */ }
+    }
   }
 
   function isPopoverInvokerControl(control) {
@@ -16504,6 +16907,30 @@ let omoikaneUserActivationState;
       this.setAttributeNS(null, "value", String(v));
     }
     get readOnly() { return nativeAttributeValueNS(internalNodeId(this), null, "readonly") !== null; }
+    // HTML showPicker(): checks mutability, the cross-origin iframe rule and
+    // transient activation, then consumes the activation. Omoikane has no
+    // date, color or file picker UI, so no picker is displayed.
+    showPicker() {
+      const type = String(this.type).toLowerCase();
+      const readOnlyApplies = ["text", "search", "url", "tel", "email", "password", "date", "month",
+        "week", "time", "datetime-local", "number"].includes(type);
+      if (this.__isDisabledControl() || (readOnlyApplies && this.readOnly)) {
+        throw new DOMException("The input is not mutable", "InvalidStateError");
+      }
+      if (type !== "file" && type !== "color") {
+        let sameOriginWithTop = false;
+        try { sameOriginWithTop = globalThis.top.location.origin === globalThis.location.origin; }
+        catch (_) { sameOriginWithTop = false; }
+        if (!sameOriginWithTop) {
+          throw new DOMException("showPicker() is not allowed in a cross-origin iframe", "SecurityError");
+        }
+      }
+      if (!fullscreenTransientActivation) {
+        throw new DOMException("A user activation is required", "NotAllowedError");
+      }
+      fullscreenTransientActivation = false;
+      nativePointerLockActivation(false, 0);
+    }
     set readOnly(value) { reflectFormBooleanAttribute(this, "readonly", value); }
     get required() { return nativeAttributeValueNS(internalNodeId(this), null, "required") !== null; }
     set required(value) { reflectFormBooleanAttribute(this, "required", value); }
@@ -16650,6 +17077,20 @@ let omoikaneUserActivationState;
   }
   installPopoverTargetMixin(HTMLInputElement.prototype);
   installPopoverTargetMixin(HTMLButtonElement.prototype);
+  Object.defineProperties(HTMLButtonElement.prototype, {
+    commandForElement: {
+      configurable: true,
+      enumerable: true,
+      get() { return commandForElementFor(this); },
+      set(value) { setCommandForElement(this, value); },
+    },
+    command: {
+      configurable: true,
+      enumerable: true,
+      get() { return buttonCommandState(this).value; },
+      set(value) { this.setAttribute("command", String(value)); },
+    },
+  });
 
   class HTMLLabelElement extends HTMLElement {
     constructor(...args) {
@@ -20161,6 +20602,7 @@ let omoikaneUserActivationState;
   globalThis.DocumentType = DocumentType;
   globalThis.DOMException = DOMException;
   globalThis.ToggleEvent = ToggleEvent;
+  globalThis.CommandEvent = CommandEvent;
   globalThis.ValidityState = ValidityState;
   const INTEGER_TYPED_ARRAY_TAGS = new Set([
     "[object Int8Array]", "[object Uint8Array]", "[object Uint8ClampedArray]",
@@ -21277,6 +21719,9 @@ let omoikaneUserActivationState;
         lightDismissAutoPopovers(targetDocument, upPopover);
       }
       lightDismissPointerDown = null;
+    }
+    if (!locked && ["pointerdown", "mousedown", "pointerup", "mouseup"].includes(type)) {
+      lightDismissOpenDialogs(targetDocument, type, target, init);
     }
     if (!locked && notCanceled && focusTarget && target && typeof target.focus === "function") {
       browsingInput.pointerFocusInProgress = true;
@@ -27279,6 +27724,66 @@ let omoikaneUserActivationState;
     if (visualScroll) visualViewport.dispatchEvent(new Event("scroll"));
   };
   globalThis.EventTarget = EventTarget;
+
+  // HTML CloseWatcher: an author-created close watcher sharing the Window's
+  // close watcher manager with dialogs and popovers.
+  const closeWatcherInternals = new WeakMap();
+  const closeWatcherFor = object => {
+    const watcher = closeWatcherInternals.get(object);
+    if (!watcher) throw new TypeError("Illegal invocation");
+    return watcher;
+  };
+  class CloseWatcher extends EventTarget {
+    constructor(options = {}) {
+      super();
+      if (globalThis.document?.defaultView === null) {
+        throw new DOMException("The document is not fully active", "InvalidStateError");
+      }
+      const signal = options?.signal;
+      const watcher = establishCloseWatcher({
+        cancelAction: canPreventClose =>
+          this.dispatchEvent(new Event("cancel", { cancelable: canPreventClose })),
+        closeAction: () => this.dispatchEvent(new Event("close")),
+      });
+      closeWatcherInternals.set(this, watcher);
+      if (signal !== undefined && signal !== null) {
+        if (!(signal instanceof AbortSignal)) throw new TypeError("signal must be an AbortSignal");
+        if (signal.aborted) destroyCloseWatcher(watcher);
+        else signal.addEventListener("abort", () => destroyCloseWatcher(watcher), { once: true });
+      }
+    }
+    requestClose() { requestCloseWatcherClose(closeWatcherFor(this), false); }
+    close() { closeCloseWatcher(closeWatcherFor(this)); }
+    destroy() { destroyCloseWatcher(closeWatcherFor(this)); }
+    get [Symbol.toStringTag]() { return "CloseWatcher"; }
+  }
+  const closeWatcherHandlers = new WeakMap();
+  for (const type of ["cancel", "close"]) {
+    Object.defineProperty(CloseWatcher.prototype, "on" + type, {
+      configurable: true,
+      enumerable: true,
+      get() {
+        closeWatcherFor(this);
+        return closeWatcherHandlers.get(this)?.[type]?.callback ?? null;
+      },
+      set(value) {
+        closeWatcherFor(this);
+        let handlers = closeWatcherHandlers.get(this);
+        if (!handlers) closeWatcherHandlers.set(this, handlers = {});
+        const previous = handlers[type];
+        if (previous) this.removeEventListener(type, previous.listener);
+        delete handlers[type];
+        if (typeof value !== "function") return;
+        const record = { callback: value };
+        record.listener = event => {
+          if (Reflect.apply(record.callback, this, [event]) === false) event.preventDefault();
+        };
+        handlers[type] = record;
+        this.addEventListener(type, record.listener);
+      },
+    });
+  }
+  globalThis.CloseWatcher = CloseWatcher;
   globalThis.PictureInPictureWindow = PictureInPictureWindow;
   globalThis.PictureInPictureEvent = PictureInPictureEvent;
   const dispatchCspGlobalEvent = EventTarget.prototype.dispatchEvent;

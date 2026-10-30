@@ -1822,6 +1822,7 @@ fn is_layered_background_property(name: &str) -> bool {
         name,
         "background"
             | "background-image"
+            | "background-blend-mode"
             | "background-position"
             | "background-position-x"
             | "background-position-y"

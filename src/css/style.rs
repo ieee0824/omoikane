@@ -7433,10 +7433,28 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             );
         }
         "isolation" => return validate_keyword_value(value, &["auto", "isolate"]),
-        "background-origin" | "background-clip" => {
+        "background-origin" => {
             return validate_keyword_value(value, &["border-box", "padding-box", "content-box"]);
         }
+        "background-clip" => {
+            return validate_keyword_value(
+                value,
+                &["border-box", "padding-box", "content-box", "text"],
+            );
+        }
+        "background-blend-mode" => {
+            return validate_blend_mode_list(value);
+        }
         "background-image" => return validate_background_image_declaration(value),
+        "image-rendering" => {
+            return validate_keyword_value(
+                value,
+                &["auto", "smooth", "high-quality", "crisp-edges", "pixelated"],
+            );
+        }
+        "image-orientation" => {
+            return validate_image_orientation(value);
+        }
         "border-image-source" | "mask-border-source" => {
             return validate_background_image_declaration(value);
         }
@@ -7874,6 +7892,7 @@ fn valid_composite_image(value: &Value) -> bool {
                 [image, Value::Percentage(amount)] => {
                     amount.is_finite() && *amount >= 0.0 && image_valid(image)
                 }
+                [Value::Percentage(amount), image] => amount.is_finite() && image_valid(image),
                 _ => false,
             }
         }),
@@ -7884,9 +7903,71 @@ fn valid_composite_image(value: &Value) -> bool {
     }
 }
 
+fn validate_blend_mode_list(value: &Value) -> DeclarationValidation {
+    const MODES: &[&str] = &[
+        "normal",
+        "multiply",
+        "screen",
+        "overlay",
+        "darken",
+        "lighten",
+        "color-dodge",
+        "color-burn",
+        "hard-light",
+        "soft-light",
+        "difference",
+        "exclusion",
+        "hue",
+        "saturation",
+        "color",
+        "luminosity",
+        "plus-darker",
+        "plus-lighter",
+    ];
+    if let Value::Keyword(keyword) = value {
+        let keyword = keyword.to_ascii_lowercase();
+        return if is_css_wide_keyword(&keyword) || MODES.contains(&keyword.as_str()) {
+            DeclarationValidation::Valid(ComputedValue::Keyword(keyword))
+        } else {
+            DeclarationValidation::Invalid
+        };
+    }
+    let Value::CommaList(values) = value else {
+        return DeclarationValidation::Invalid;
+    };
+    let modes = values
+        .iter()
+        .map(|value| match value {
+            Value::Keyword(keyword) if MODES.contains(&keyword.to_ascii_lowercase().as_str()) => {
+                Some(keyword.to_ascii_lowercase())
+            }
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>();
+    match modes {
+        Some(modes) if !modes.is_empty() => {
+            DeclarationValidation::Valid(ComputedValue::Keyword(modes.join(", ")))
+        }
+        _ => DeclarationValidation::Invalid,
+    }
+}
+
+fn validate_image_orientation(value: &Value) -> DeclarationValidation {
+    if let Value::Keyword(keyword) = value {
+        let keyword = keyword.to_ascii_lowercase();
+        if is_css_wide_keyword(&keyword) || matches!(keyword.as_str(), "from-image" | "none") {
+            return DeclarationValidation::Valid(ComputedValue::Keyword(keyword));
+        }
+    }
+    DeclarationValidation::Invalid
+}
+
 fn valid_image_component(value: &Value) -> bool {
     match value {
         Value::Function { name, .. } if name.eq_ignore_ascii_case("url") => true,
+        Value::Keyword(value) if value.trim_start().to_ascii_lowercase().starts_with("url(") => {
+            true
+        }
         Value::Function { name, .. } if name.to_ascii_lowercase().ends_with("gradient") => {
             crate::paint::parse_gradient(&render_value(value)).is_some()
         }
@@ -15199,6 +15280,11 @@ fn apply_ua_defaults(
             properties
                 .entry(PropertyId::BackgroundColor)
                 .or_insert(ComputedValue::Keyword("black".to_string()));
+        } else if node.is_modal_dialog() {
+            // HTML: `dialog:modal::backdrop { background: rgba(0, 0, 0, 0.1) }`.
+            properties
+                .entry(PropertyId::BackgroundColor)
+                .or_insert(ComputedValue::Color("rgba(0, 0, 0, 0.1)".to_string()));
         }
         return;
     }
@@ -15393,7 +15479,7 @@ fn apply_ua_defaults(
                 .entry(PropertyId::Display)
                 .or_insert(ComputedValue::Keyword("list-item".to_string()));
         }
-        "dialog" => apply_dialog_ua_defaults(node, properties),
+        "dialog" => apply_dialog_ua_defaults(node, properties, parent_font_size),
         "time" => {
             properties
                 .entry(PropertyId::Display)
@@ -15556,18 +15642,70 @@ fn apply_audio_ua_defaults(node: &NodeHandle, properties: &mut PropertyMap) {
     }
 }
 
-/// `<dialog>`'s UA default: hidden unless it has an `open` attribute.
-fn apply_dialog_ua_defaults(node: &NodeHandle, properties: &mut PropertyMap) {
+/// `<dialog>`'s UA defaults from the HTML rendering section.
+///
+/// Closed dialogs are hidden. An open dialog is an absolutely positioned,
+/// fit-content box centered inline by auto margins; a modal dialog is fixed
+/// and also centered in the block axis.
+fn apply_dialog_ua_defaults(
+    node: &NodeHandle,
+    properties: &mut PropertyMap,
+    parent_font_size: f32,
+) {
     if node.get_attribute("open").is_none() {
         properties.insert(
             PropertyId::Display,
             ComputedValue::Keyword("none".to_string()),
         );
-    } else {
-        properties
-            .entry(PropertyId::Display)
-            .or_insert(ComputedValue::Keyword("block".to_string()));
+        return;
     }
+    let keyword = |value: &str| ComputedValue::Keyword(value.to_string());
+    let modal = node.is_modal_dialog();
+    let mut defaults = vec![
+        (PropertyId::Display, keyword("block")),
+        (
+            PropertyId::Position,
+            keyword(if modal { "fixed" } else { "absolute" }),
+        ),
+        (PropertyId::Left, ComputedValue::Px(0.0)),
+        (PropertyId::Right, ComputedValue::Px(0.0)),
+        (PropertyId::Width, keyword("fit-content")),
+        (PropertyId::Height, keyword("fit-content")),
+        (PropertyId::MarginTop, keyword("auto")),
+        (PropertyId::MarginRight, keyword("auto")),
+        (PropertyId::MarginBottom, keyword("auto")),
+        (PropertyId::MarginLeft, keyword("auto")),
+        (
+            PropertyId::BackgroundColor,
+            ComputedValue::Color("white".to_string()),
+        ),
+        (PropertyId::Color, ComputedValue::Color("black".to_string())),
+    ];
+    let font_size = match properties.get(&PropertyId::FontSize) {
+        Some(ComputedValue::Px(size)) => *size,
+        _ => parent_font_size,
+    };
+    for side in [
+        PropertyId::PaddingTop,
+        PropertyId::PaddingRight,
+        PropertyId::PaddingBottom,
+        PropertyId::PaddingLeft,
+    ] {
+        defaults.push((side, ComputedValue::Px(font_size)));
+    }
+    if modal {
+        defaults.extend([
+            (PropertyId::Top, ComputedValue::Px(0.0)),
+            (PropertyId::Bottom, ComputedValue::Px(0.0)),
+            (PropertyId::OverflowX, keyword("auto")),
+            (PropertyId::OverflowY, keyword("auto")),
+        ]);
+    }
+    for (property, value) in defaults {
+        properties.entry(property).or_insert(value);
+    }
+    // `border: solid` uses the initial medium width and currentColor.
+    apply_uniform_border(properties, "solid", 3.0, None);
 }
 
 /// `<progress>`/`<meter>`'s shared UA default: a fixed-size inline-block box
@@ -16021,6 +16159,10 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
         InitialValue::Keyword("stretch"),
     ),
     (
+        PropertyId::BackgroundBlendMode,
+        InitialValue::Keyword("normal"),
+    ),
+    (
         PropertyId::BackgroundClip,
         InitialValue::Keyword("border-box"),
     ),
@@ -16043,6 +16185,11 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
         InitialValue::Keyword("normal"),
     ),
     (PropertyId::FontPalette, InitialValue::Keyword("normal")),
+    (
+        PropertyId::ImageOrientation,
+        InitialValue::Keyword("from-image"),
+    ),
+    (PropertyId::ImageRendering, InitialValue::Keyword("auto")),
     (PropertyId::FontKerning, InitialValue::Keyword("auto")),
     (PropertyId::FontOpticalSizing, InitialValue::Keyword("auto")),
     (PropertyId::FontSizeAdjust, InitialValue::Keyword("none")),
@@ -16590,6 +16737,8 @@ const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
     PropertyId::FontVariantPosition,
     PropertyId::FontVariationSettings,
     PropertyId::FontWeight,
+    PropertyId::ImageOrientation,
+    PropertyId::ImageRendering,
     PropertyId::LetterSpacing,
     PropertyId::LineBreak,
     PropertyId::LineHeight,
