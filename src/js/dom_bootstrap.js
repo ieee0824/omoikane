@@ -8656,6 +8656,13 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     return false;
   }
+  function pointerSelectionSuppressed(target) {
+    for (let current = target; current; current = internalParentNode(current)) {
+      if (internalNodeType(current) !== 1) continue;
+      if (platformGetComputedStyleForInnerText(current).userSelect === "none") return true;
+    }
+    return false;
+  }
   function performMouseTextSelection(doc, target, type, init, notCanceled) {
     if (type === "mouseup") {
       safeWeakMapDelete(mouseSelectionByDocument, doc);
@@ -8667,7 +8674,7 @@ export const __omoikane_service_worker_lifecycle = {};
     }
     if (type === "mousedown") {
       safeWeakMapDelete(mouseSelectionByDocument, doc);
-      if (!notCanceled || Number(init.button || 0) !== 0 || pointerInsideTextControl(target)) return;
+      if (!notCanceled || Number(init.button || 0) !== 0 || pointerInsideTextControl(target) || pointerSelectionSuppressed(target)) return;
       let boundary = pointerTextBoundary(doc, init, target);
       if (!boundary) return;
       const selection = selectionForDocument(doc);

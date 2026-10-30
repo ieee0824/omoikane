@@ -1342,6 +1342,9 @@ fn paint_form_control_background(
     clip: Option<Rect>,
 ) {
     let border = EdgeSizesForPaint::from_style(style);
+    if paint_native_input_control(canvas, fragment, fragment_rect, style, clip) {
+        return;
+    }
     // A block control's owning LayoutBox already painted its
     // background and border. Inline controls have no such box.
     if fragment.node.identity() != layout.node.identity() {
@@ -1352,6 +1355,147 @@ fn paint_form_control_background(
             paint_rect_borders(canvas, fragment_rect, style, border, clip);
         }
     }
+}
+
+fn paint_native_input_control(
+    canvas: &mut Canvas,
+    fragment: &crate::layout::InlineFragment,
+    rect: Rect,
+    style: &ComputedStyle,
+    clip: Option<Rect>,
+) -> bool {
+    if !fragment.node.has_tag_name("input")
+        || matches!(style.get("appearance"), Some(ComputedValue::Keyword(value)) if value == "none")
+    {
+        return false;
+    }
+    let input_type = fragment
+        .node
+        .get_attribute("type")
+        .unwrap_or_else(|| "text".to_string())
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(input_type.as_str(), "checkbox" | "radio" | "range") {
+        return false;
+    }
+    let dark = matches!(
+        style.get("color-scheme"),
+        Some(ComputedValue::Keyword(value)) if value.split_ascii_whitespace().next() == Some("dark")
+    );
+    let surface = if dark {
+        Color::rgb(43, 43, 43)
+    } else {
+        Color::rgb(255, 255, 255)
+    };
+    let edge = if dark {
+        Color::rgb(170, 170, 170)
+    } else {
+        Color::rgb(95, 95, 95)
+    };
+    let accent = style
+        .get("accent-color")
+        .and_then(|value| match value {
+            ComputedValue::Color(value) | ComputedValue::Keyword(value)
+                if value != "auto" && value != "currentcolor" =>
+            {
+                parse_color(value)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            if dark {
+                Color::rgb(65, 145, 255)
+            } else {
+                Color::rgb(0, 117, 255)
+            }
+        });
+    if input_type == "range" {
+        let track_height = (rect.height * 0.25).clamp(2.0, 4.0);
+        let track = Rect {
+            x: rect.x,
+            y: rect.y + (rect.height - track_height) / 2.0,
+            width: rect.width,
+            height: track_height,
+        };
+        canvas.fill_rect_clipped(track, edge, clip);
+        let fraction = fragment
+            .node
+            .text_control_state()
+            .and_then(|state| state.value.parse::<f32>().ok())
+            .unwrap_or(50.0)
+            .clamp(0.0, 100.0)
+            / 100.0;
+        canvas.fill_rect_clipped(
+            Rect {
+                width: track.width * fraction,
+                ..track
+            },
+            accent,
+            clip,
+        );
+        let thumb = rect.height.min(13.0);
+        canvas.fill_rect_clipped(
+            Rect {
+                x: rect.x + (rect.width - thumb) * fraction,
+                y: rect.y + (rect.height - thumb) / 2.0,
+                width: thumb,
+                height: thumb,
+            },
+            accent,
+            clip,
+        );
+        return true;
+    }
+    canvas.fill_rect_clipped(
+        rect,
+        if fragment.node.checked() {
+            accent
+        } else {
+            surface
+        },
+        clip,
+    );
+    let thickness = (rect.width.min(rect.height) * 0.12).clamp(1.0, 2.0);
+    for border in [
+        Rect {
+            height: thickness,
+            ..rect
+        },
+        Rect {
+            y: rect.y + rect.height - thickness,
+            height: thickness,
+            ..rect
+        },
+        Rect {
+            width: thickness,
+            ..rect
+        },
+        Rect {
+            x: rect.x + rect.width - thickness,
+            width: thickness,
+            ..rect
+        },
+    ] {
+        canvas.fill_rect_clipped(border, edge, clip);
+    }
+    if fragment.node.checked() || fragment.node.input_indeterminate() {
+        let inset = (rect.width.min(rect.height) * 0.3).max(2.0);
+        canvas.fill_rect_clipped(
+            Rect {
+                x: rect.x + inset,
+                y: rect.y + inset,
+                width: (rect.width - inset * 2.0).max(1.0),
+                height: (rect.height - inset * 2.0).max(1.0),
+            },
+            if fragment.node.checked() {
+                surface
+            } else {
+                accent
+            },
+            clip,
+        );
+    }
+    true
 }
 
 fn paint_form_control_text(
@@ -1529,10 +1673,24 @@ fn paint_form_control_text(
                 width: 1.0,
                 height: text_rect.height,
             },
-            color,
+            used_caret_color(style, color),
             clip,
         );
     }
+}
+
+pub(super) fn used_caret_color(style: &ComputedStyle, fallback: Color) -> Color {
+    style
+        .get("caret-color")
+        .and_then(|value| match value {
+            ComputedValue::Color(value) | ComputedValue::Keyword(value)
+                if value != "auto" && value != "currentcolor" =>
+            {
+                parse_color(value)
+            }
+            _ => None,
+        })
+        .unwrap_or(fallback)
 }
 
 /// Returns the `text-transform` value from style.

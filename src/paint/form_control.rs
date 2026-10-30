@@ -11,7 +11,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::text::{
     measure_form_control_text_width_with_candidates, paint_shaped_horizontal_text_with_candidates,
-    paint_text_placeholder, text_prefix_by_utf16_offset,
+    paint_text_placeholder, text_prefix_by_utf16_offset, used_caret_color,
 };
 use super::{Canvas, Color};
 
@@ -379,7 +379,7 @@ pub(crate) fn paint_textarea_value_with_candidates(
                     width: 1.0,
                     height: font_size,
                 },
-                color,
+                used_caret_color(style, color),
                 Some(content_clip),
             );
         }
@@ -580,6 +580,47 @@ mod tests {
             parse_stylesheet(&format!("textarea{{line-height:{line_height}px}}")).unwrap(),
         );
         resolver.computed_style(&textarea)
+    }
+
+    #[test]
+    fn caret_color_controls_textarea_caret_paint() {
+        let document = NodeHandle::document();
+        let textarea = NodeHandle::element("textarea");
+        document.append_child(textarea.clone());
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet("textarea{caret-color:red}").unwrap(),
+        );
+        let style = resolver.computed_style(&textarea);
+        let content = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 30.0,
+            height: 20.0,
+        };
+        let mut canvas = Canvas::new(30, 20);
+        paint_textarea_value(
+            &mut canvas,
+            content,
+            content,
+            "",
+            Some(TextControlPaintState {
+                selection_start: 0,
+                selection_end: 0,
+                focused: true,
+            }),
+            &style,
+            &FragmentStyle::default(),
+            10.0,
+            8.0,
+            &[],
+            Color::rgb(0, 0, 0),
+            None,
+            0.0,
+            true,
+        );
+        assert_eq!(canvas.pixel(0, 6), Some(Color::rgb(255, 0, 0)));
     }
 
     #[test]

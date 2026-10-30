@@ -2453,9 +2453,31 @@ fn collect_input_segment(node: &NodeHandle, style: &ComputedStyle, out: &mut Vec
             "reset" => "Reset".to_string(),
             _ => String::new(),
         });
+    let native_appearance = !matches!(
+        style.get("appearance"),
+        Some(ComputedValue::Keyword(value)) if value == "none"
+    );
+    let sizes_to_content = matches!(
+        style.get("field-sizing"),
+        Some(ComputedValue::Keyword(value)) if value == "content"
+    );
     let content_width = explicit_length(style, "width").unwrap_or_else(|| {
-        if button_like {
+        if native_appearance && matches!(input_type.as_str(), "checkbox" | "radio") {
+            13.0
+        } else if native_appearance && input_type == "range" {
+            129.0
+        } else if button_like {
             measure_text_width(&value, &metrics)
+        } else if sizes_to_content {
+            let displayed = if value.is_empty() {
+                attributes
+                    .get("placeholder")
+                    .map(String::as_str)
+                    .unwrap_or("")
+            } else {
+                &value
+            };
+            measure_text_width(displayed, &metrics).max(metrics.average_advance)
         } else {
             let columns = attributes
                 .get("size")
@@ -2465,8 +2487,13 @@ fn collect_input_segment(node: &NodeHandle, style: &ComputedStyle, out: &mut Vec
             metrics.average_advance * columns as f32
         }
     });
-    let content_height =
-        explicit_length(style, "height").unwrap_or_else(|| metrics.font_size.max(13.0));
+    let content_height = explicit_length(style, "height").unwrap_or_else(|| {
+        if native_appearance && matches!(input_type.as_str(), "checkbox" | "radio" | "range") {
+            13.0
+        } else {
+            metrics.font_size.max(13.0)
+        }
+    });
 
     push_form_control_segment(
         node,
@@ -2588,6 +2615,15 @@ fn collect_textarea_segment(
             strip_textarea_leading_newline(&collect_rendered_text(node, resolver)).to_string()
         });
     let content_width = explicit_length(style, "width").unwrap_or_else(|| {
+        if matches!(
+            style.get("field-sizing"),
+            Some(ComputedValue::Keyword(value)) if value == "content"
+        ) {
+            return value
+                .lines()
+                .map(|line| measure_text_width(line, &metrics))
+                .fold(metrics.average_advance, f32::max);
+        }
         let cols = node
             .with_attribute("cols", |value| {
                 value.and_then(|value| value.trim().parse::<usize>().ok())
@@ -2597,6 +2633,12 @@ fn collect_textarea_segment(
         metrics.average_advance * cols as f32
     });
     let content_height = explicit_length(style, "height").unwrap_or_else(|| {
+        if matches!(
+            style.get("field-sizing"),
+            Some(ComputedValue::Keyword(value)) if value == "content"
+        ) {
+            return line_height(style) * value.lines().count().max(1) as f32;
+        }
         let rows = node
             .with_attribute("rows", |value| {
                 value.and_then(|value| value.trim().parse::<usize>().ok())
@@ -2646,6 +2688,12 @@ fn collect_select_segment(
         .unwrap_or_default();
 
     let content_width = explicit_length(style, "width").unwrap_or_else(|| {
+        if matches!(
+            style.get("field-sizing"),
+            Some(ComputedValue::Keyword(value)) if value == "content"
+        ) {
+            return measure_text_width(&label, &metrics) + 20.0;
+        }
         let widest = options
             .iter()
             .map(|(text, _)| measure_text_width(text, &metrics))

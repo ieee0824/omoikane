@@ -50,6 +50,53 @@ fn render_value_indicator(markup: &str) -> (Canvas, Rect) {
     (paint_layout(&layout, &mut resolver, viewport), rect)
 }
 
+fn render_css_ui_controls(markup: &str) -> Canvas {
+    let document = TreeBuilder::parse(&format!(
+        "<style>html,body{{margin:0;background:transparent}} input{{margin:0;padding:0;border:0}}</style>{markup}"
+    ))
+    .document();
+    let mut resolver = StyleResolver::new();
+    for stylesheet in extract_author_stylesheets(&document, None).unwrap() {
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet_forgiving(&stylesheet));
+    }
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 180.0,
+        height: 40.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    paint_layout(&layout, &mut resolver, viewport)
+}
+
+#[test]
+fn native_controls_use_accent_color_and_appearance_none_disables_it() {
+    let accented = render_css_ui_controls(
+        "<input type=checkbox checked style='accent-color:red'>\
+         <input type=range value=75 style='accent-color:red'>",
+    );
+    let red_pixels = accented
+        .pixels()
+        .chunks_exact(4)
+        .filter(|pixel| pixel[0] > 200 && pixel[1] < 40 && pixel[2] < 40 && pixel[3] > 0)
+        .count();
+    assert!(
+        red_pixels > 20,
+        "checked/filled native parts must use accent-color"
+    );
+
+    let unstyled = render_css_ui_controls(
+        "<input type=checkbox checked style='appearance:none;accent-color:red;width:13px;height:13px'>",
+    );
+    assert!(
+        !unstyled
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel[0] > 200 && pixel[1] < 40 && pixel[2] < 40 && pixel[3] > 0),
+        "appearance:none must suppress the native accent painting"
+    );
+}
+
 #[test]
 fn text_emphasis_paints_on_horizontal_and_vertical_logical_sides() {
     let document = TreeBuilder::parse(

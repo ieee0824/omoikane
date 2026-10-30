@@ -1396,6 +1396,27 @@ fn mouse_selection_selectstart_uses_text_boundary_and_honors_cancellation() {
 }
 
 #[test]
+fn user_select_none_suppresses_pointer_selection() {
+    check(
+        r#"(() => {
+        const p = document.createElement('p');
+        p.style.userSelect = 'none';
+        p.textContent = 'not selectable';
+        document.body.append(p);
+        const text = p.firstChild, selection = getSelection();
+        selection.collapse(text, 3);
+        const rect = p.getBoundingClientRect(), y = rect.top + rect.height / 2;
+        let selectstart = 0;
+        p.addEventListener('selectstart', () => selectstart++);
+        __omoikane_dispatch_mouse_input(p.__id, 'mousedown', {button:0,buttons:1,clientX:rect.left + .1,clientY:y}, true);
+        __omoikane_dispatch_mouse_input(p.__id, 'mousemove', {button:0,buttons:1,clientX:rect.right - .1,clientY:y}, false);
+        __omoikane_dispatch_mouse_input(p.__id, 'mouseup', {button:0,buttons:0,clientX:rect.right - .1,clientY:y}, false);
+        return selectstart === 0 && selection.isCollapsed && selection.anchorNode === text && selection.anchorOffset === 3;
+    })()"#,
+    );
+}
+
+#[test]
 fn mouse_selection_ignores_author_range_and_selection_setter_overrides() {
     check(
         r#"(() => {

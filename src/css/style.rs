@@ -15399,6 +15399,15 @@ fn apply_input_ua_defaults(node: &NodeHandle, properties: &mut PropertyMap) {
         .entry(PropertyId::Display)
         .or_insert(ComputedValue::Keyword("inline-block".to_string()));
     properties
+        .entry(PropertyId::Appearance)
+        .or_insert(ComputedValue::Keyword("auto".to_string()));
+    if matches!(input_type.as_str(), "checkbox" | "radio" | "range") {
+        properties
+            .entry(PropertyId::BackgroundColor)
+            .or_insert(ComputedValue::Color("transparent".to_string()));
+        return;
+    }
+    properties
         .entry(PropertyId::BackgroundColor)
         .or_insert(ComputedValue::Color("white".to_string()));
     apply_uniform_border(properties, "solid", 2.0, Some("#767676"));
@@ -15421,6 +15430,9 @@ fn apply_button_ua_defaults(properties: &mut PropertyMap) {
     properties
         .entry(PropertyId::Display)
         .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+    properties
+        .entry(PropertyId::Appearance)
+        .or_insert(ComputedValue::Keyword("auto".to_string()));
     properties
         .entry(PropertyId::BackgroundColor)
         .or_insert(ComputedValue::Color("#efefef".to_string()));
@@ -15448,6 +15460,9 @@ fn apply_textarea_ua_defaults(properties: &mut PropertyMap) {
         .entry(PropertyId::Display)
         .or_insert(ComputedValue::Keyword("inline-block".to_string()));
     properties
+        .entry(PropertyId::Appearance)
+        .or_insert(ComputedValue::Keyword("auto".to_string()));
+    properties
         .entry(PropertyId::BackgroundColor)
         .or_insert(ComputedValue::Color("white".to_string()));
     apply_uniform_border(properties, "solid", 1.0, Some("#767676"));
@@ -15463,6 +15478,9 @@ fn apply_select_ua_defaults(properties: &mut PropertyMap) {
     properties
         .entry(PropertyId::Display)
         .or_insert(ComputedValue::Keyword("inline-block".to_string()));
+    properties
+        .entry(PropertyId::Appearance)
+        .or_insert(ComputedValue::Keyword("auto".to_string()));
     properties
         .entry(PropertyId::BackgroundColor)
         .or_insert(ComputedValue::Color("#efefef".to_string()));
