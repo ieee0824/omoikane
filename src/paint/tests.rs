@@ -2079,7 +2079,7 @@ fn nonseparable_background_blend_modes_use_cross_channel_components() {
 #[test]
 fn background_clip_text_uses_glyph_alpha_even_for_transparent_text() {
     let stylesheet = parse_stylesheet(
-        "body { margin: 0; } div { width: 40px; height: 20px; font: 16px/20px sans-serif; \
+        "body { margin: 0; } div { width: 40px; height: 20px; font: 16px/20px Fixture; \
          color: transparent; background: red; background-clip: text; }",
     )
     .unwrap();
@@ -2097,10 +2097,31 @@ fn background_clip_text_uses_glyph_alpha_even_for_transparent_text() {
         width: 40.0,
         height: 20.0,
     };
-    let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
-    let mut paint_resolver = StyleResolver::new();
-    paint_resolver.add_stylesheet(Origin::Author, stylesheet);
-    let canvas = paint_layout(&layout, &mut paint_resolver, viewport);
+    let font = Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/anonymized-textarea-lines/LiberationSans-Regular.ttf")
+            .to_vec(),
+    )
+    .unwrap();
+    let mut registry = crate::font::WebFontRegistry::new();
+    registry.push(
+        "Fixture",
+        crate::font::FontWeight::default(),
+        crate::font::FontStyle::default(),
+        font,
+    );
+    let registry = Arc::new(registry);
+    let canvas = crate::layout::with_layout_fonts(vec![], Some(Arc::clone(&registry)), || {
+        let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+        let mut paint_resolver = StyleResolver::new();
+        paint_resolver.add_stylesheet(Origin::Author, stylesheet);
+        paint_layout_with_web_fonts(
+            &layout,
+            &mut paint_resolver,
+            viewport,
+            vec![],
+            Some(registry.as_ref()),
+        )
+    });
     let red = count_pixels(&canvas, Color::rgb(255, 0, 0));
     assert!(
         red > 0 && red < 40 * 20,
@@ -2112,7 +2133,7 @@ fn background_clip_text_uses_glyph_alpha_even_for_transparent_text() {
 #[test]
 fn background_clip_text_masks_only_its_matching_layer() {
     let stylesheet = parse_stylesheet(
-        "body { margin: 0; } div { width: 40px; height: 20px; font: 16px/20px sans-serif; \
+        "body { margin: 0; } div { width: 40px; height: 20px; font: 16px/20px Fixture; \
          color: transparent; background-image: linear-gradient(red, red), \
          linear-gradient(blue, blue); background-clip: text, border-box; }",
     )
@@ -2131,10 +2152,31 @@ fn background_clip_text_masks_only_its_matching_layer() {
         width: 40.0,
         height: 20.0,
     };
-    let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
-    let mut paint_resolver = StyleResolver::new();
-    paint_resolver.add_stylesheet(Origin::Author, stylesheet);
-    let canvas = paint_layout(&layout, &mut paint_resolver, viewport);
+    let font = Font::load_from_bytes(
+        include_bytes!("../../tests/fixtures/anonymized-textarea-lines/LiberationSans-Regular.ttf")
+            .to_vec(),
+    )
+    .unwrap();
+    let mut registry = crate::font::WebFontRegistry::new();
+    registry.push(
+        "Fixture",
+        crate::font::FontWeight::default(),
+        crate::font::FontStyle::default(),
+        font,
+    );
+    let registry = Arc::new(registry);
+    let canvas = crate::layout::with_layout_fonts(vec![], Some(Arc::clone(&registry)), || {
+        let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+        let mut paint_resolver = StyleResolver::new();
+        paint_resolver.add_stylesheet(Origin::Author, stylesheet);
+        paint_layout_with_web_fonts(
+            &layout,
+            &mut paint_resolver,
+            viewport,
+            vec![],
+            Some(registry.as_ref()),
+        )
+    });
     assert!(count_pixels(&canvas, Color::rgb(255, 0, 0)) > 0);
     assert_eq!(canvas.pixel(39, 19), Some(Color::rgb(0, 0, 255)));
 }
