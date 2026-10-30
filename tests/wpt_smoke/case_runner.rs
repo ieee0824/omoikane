@@ -520,6 +520,21 @@ mod tests {
     }
 
     #[test]
+    fn xml_script_collection_uses_local_name_for_namespaced_external_scripts() {
+        let source = br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:h="http://www.w3.org/1999/xhtml">
+            <h:script src="data:text/javascript,globalThis.externalXmlScript%3Dtrue"/>
+            <script><![CDATA[globalThis.inlineSawExternalXmlScript=globalThis.externalXmlScript===true;]]></script>
+        </svg>"#;
+        let document = parse_markup_document(source, Some("image/svg+xml")).unwrap();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        assert!(runtime.execute_document_scripts(None).is_empty());
+        assert!(js_bool(
+            &mut runtime,
+            "globalThis.inlineSawExternalXmlScript === true"
+        ));
+    }
+
+    #[test]
     fn malformed_xml_is_reported_instead_of_parsed_as_html() {
         assert!(parse_markup_document(b"<root><child></root>", Some("application/xml")).is_err());
     }

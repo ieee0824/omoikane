@@ -1016,6 +1016,13 @@
     {"path": "html/semantics/forms/the-select-element/customizable-select/selectedcontent-movebefore.html"},
     {"path": "html/semantics/forms/the-select-element/customizable-select/selectedcontent-nested.html"},
     {"path": "html/semantics/forms/the-select-element/customizable-select/selectedcontent-option-insertion.html"},
-    {"path": "html/semantics/forms/the-select-element/customizable-select/selectedcontent-subtree-mutations.html"}
+    {"path": "html/semantics/forms/the-select-element/customizable-select/selectedcontent-subtree-mutations.html"},
+    {"path": "css/css-masking/parsing/clip-path-valid.html"},
+    {"path": "css/css-masking/parsing/clip-path-invalid.html"},
+    {"path": "css/css-masking/parsing/clip-path-computed.html"},
+    {"path": "css/css-masking/parsing/clip-path-shape-parsing.html"},
+    {"path": "svg/painting/parsing/paint-order-valid.svg"},
+    {"path": "svg/painting/parsing/paint-order-invalid.svg"},
+    {"path": "svg/painting/parsing/paint-order-computed.svg"}
   ]
 }

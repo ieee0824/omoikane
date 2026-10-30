@@ -2801,7 +2801,7 @@ fn render_path(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn flatten_arc(
+pub(crate) fn flatten_arc(
     points: &mut Vec<(f32, f32)>,
     x1: f32,
     y1: f32,
@@ -2884,7 +2884,7 @@ enum FillRule {
 }
 
 #[derive(Debug)]
-enum PathCommand {
+pub(crate) enum PathCommand {
     MoveTo(f32, f32),
     LineTo(f32, f32),
     HorizontalLineTo(f32),
@@ -2911,7 +2911,7 @@ struct PathParseState {
     last_quadratic_control: Option<(f32, f32)>,
 }
 
-fn parse_path_data(d: &str) -> Vec<PathCommand> {
+pub(crate) fn parse_path_data(d: &str) -> Vec<PathCommand> {
     let mut commands = Vec::new();
     let mut chars = d.chars().peekable();
     let mut current_command = ' ';

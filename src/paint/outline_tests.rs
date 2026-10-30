@@ -157,6 +157,80 @@ fn large_negative_offset_clamps_each_axis_independently() {
 }
 
 #[test]
+fn negative_offset_on_a_thin_rounded_box_keeps_elliptical_corners() {
+    let pixels = white_page(
+        "<html style='background:white'><body style='margin:0'>\
+         <div style='position:absolute;left:20px;top:20px;width:2px;height:100px;\
+         border-radius:50px;outline:2px solid blue;outline-offset:-20px'></div>\
+         </body></html>",
+        60.0,
+        140.0,
+    );
+    let blue = Some(Color::rgb(0, 0, 255));
+    assert_ne!(
+        pixels.pixel(20, 38),
+        blue,
+        "the top of the narrow outline must curve instead of forming a rectangular cap"
+    );
+    assert_eq!(
+        pixels.pixel(20, 70),
+        blue,
+        "the center of the elliptical outline remains fully covered"
+    );
+}
+
+#[test]
+fn dashed_dotted_double_and_auto_outline_styles_paint_distinct_patterns() {
+    let pixels = white_page(
+        "<html style='background:white'><body style='margin:0'>\
+         <div style='position:absolute;left:20px;top:20px;width:24px;height:20px;outline:2px dashed red'></div>\
+         <div style='position:absolute;left:70px;top:20px;width:24px;height:20px;outline:2px dotted green'></div>\
+         <div style='position:absolute;left:120px;top:20px;width:24px;height:20px;outline:6px double blue'></div>\
+         <div style='position:absolute;left:170px;top:20px;width:24px;height:20px;outline:2px auto purple'></div>\
+         </body></html>",
+        220.0,
+        70.0,
+    );
+    let white = Some(Color::rgb(255, 255, 255));
+    assert_eq!(pixels.pixel(20, 18), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(pixels.pixel(27, 18), white, "dashed outline has a gap");
+    assert_eq!(pixels.pixel(68, 18), Some(Color::rgb(0, 128, 0)));
+    assert_eq!(pixels.pixel(70, 18), white, "dotted outline has a gap");
+    assert_eq!(pixels.pixel(125, 14), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(
+        pixels.pixel(125, 16),
+        white,
+        "double outline has a middle gap"
+    );
+    assert_eq!(pixels.pixel(125, 18), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(pixels.pixel(180, 18), Some(Color::rgb(128, 0, 128)));
+}
+
+#[test]
+fn inline_and_form_control_fragments_paint_their_own_outlines() {
+    let pixels = white_page(
+        "<html style='background:white'><body style='margin:0;font:10px/12px sans-serif'>\
+         <div style='position:absolute;left:10px;top:10px;width:35px'>\
+           <span style='outline:2px solid red'>alpha beta gamma</span>\
+         </div>\
+         <input value='x' style='position:absolute;left:70px;top:10px;width:20px;height:14px;appearance:none;outline:2px solid blue'>\
+         </body></html>",
+        120.0,
+        70.0,
+    );
+    let red = (0..pixels.height())
+        .flat_map(|y| (0..pixels.width()).map(move |x| (x, y)))
+        .filter(|&(x, y)| pixels.pixel(x, y) == Some(Color::rgb(255, 0, 0)))
+        .count();
+    let blue = (0..pixels.height())
+        .flat_map(|y| (0..pixels.width()).map(move |x| (x, y)))
+        .filter(|&(x, y)| pixels.pixel(x, y) == Some(Color::rgb(0, 0, 255)))
+        .count();
+    assert!(red > 40, "multiline inline outline must paint: {red}");
+    assert!(blue > 20, "inline form-control outline must paint: {blue}");
+}
+
+#[test]
 fn opacity_and_transform_surfaces_keep_all_outer_outline_edges() {
     for (effects, border_left) in [
         ("opacity:.5", 20),

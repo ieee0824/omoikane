@@ -113,6 +113,8 @@ pub(crate) fn transition_cache_scope(property: &str) -> TransitionCacheScope {
             | PropertyId::ScrollbarColor
             | PropertyId::TextDecorationColor
             | PropertyId::TextEmphasisColor
+            | PropertyId::WebkitTextFillColor
+            | PropertyId::WebkitTextStrokeColor
             | PropertyId::BackgroundAttachment
             | PropertyId::BackgroundBlendMode
             | PropertyId::BackgroundClip
@@ -1925,6 +1927,8 @@ mod tests {
         assert_eq!(
             localized,
             [
+                "-webkit-text-fill-color",
+                "-webkit-text-stroke-color",
                 "accent-color",
                 "backdrop-filter",
                 "background-attachment",
@@ -1982,7 +1986,6 @@ mod tests {
             "text-shadow",
             "box-shadow",
             "--accent-color",
-            "-webkit-text-fill-color",
             "future-color",
             "background-future",
         ] {
