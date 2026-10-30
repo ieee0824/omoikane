@@ -54,6 +54,13 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
     register_private_callable(
         context,
         bindings,
+        js_string!("__omoikane_select_uses_base_picker"),
+        1,
+        NativeFunction::from_fn_ptr(select_uses_base_picker_native),
+    )?;
+    register_private_callable(
+        context,
+        bindings,
         js_string!("__omoikane_take_selectedcontent_updates"),
         0,
         NativeFunction::from_fn_ptr(take_updates_native),
@@ -188,6 +195,37 @@ fn select_only_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
             }],
         );
         Ok(JsValue::from(changed))
+    })
+}
+
+/// `__omoikane_select_uses_base_picker(selectId)`: whether the select is a
+/// base appearance drop-down whose `::picker(select)` has base appearance.
+/// Such a picker renders the select's options in the page.
+fn select_uses_base_picker_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    with_host_state(|state| {
+        let mut state = state.borrow_mut();
+        let Some(select) = state.get_node(node_id) else {
+            return Ok(JsValue::from(false));
+        };
+        if !select.has_tag_name("select") || !select::is_drop_down(&select) {
+            return Ok(JsValue::from(false));
+        }
+        let Some(document) = document_root_for_node(&select) else {
+            return Ok(JsValue::from(false));
+        };
+        state.ensure_style_resolver(&document);
+        let Some(resolver) = document_style_resolver(&mut state, &document) else {
+            return Ok(JsValue::from(false));
+        };
+        Ok(JsValue::from(
+            crate::layout::select_picker::renders_base_picker(&select, resolver),
+        ))
     })
 }
 

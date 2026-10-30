@@ -5,7 +5,7 @@
 //! elements, and a select's selectedness is reconciled whenever options join or
 //! leave its list of options.
 
-use super::{Node, NodeData, NodeHandle};
+use super::{Node, NodeData, NodeHandle, NodeType};
 
 /// Elements that influence which `select` an `option` belongs to.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -110,6 +110,22 @@ pub(crate) fn optgroup_is_disabled(optgroup: &NodeHandle) -> bool {
 
 fn has_disabled_attribute(element: &NodeHandle) -> bool {
     element.attribute_value_ns(None, "disabled").is_some()
+}
+
+/// Returns `true` for a select rendered as a drop-down box: display size 1
+/// and no `multiple` attribute. Only such a select has a picker.
+pub(crate) fn is_drop_down(select: &NodeHandle) -> bool {
+    display_size(select) == 1 && !is_multiple(select)
+}
+
+/// The select's first child element when it is an HTML `button`; a base
+/// appearance drop-down renders it in place of the select's label.
+pub(crate) fn select_button(select: &NodeHandle) -> Option<NodeHandle> {
+    select
+        .child_nodes()
+        .into_iter()
+        .find(|child| child.node_type() == NodeType::Element)
+        .filter(|child| child.is_html_element() && child.has_tag_name("button"))
 }
 
 /// Returns the select's display size: a positive `size` attribute, otherwise

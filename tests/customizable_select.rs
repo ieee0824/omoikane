@@ -189,3 +189,58 @@ fn base_appearance_select_uses_html_ua_rules() {
         }"#,
     );
 }
+
+#[test]
+fn base_picker_opens_renders_options_and_handles_keys() {
+    let mut runtime = runtime(
+        "<style>select, ::picker(select) { appearance: base-select }</style>\
+         <select id=s><button id=b><span>pick</span></button>\
+         <option>one</option><div><option>two</option></div><option disabled>three</option></select>\
+         <p id=outside>outside</p>",
+    );
+    runtime.set_viewport(400.0, 300.0);
+    check(
+        &mut runtime,
+        r#"() => {
+          const select = document.getElementById('s');
+          const button = document.getElementById('b');
+          const [one, two] = select.options;
+          const events = [];
+          select.addEventListener('change', () => events.push('change'));
+          const click = node => __omoikane_dispatch_mouse_input(node.__id, 'click', {button: 0}, false);
+          const key = k => __omoikane_dispatch_keyboard_input('keydown', {key: k});
+          button.focus();
+          if (document.activeElement === button) return 'select button is not focusable';
+          if (one.getBoundingClientRect().height !== 0) return 'closed picker hides options';
+          click(button.firstChild);
+          if (!select.matches(':open')) return 'clicking the button opens the picker';
+          if (document.activeElement !== one) return 'selected option focused: ' + document.activeElement;
+          const selectRect = select.getBoundingClientRect();
+          const rect = two.getBoundingClientRect();
+          if (!(rect.height > 0 && rect.top >= selectRect.bottom)) return 'picker below select';
+          if (document.elementFromPoint(rect.left + 2, rect.top + 2) !== two) return 'option hit testing';
+          key('ArrowDown');
+          if (document.activeElement !== two || select.value !== 'one') return 'arrow moves focus';
+          key('ArrowDown');
+          if (document.activeElement !== two) return 'disabled options are skipped';
+          key('Enter');
+          if (select.matches(':open') || select.value !== 'two') return 'enter picks';
+          if (document.activeElement !== select) return 'focus returns to the select';
+          if (events.join() !== 'change') return 'events ' + events;
+          key(' ');
+          if (!select.matches(':open') || document.activeElement !== two) return 'space opens';
+          key('Escape');
+          if (select.matches(':open') || document.activeElement !== select) return 'escape closes';
+          click(select);
+          click(one);
+          if (select.matches(':open') || select.value !== 'one') return 'clicking an option picks it';
+          click(select);
+          click(select);
+          if (select.matches(':open')) return 'clicking the select again closes it';
+          click(select);
+          click(document.getElementById('outside'));
+          if (select.matches(':open')) return 'light dismiss';
+          return true;
+        }"#,
+    );
+}

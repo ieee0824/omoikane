@@ -4056,7 +4056,7 @@ impl StyleResolver {
             Some(PseudoElement::Picker)
                 if node.is_html_element()
                     && node.has_tag_name("select")
-                    && base_select::is_drop_down(node)
+                    && crate::dom::select::is_drop_down(node)
                     && parent_style.is_some_and(has_base_select_appearance) =>
             {
                 base_select::BaseSelectPart::Picker

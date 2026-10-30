@@ -9,7 +9,8 @@
 use super::{Candidate, push_builtin_ua_candidate};
 use crate::css::Specificity;
 use crate::css::matcher::PseudoElement;
-use crate::dom::{Node, NodeHandle, select};
+use crate::dom::select::{self, is_drop_down, select_button};
+use crate::dom::{Node, NodeHandle};
 
 /// The role an element or pseudo-element has inside a base appearance select.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,11 +45,6 @@ pub(super) fn select_part(node: &NodeHandle) -> BaseSelectPart {
     } else {
         BaseSelectPart::ListBox
     }
-}
-
-/// Returns `true` for a drop-down `select`, the only kind with a picker.
-pub(crate) fn is_drop_down(node: &NodeHandle) -> bool {
-    select::display_size(node) == 1 && !node.has_attribute("multiple")
 }
 
 /// Returns `false` for the customizable select pseudo-elements on elements
@@ -116,16 +112,6 @@ fn element_owner_and_part(node: &NodeHandle) -> Option<(NodeHandle, BaseSelectPa
             .then_some((parent, BaseSelectPart::Button));
     }
     None
-}
-
-/// The drop-down select's first child element when it is a `button`; base
-/// appearance renders it in place of the select's label.
-pub(crate) fn select_button(select: &NodeHandle) -> Option<NodeHandle> {
-    select
-        .child_nodes()
-        .into_iter()
-        .find(|child| child.tag_name().is_some())
-        .filter(|child| child.is_html_element() && child.has_tag_name("button"))
 }
 
 fn ancestors(node: &NodeHandle) -> impl Iterator<Item = NodeHandle> {
