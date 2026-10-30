@@ -14716,6 +14716,53 @@ fn scrollable_overflow_stops_at_clip_on_each_clipped_axis() {
     assert!(!nested_box.is_scroll_container());
 }
 
+#[test]
+fn stable_scrollbar_gutter_reserves_inline_edge_geometry() {
+    let (document, _html, _body, card) = sample_tree();
+    card.set_attribute(
+        "style",
+        "display:block; width:100px; height:40px; overflow:auto; \
+         scrollbar-gutter:stable both-edges; scrollbar-width:thin",
+    );
+    let mut resolver = StyleResolver::new();
+    let layout = layout_tree(
+        &document,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let card_box = find_layout_box(&layout, &card).unwrap();
+    assert_eq!(card_box.dimensions.content.width, 100.0);
+    assert_eq!(card_box.dimensions.padding.left, 6.0);
+    assert_eq!(card_box.dimensions.padding.right, 6.0);
+    assert_eq!(card_box.dimensions.padding_box().width, 112.0);
+
+    card.set_attribute(
+        "style",
+        "display:block; width:100px; height:40px; overflow:auto; \
+         scrollbar-gutter:stable; scrollbar-width:none",
+    );
+    resolver.invalidate_style_cache_for_test();
+    let hidden = layout_tree(
+        &document,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 0.0,
+        },
+    )
+    .unwrap();
+    let hidden_box = find_layout_box(&hidden, &card).unwrap();
+    assert_eq!(hidden_box.dimensions.padding.horizontal(), 0.0);
+}
+
 /// Scrolling must not move any layout box: it is a paint-time and
 /// client-rect-time translation only.
 #[test]

@@ -110,6 +110,7 @@ pub(crate) fn transition_cache_scope(property: &str) -> TransitionCacheScope {
             | PropertyId::BorderTopColor
             | PropertyId::ColumnRuleColor
             | PropertyId::OutlineColor
+            | PropertyId::ScrollbarColor
             | PropertyId::TextDecorationColor
             | PropertyId::TextEmphasisColor
             | PropertyId::BackgroundAttachment
@@ -1948,6 +1949,7 @@ mod tests {
                 "filter",
                 "opacity",
                 "outline-color",
+                "scrollbar-color",
                 "text-decoration-color",
                 "text-emphasis-color",
                 "transform",

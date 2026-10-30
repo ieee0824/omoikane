@@ -102,7 +102,7 @@ fn property_support_agrees_with_css_supports_and_cascade() {
                     getComputedStyle(element).getPropertyValue(name) === '10deg';
             }
             if (name === 'font-feature-settings' || name === 'font-variation-settings' || name === 'counter-set' ||
-                name === 'hyphenate-character') {
+                name === 'hyphenate-character' || name === 'scrollbar-color') {
                 return CSS.supports(name, value) &&
                     element.style.getPropertyValue(name) === value &&
                     getComputedStyle(element).getPropertyValue(name) === value;

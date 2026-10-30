@@ -11313,6 +11313,26 @@ const STRIPED_SCROLLER: &str = "<html><head><style>\
      </style></head><body><div id=\"sc\"><div id=\"top\"></div><div id=\"bottom\"></div></div></body></html>";
 
 #[test]
+fn scrollbar_width_and_colors_paint_track_and_moving_thumb() {
+    let html = "<html><head><style>\
+         body { margin: 0 } \
+         #sc { width: 20px; height: 20px; overflow: auto; scrollbar-width: thin; \
+               scrollbar-color: red blue } \
+         #content { width: 20px; height: 40px } \
+         </style></head><body><div id=\"sc\"><div id=\"content\"></div></div></body></html>";
+    let red = Some(Color::rgb(255, 0, 0));
+    let blue = Some(Color::rgb(0, 0, 255));
+
+    let before = render_with_scroll(html, 30.0, &[], (0.0, 0.0));
+    assert_eq!(before.pixel(17, 2), red);
+    assert_eq!(before.pixel(17, 18), blue);
+
+    let after = render_with_scroll(html, 30.0, &[("#sc", 0.0, 20.0)], (0.0, 0.0));
+    assert_eq!(after.pixel(17, 2), blue);
+    assert_eq!(after.pixel(17, 18), red);
+}
+
+#[test]
 fn local_background_layer_moves_with_scroll_content_independently() {
     let html = "<html><head><style>\
          body { margin: 0 } \
@@ -11612,6 +11632,26 @@ fn overflow_visible_and_clip_do_not_scroll_their_content() {
     );
     assert_eq!(visible.pixel(5, 25), Some(Color::rgba(0, 255, 0, 255)));
     assert_eq!(clipped.pixel(5, 25).unwrap().a, 0);
+}
+
+#[test]
+fn overflow_clip_margin_expands_the_selected_visual_box_clip() {
+    let html = |margin: &str| {
+        format!(
+            "<html><head><style>body{{margin:0}}\
+             #sc{{width:20px;height:20px;padding:2px;border:3px solid transparent;\
+                  overflow:clip;overflow-clip-margin:{margin}}}\
+             #content{{width:40px;height:40px;background:blue}}\
+             </style></head><body><div id=sc><div id=content></div></div></body></html>"
+        )
+    };
+    let blue = Some(Color::rgb(0, 0, 255));
+    let default = render_with_scroll(&html("0px"), 40.0, &[], (0.0, 0.0));
+    let expanded = render_with_scroll(&html("border-box 4px"), 40.0, &[], (0.0, 0.0));
+
+    assert_eq!(default.pixel(28, 10).unwrap().a, 0);
+    assert_eq!(expanded.pixel(28, 10), blue);
+    assert_eq!(expanded.pixel(35, 10).unwrap().a, 0);
 }
 
 #[test]

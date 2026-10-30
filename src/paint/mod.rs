@@ -5436,6 +5436,61 @@ fn overflow_clip_rect(
     intersect(base, axis_clip)
 }
 
+fn overflow_clip_rect_for_style(
+    overflow: crate::layout::Overflow,
+    content_box: Rect,
+    padding_box: Rect,
+    border_box: Rect,
+    style: &ComputedStyle,
+    inherited_clip: Option<Rect>,
+    viewport: Rect,
+) -> Option<Rect> {
+    let (reference, outset) = overflow_clip_margin(style, content_box, padding_box, border_box);
+    let clip_box = if matches!(
+        overflow,
+        crate::layout::Overflow::Clip
+            | crate::layout::Overflow::ClipX
+            | crate::layout::Overflow::ClipY
+    ) {
+        Rect {
+            x: reference.x - outset,
+            y: reference.y - outset,
+            width: reference.width + outset * 2.0,
+            height: reference.height + outset * 2.0,
+        }
+    } else {
+        padding_box
+    };
+    overflow_clip_rect(overflow, clip_box, inherited_clip, viewport)
+}
+
+fn overflow_clip_margin(
+    style: &ComputedStyle,
+    content_box: Rect,
+    padding_box: Rect,
+    border_box: Rect,
+) -> (Rect, f32) {
+    let Some(ComputedValue::Keyword(value)) = style.get_by_id(PropertyId::OverflowClipMargin)
+    else {
+        return (padding_box, 0.0);
+    };
+    let mut reference = padding_box;
+    let mut outset = 0.0;
+    for component in crate::css::split_top_level_whitespace(value) {
+        match component.to_ascii_lowercase().as_str() {
+            "content-box" => reference = content_box,
+            "padding-box" => reference = padding_box,
+            "border-box" => reference = border_box,
+            _ => {
+                if let Some(px) = component.strip_suffix("px").and_then(|px| px.parse().ok()) {
+                    outset = px;
+                }
+            }
+        }
+    }
+    (reference, outset)
+}
+
 fn paint_nested_document_snapshot(
     canvas: &mut Canvas,
     layout: &LayoutBox,
@@ -5490,6 +5545,7 @@ fn paint_box_internal_to(
         offset,
         ..
     } = options;
+    let content_box = offset.rect(layout.dimensions.content);
     let has_paint_containment = crate::layout::has_containment(style, "paint");
     let paint_containment_clip = has_paint_containment
         .then(|| intersect_optional_clip(inherited_clip, padding_box))
@@ -5566,8 +5622,15 @@ fn paint_box_internal_to(
             paint_replaced_image_box(canvas, layout, style, paint_containment_clip, offset);
         }
     } else if layout.overflow.clips_overflow() {
-        let overflow_clip =
-            overflow_clip_rect(layout.overflow, padding_box, inherited_clip, viewport);
+        let overflow_clip = overflow_clip_rect_for_style(
+            layout.overflow,
+            content_box,
+            padding_box,
+            border_box,
+            style,
+            inherited_clip,
+            viewport,
+        );
         if overflow_clip.is_some() {
             paint_replaced_image_box(canvas, layout, style, overflow_clip, offset);
         }
@@ -5584,9 +5647,15 @@ fn paint_box_internal_to(
         };
         Some(combined)
     } else if layout.overflow.clips_overflow() {
-        let Some(combined) =
-            overflow_clip_rect(layout.overflow, padding_box, inherited_clip, viewport)
-        else {
+        let Some(combined) = overflow_clip_rect_for_style(
+            layout.overflow,
+            content_box,
+            padding_box,
+            border_box,
+            style,
+            inherited_clip,
+            viewport,
+        ) else {
             retained_extract::record_skipped_filter_sources(canvas, layout, context);
             return;
         };
@@ -5648,7 +5717,155 @@ fn paint_box_internal_to(
         paint_box_internal(canvas, child, resolver, context, phase_options);
     }
     if paint_decorations {
+        paint_scrollbars(canvas, layout, style, padding_box, inherited_clip);
+    }
+    if paint_decorations {
         outline::paint_solid_outline(canvas, style, border_box, inherited_clip);
+    }
+}
+
+fn paint_scrollbars(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    style: &ComputedStyle,
+    padding_box: Rect,
+    clip: Option<Rect>,
+) {
+    if !layout.is_scroll_container() {
+        return;
+    }
+    let shows_scrollbar = |property| {
+        matches!(
+            style.get_by_id(property),
+            Some(ComputedValue::Keyword(value))
+                if value.eq_ignore_ascii_case("auto") || value.eq_ignore_ascii_case("scroll")
+        )
+    };
+    if !shows_scrollbar(PropertyId::OverflowX) && !shows_scrollbar(PropertyId::OverflowY) {
+        return;
+    }
+    let thickness = crate::layout::scrollbar_thickness(style);
+    if thickness <= 0.0 {
+        return;
+    }
+    let client = (
+        layout.dimensions.content.width
+            + layout.dimensions.padding.left
+            + layout.dimensions.padding.right,
+        layout.dimensions.content.height
+            + layout.dimensions.padding.top
+            + layout.dimensions.padding.bottom,
+    );
+    let (max_x, max_y) = layout
+        .paint_scroll
+        .map(|geometry| {
+            (
+                (geometry.overflow_size.0 - client.0).max(0.0),
+                (geometry.overflow_size.1 - client.1).max(0.0),
+            )
+        })
+        .unwrap_or_else(|| layout.max_scroll_offset());
+    if max_x <= 0.0 && max_y <= 0.0 {
+        return;
+    }
+    let (thumb, track) = scrollbar_colors(style);
+    let (scroll_x, scroll_y) = layout
+        .paint_scroll
+        .map(|geometry| geometry.offset)
+        .unwrap_or_else(|| layout.scroll_offset());
+    let rtl = matches!(
+        style.get_by_id(PropertyId::Direction),
+        Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("rtl")
+    );
+    if max_y > 0.0 {
+        let track_rect = Rect {
+            x: if rtl {
+                padding_box.x
+            } else {
+                padding_box.x + padding_box.width - thickness
+            },
+            y: padding_box.y,
+            width: thickness,
+            height: (padding_box.height - if max_x > 0.0 { thickness } else { 0.0 }).max(0.0),
+        };
+        paint_scrollbar_axis(
+            canvas, track_rect, scroll_y, max_y, track, thumb, true, clip,
+        );
+    }
+    if max_x > 0.0 {
+        let track_rect = Rect {
+            x: padding_box.x + if rtl && max_y > 0.0 { thickness } else { 0.0 },
+            y: padding_box.y + padding_box.height - thickness,
+            width: (padding_box.width - if max_y > 0.0 { thickness } else { 0.0 }).max(0.0),
+            height: thickness,
+        };
+        paint_scrollbar_axis(
+            canvas, track_rect, scroll_x, max_x, track, thumb, false, clip,
+        );
+    }
+}
+
+fn paint_scrollbar_axis(
+    canvas: &mut Canvas,
+    track_rect: Rect,
+    offset: f32,
+    max_offset: f32,
+    track: Color,
+    thumb: Color,
+    vertical: bool,
+    clip: Option<Rect>,
+) {
+    let track_length = if vertical {
+        track_rect.height
+    } else {
+        track_rect.width
+    };
+    if track_length <= 0.0 {
+        return;
+    }
+    canvas.fill_rect_clipped(track_rect, track, clip);
+    let viewport_length = track_length;
+    let content_length = viewport_length + max_offset;
+    let minimum_thumb = (track_rect.width.min(track_rect.height) * 2.0).min(track_length);
+    let thumb_length =
+        (viewport_length * viewport_length / content_length).clamp(minimum_thumb, track_length);
+    let thumb_position = if max_offset > 0.0 {
+        (track_length - thumb_length) * (offset / max_offset).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let thumb_rect = if vertical {
+        Rect {
+            y: track_rect.y + thumb_position,
+            height: thumb_length,
+            ..track_rect
+        }
+    } else {
+        Rect {
+            x: track_rect.x + thumb_position,
+            width: thumb_length,
+            ..track_rect
+        }
+    };
+    canvas.fill_rect_clipped(thumb_rect, thumb, clip);
+}
+
+fn scrollbar_colors(style: &ComputedStyle) -> (Color, Color) {
+    let default = (Color::rgb(96, 96, 96), Color::rgb(232, 232, 232));
+    let value = match style.get_by_id(PropertyId::ScrollbarColor) {
+        Some(ComputedValue::Keyword(value) | ComputedValue::Color(value)) => value,
+        _ => return default,
+    };
+    if value.eq_ignore_ascii_case("auto") {
+        return default;
+    }
+    let colors = crate::css::split_top_level_whitespace(value);
+    match colors.as_slice() {
+        [thumb, track] => match (parse_color(thumb), parse_color(track)) {
+            (Some(thumb), Some(track)) => (thumb, track),
+            _ => default,
+        },
+        _ => default,
     }
 }
 

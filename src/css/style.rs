@@ -7564,6 +7564,27 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         "user-select" => {
             return validate_keyword_value(value, &["auto", "text", "none", "all"]);
         }
+        "scrollbar-width" => {
+            return validate_keyword_value(value, &["auto", "thin", "none"]);
+        }
+        "scrollbar-gutter" => {
+            let rendered = render_value(value).to_ascii_lowercase();
+            if is_css_wide_keyword(&rendered) || matches!(rendered.as_str(), "auto" | "stable") {
+                return DeclarationValidation::Valid(ComputedValue::Keyword(rendered));
+            }
+            let words = rendered.split_ascii_whitespace().collect::<Vec<_>>();
+            return if words.len() == 2 && words.contains(&"stable") && words.contains(&"both-edges")
+            {
+                DeclarationValidation::Valid(ComputedValue::Keyword(
+                    "stable both-edges".to_string(),
+                ))
+            } else {
+                DeclarationValidation::Invalid
+            };
+        }
+        "scrollbar-color" => return validate_scrollbar_color_declaration(value),
+        "overflow-anchor" => return validate_keyword_value(value, &["auto", "none"]),
+        "overflow-clip-margin" => return validate_overflow_clip_margin_declaration(value),
         "cursor" => {
             return match compute_cursor_value(value) {
                 Some(computed) => DeclarationValidation::Valid(computed),
@@ -8896,6 +8917,85 @@ fn validate_touch_action_declaration(value: &Value) -> DeclarationValidation {
     DeclarationValidation::Valid(ComputedValue::Keyword(canonical))
 }
 
+fn validate_scrollbar_color_declaration(value: &Value) -> DeclarationValidation {
+    if matches!(value, Value::Keyword(keyword)
+        if keyword.eq_ignore_ascii_case("auto")
+            || is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+    {
+        return DeclarationValidation::Valid(ComputedValue::Keyword(
+            render_value(value).to_ascii_lowercase(),
+        ));
+    }
+    let Value::List(colors) = value else {
+        return DeclarationValidation::Invalid;
+    };
+    if colors.len() != 2
+        || colors
+            .iter()
+            .any(|color| matches!(validate_color_value(color), DeclarationValidation::Invalid))
+    {
+        return DeclarationValidation::Invalid;
+    }
+    DeclarationValidation::Valid(ComputedValue::Keyword(
+        colors
+            .iter()
+            .map(render_value)
+            .collect::<Vec<_>>()
+            .join(" "),
+    ))
+}
+
+fn validate_overflow_clip_margin_declaration(value: &Value) -> DeclarationValidation {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    if values.len() == 1
+        && matches!(&values[0], Value::Keyword(keyword)
+            if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+    {
+        return DeclarationValidation::Unvalidated;
+    }
+    if values.is_empty() || values.len() > 2 {
+        return DeclarationValidation::Invalid;
+    }
+    let mut boxes = 0;
+    let mut lengths = 0;
+    for component in values {
+        match component {
+            Value::Keyword(keyword)
+                if matches!(
+                    keyword.to_ascii_lowercase().as_str(),
+                    "content-box" | "padding-box" | "border-box"
+                ) =>
+            {
+                boxes += 1;
+            }
+            Value::Length(number, unit)
+                if number.is_finite()
+                    && resolve_length_to_px(*number, unit, ResolutionContext::default())
+                        .is_some() =>
+            {
+                lengths += 1;
+            }
+            Value::Number(number) if *number == 0.0 => lengths += 1,
+            Value::Function { name, .. }
+                if is_length_percentage_math_function(name)
+                    && typed_math::infer(component, Some(typed_math::NumericType::LENGTH))
+                        == Some(typed_math::NumericType::LENGTH) =>
+            {
+                lengths += 1;
+            }
+            _ => return DeclarationValidation::Invalid,
+        }
+    }
+    if boxes <= 1 && lengths <= 1 {
+        DeclarationValidation::Unvalidated
+    } else {
+        DeclarationValidation::Invalid
+    }
+}
+
 pub(crate) fn normalize_css_ui_specified(property: &str, text: &str) -> Option<String> {
     if !matches!(
         property,
@@ -8953,6 +9053,67 @@ pub(crate) fn normalize_css_ui_specified(property: &str, text: &str) -> Option<S
         };
     }
     Some(lower)
+}
+
+pub(crate) fn normalize_scroll_ui_specified(property: &str, text: &str) -> Option<String> {
+    if !matches!(
+        property,
+        "scrollbar-width"
+            | "scrollbar-gutter"
+            | "scrollbar-color"
+            | "overflow-anchor"
+            | "overflow-clip-margin"
+    ) {
+        return None;
+    }
+    let declaration = crate::css::parse_style_attribute(&format!("{property}: {text}"))
+        .into_iter()
+        .find(|declaration| declaration.name == property)?;
+    let validation = validate_declaration(property, &declaration.value);
+    match validation {
+        DeclarationValidation::Invalid => None,
+        DeclarationValidation::Valid(value) if property == "scrollbar-gutter" => {
+            let words = value.css_text();
+            Some(if words.split_ascii_whitespace().count() == 2 {
+                "stable both-edges".to_string()
+            } else {
+                words
+            })
+        }
+        DeclarationValidation::Valid(value) if property == "scrollbar-color" => {
+            if value.css_text().eq_ignore_ascii_case("auto")
+                || is_css_wide_keyword(&value.css_text().to_ascii_lowercase())
+            {
+                return Some(value.css_text());
+            }
+            let css_text = value.css_text();
+            let colors = crate::css::split_top_level_whitespace(&css_text);
+            Some(
+                colors
+                    .into_iter()
+                    .map(|color| {
+                        crate::paint::color4::CssColor::parse(color)
+                            .map(|color| color.serialize())
+                            .or_else(|| {
+                                crate::paint::color::parse_color(color).map(|parsed| {
+                                    if color.starts_with('#') {
+                                        format!("rgb({}, {}, {})", parsed.r, parsed.g, parsed.b)
+                                    } else {
+                                        color.to_ascii_lowercase()
+                                    }
+                                })
+                            })
+                            .unwrap_or_else(|| color.to_ascii_lowercase())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        }
+        DeclarationValidation::Valid(value) => Some(value.css_text()),
+        DeclarationValidation::Unvalidated => {
+            Some(render_value(&declaration.value).to_ascii_lowercase())
+        }
+    }
 }
 
 /// Valid `cursor` keyword set: the CSS 2.1 values plus the CSS UI Level 3 / 4
@@ -13303,6 +13464,47 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
     if property_name.eq_ignore_ascii_case("aspect-ratio") {
         return ComputedValue::Keyword(render_aspect_ratio_value(value, ctx));
     }
+    if property_name.eq_ignore_ascii_case("overflow-clip-margin") {
+        let components = match value {
+            Value::List(values) => values.as_slice(),
+            value => std::slice::from_ref(value),
+        };
+        let mut visual_box = "padding-box";
+        let mut length = 0.0;
+        for component in components {
+            match component {
+                Value::Keyword(keyword)
+                    if matches!(
+                        keyword.to_ascii_lowercase().as_str(),
+                        "content-box" | "padding-box" | "border-box"
+                    ) =>
+                {
+                    visual_box = match keyword.to_ascii_lowercase().as_str() {
+                        "content-box" => "content-box",
+                        "border-box" => "border-box",
+                        _ => "padding-box",
+                    };
+                }
+                Value::Length(number, unit) => {
+                    length = resolve_length_to_px(*number, unit, ctx).unwrap_or(0.0);
+                }
+                Value::Number(number) if *number == 0.0 => length = 0.0,
+                Value::Function { .. } => {
+                    length = evaluate_length_percentage_math(component, ctx)
+                        .map(|value| value.resolve(0.0))
+                        .unwrap_or(0.0);
+                }
+                _ => {}
+            }
+        }
+        let length = format!("{}px", super::tokenizer::trimmed_number(length));
+        let rendered = match (visual_box, length.as_str()) {
+            ("padding-box", length) => length.to_string(),
+            (visual_box, "0px") => visual_box.to_string(),
+            (visual_box, length) => format!("{visual_box} {length}"),
+        };
+        return ComputedValue::Keyword(rendered);
+    }
     if property_name.starts_with("contain-intrinsic-") {
         return compute_contain_intrinsic_value(value, ctx);
     }
@@ -15920,6 +16122,8 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (PropertyId::TextOverflow, InitialValue::Keyword("clip")),
     (PropertyId::OverflowX, InitialValue::Keyword("visible")),
     (PropertyId::OverflowY, InitialValue::Keyword("visible")),
+    (PropertyId::OverflowAnchor, InitialValue::Keyword("auto")),
+    (PropertyId::OverflowClipMargin, InitialValue::Px(0.0)),
     (PropertyId::TextShadow, InitialValue::Keyword("none")),
     (
         PropertyId::TextDecorationLine,
@@ -15955,6 +16159,9 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (PropertyId::Cursor, InitialValue::Keyword("auto")),
     (PropertyId::PointerEvents, InitialValue::Keyword("auto")),
     (PropertyId::ScrollBehavior, InitialValue::Keyword("auto")),
+    (PropertyId::ScrollbarColor, InitialValue::Keyword("auto")),
+    (PropertyId::ScrollbarGutter, InitialValue::Keyword("auto")),
+    (PropertyId::ScrollbarWidth, InitialValue::Keyword("auto")),
     (PropertyId::TableLayout, InitialValue::Keyword("auto")),
     (
         PropertyId::OverscrollBehaviorBlock,
@@ -16390,6 +16597,8 @@ const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
     PropertyId::Quotes,
     PropertyId::RubyAlign,
     PropertyId::RubyPosition,
+    PropertyId::ScrollbarColor,
+    PropertyId::ScrollbarWidth,
     PropertyId::TextAlign,
     PropertyId::TextAlignLast,
     PropertyId::TextAutospace,

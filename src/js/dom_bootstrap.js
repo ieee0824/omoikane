@@ -1026,6 +1026,8 @@ export const __omoikane_service_worker_lifecycle = {};
     "order", "grid-auto-flow", "grid-auto-rows", "grid-auto-columns",
     "accent-color", "appearance", "caret-color", "color-scheme",
     "field-sizing", "resize", "touch-action", "user-select",
+    "scrollbar-width", "scrollbar-gutter", "scrollbar-color",
+    "overflow-anchor", "overflow-clip-margin",
     "translate", "rotate", "scale",
     "text-shadow",
     "all",
