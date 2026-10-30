@@ -4370,9 +4370,11 @@ fn paint_box_internal_untransformed(
     let opacity = element_opacity(&style);
     let filters = element_filters(&style);
     let masks = mask_layers(&style);
+    let has_mask_border = has_mask_border(&style);
     let needs_offscreen = opacity.is_some_and(|v| v < 1.0)
         || !filters.is_empty()
         || !masks.is_empty()
+        || has_mask_border
         || clip_shape.is_some();
 
     if needs_offscreen {
@@ -4606,6 +4608,7 @@ fn paint_effect_group(
     if !masks.is_empty() {
         apply_mask_alpha(&mut offscreen, masks, style, offset_border_box);
     }
+    border::apply_mask_border_alpha(&mut offscreen, style, offset_border_box);
     if let Some(shape) = clip_path_shape(style, offset_border_box) {
         apply_clip_path_shape(&mut offscreen, &shape);
     }
@@ -6279,6 +6282,7 @@ fn computed_style_layer_text(value: Option<&ComputedValue>, index: usize) -> Opt
         }
         Some(value @ ComputedValue::TextIndent { .. }) => return Some(value.css_text()),
         Some(value @ ComputedValue::Position { .. }) => return Some(value.css_text()),
+        Some(value @ ComputedValue::NineSlice(_)) => return Some(value.css_text()),
         None => return None,
     };
     let values = crate::css::split_top_level_commas(value)
@@ -6335,6 +6339,14 @@ fn mask_layers(style: &ComputedStyle) -> Vec<MaskLayer> {
         })
         .take(MAX_MASK_LAYERS)
         .collect()
+}
+
+fn has_mask_border(style: &ComputedStyle) -> bool {
+    matches!(
+        style.get_by_id(PropertyId::MaskBorderSource),
+        Some(ComputedValue::Keyword(value) | ComputedValue::String(value))
+            if !value.eq_ignore_ascii_case("none")
+    )
 }
 
 fn background_repeat(style: &ComputedStyle) -> (bool, bool) {

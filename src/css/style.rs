@@ -93,6 +93,95 @@ pub enum ComputedValue {
         /// Vertical component.
         y: Box<Self>,
     },
+    /// An owned computed value used by `border-image-*` and `mask-border-*`.
+    NineSlice(NineSliceComputedValue),
+}
+
+/// One computed component of a nine-slice image property.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NineSliceLength {
+    /// A unitless multiplier or source-image slice coordinate.
+    Number(f32),
+    /// A percentage, where `100.0` represents the full reference dimension.
+    Percentage(f32),
+    /// A computed CSS-pixel length.
+    Px(f32),
+    /// A typed `<length-percentage>` calculation, resolved by the paint consumer.
+    Math(LengthPercentageMath),
+    /// The `auto` border-image width.
+    Auto,
+}
+
+impl NineSliceLength {
+    fn css_text(&self) -> String {
+        match self {
+            Self::Number(value) => value.to_string(),
+            Self::Percentage(value) => format!("{value}%"),
+            Self::Px(value) => format!("{value}px"),
+            Self::Math(value) => value.css_text(),
+            Self::Auto => "auto".to_string(),
+        }
+    }
+}
+
+/// Tiling behavior for one axis of a nine-slice image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NineSliceRepeat {
+    Stretch,
+    Repeat,
+    Round,
+    Space,
+}
+
+impl NineSliceRepeat {
+    fn css_text(self) -> &'static str {
+        match self {
+            Self::Stretch => "stretch",
+            Self::Repeat => "repeat",
+            Self::Round => "round",
+            Self::Space => "space",
+        }
+    }
+}
+
+/// Computed, owned representation of a nine-slice image longhand.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NineSliceComputedValue {
+    Slice {
+        values: Vec<NineSliceLength>,
+        fill: bool,
+    },
+    Width(Vec<NineSliceLength>),
+    Outset(Vec<NineSliceLength>),
+    Repeat(Vec<NineSliceRepeat>),
+}
+
+impl NineSliceComputedValue {
+    fn css_text(&self) -> String {
+        match self {
+            Self::Slice { values, fill } => {
+                let mut parts = values
+                    .iter()
+                    .map(NineSliceLength::css_text)
+                    .collect::<Vec<_>>();
+                if *fill {
+                    parts.push("fill".to_string());
+                }
+                parts.join(" ")
+            }
+            Self::Width(values) | Self::Outset(values) => values
+                .iter()
+                .map(NineSliceLength::css_text)
+                .collect::<Vec<_>>()
+                .join(" "),
+            Self::Repeat(values) => values
+                .iter()
+                .copied()
+                .map(NineSliceRepeat::css_text)
+                .collect::<Vec<_>>()
+                .join(" "),
+        }
+    }
 }
 
 impl ComputedValue {
@@ -137,6 +226,7 @@ impl ComputedValue {
                 parts.join(" ")
             }
             Self::Position { x, y } => format!("{} {}", x.css_text(), y.css_text()),
+            Self::NineSlice(value) => value.css_text(),
         }
     }
 }
@@ -7341,6 +7431,24 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             return validate_keyword_value(value, &["border-box", "padding-box", "content-box"]);
         }
         "background-image" => return validate_background_image_declaration(value),
+        "border-image-source" | "mask-border-source" => {
+            return validate_background_image_declaration(value);
+        }
+        "border-image-slice" | "mask-border-slice" => {
+            return validate_nine_slice_components(value, NineSliceComponent::Slice);
+        }
+        "border-image-width" | "mask-border-width" => {
+            return validate_nine_slice_components(value, NineSliceComponent::Width);
+        }
+        "border-image-outset" | "mask-border-outset" => {
+            return validate_nine_slice_components(value, NineSliceComponent::Outset);
+        }
+        "border-image-repeat" | "mask-border-repeat" => {
+            return validate_nine_slice_repeat(value);
+        }
+        "mask-border-mode" => {
+            return validate_keyword_value(value, &["alpha", "luminance"]);
+        }
         "mask-image" => return validate_mask_image_declaration(value),
         "mask-mode" => {
             return match value {
@@ -7780,7 +7888,7 @@ fn validate_background_image_declaration(value: &Value) -> DeclarationValidation
                 | "repeating-conic-gradient"
         ) {
             let rendered = render_value(value);
-            return if crate::paint::parse_gradient(&rendered).is_some() {
+            return if gradient_syntax_is_supported(&rendered) {
                 DeclarationValidation::Valid(ComputedValue::Keyword(rendered))
             } else {
                 DeclarationValidation::Invalid
@@ -7797,6 +7905,54 @@ fn validate_background_image_declaration(value: &Value) -> DeclarationValidation
         }
         _ => DeclarationValidation::Invalid,
     }
+}
+
+fn gradient_syntax_is_supported(text: &str) -> bool {
+    if crate::paint::parse_gradient(text).is_some() {
+        return true;
+    }
+    let replacement = if text
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("conic-gradient(")
+        || text
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("repeating-conic-gradient(")
+    {
+        "0deg"
+    } else {
+        "0%"
+    };
+    let mut normalized = text.replace("currentcolor", "black");
+    for function in ["calc", "min", "max", "clamp"] {
+        while let Some(start) = normalized
+            .to_ascii_lowercase()
+            .find(&format!("{function}("))
+        {
+            let open = start + function.len();
+            let mut depth = 0usize;
+            let mut end = None;
+            for (offset, ch) in normalized[open..].char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            end = Some(open + offset + ch.len_utf8());
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end) = end else {
+                return false;
+            };
+            normalized.replace_range(start..end, replacement);
+        }
+    }
+    crate::paint::parse_gradient(&normalized).is_some()
 }
 
 /// Validates `mask-image`: same shape as `background-image`, but gradients go
@@ -7888,6 +8044,158 @@ fn validate_repeat_style_value(value: &Value) -> DeclarationValidation {
         }
         _ => DeclarationValidation::Invalid,
     }
+}
+
+#[derive(Clone, Copy)]
+enum NineSliceComponent {
+    Slice,
+    Width,
+    Outset,
+}
+
+fn validate_nine_slice_components(
+    value: &Value,
+    component: NineSliceComponent,
+) -> DeclarationValidation {
+    if matches!(value, Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+    {
+        return DeclarationValidation::Unvalidated;
+    }
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let mut fill = false;
+    let mut fill_index = None;
+    let mut count = 0usize;
+    for (index, value) in values.iter().enumerate() {
+        if matches!(component, NineSliceComponent::Slice)
+            && matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("fill"))
+        {
+            if fill {
+                return DeclarationValidation::Invalid;
+            }
+            fill = true;
+            fill_index = Some(index);
+            continue;
+        }
+        let valid = match (component, value) {
+            (NineSliceComponent::Slice, Value::Number(number))
+            | (NineSliceComponent::Slice, Value::Percentage(number))
+            | (NineSliceComponent::Width, Value::Number(number))
+            | (NineSliceComponent::Width, Value::Percentage(number))
+            | (NineSliceComponent::Outset, Value::Number(number)) => {
+                number.is_finite() && *number >= 0.0
+            }
+            (NineSliceComponent::Width, Value::Keyword(keyword)) => {
+                keyword.eq_ignore_ascii_case("auto")
+            }
+            (
+                NineSliceComponent::Width | NineSliceComponent::Outset,
+                Value::Length(number, unit),
+            ) => {
+                number.is_finite()
+                    && *number >= 0.0
+                    && resolve_length_to_px(*number, unit, ResolutionContext::default()).is_some()
+            }
+            (_, Value::Function { name, .. }) if is_length_percentage_math_function(name) => {
+                match evaluate_length_math_value(value, ResolutionContext::default()) {
+                    Some(LengthMathValue::Number(_)) => true,
+                    Some(LengthMathValue::Length(math)) => {
+                        !matches!(component, NineSliceComponent::Outset) || math.is_pure_px()
+                    }
+                    None => false,
+                }
+            }
+            _ => false,
+        };
+        if !valid {
+            return DeclarationValidation::Invalid;
+        }
+        count += 1;
+    }
+    if fill_index.is_some_and(|index| index != 0 && index + 1 != values.len()) {
+        DeclarationValidation::Invalid
+    } else if (1..=4).contains(&count) {
+        DeclarationValidation::Unvalidated
+    } else {
+        DeclarationValidation::Invalid
+    }
+}
+
+fn validate_nine_slice_repeat(value: &Value) -> DeclarationValidation {
+    if matches!(value, Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+    {
+        return DeclarationValidation::Unvalidated;
+    }
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    if (1..=2).contains(&values.len())
+        && values.iter().all(|value| {
+            matches!(value, Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "stretch" | "repeat" | "round" | "space"))
+        })
+    {
+        DeclarationValidation::Unvalidated
+    } else {
+        DeclarationValidation::Invalid
+    }
+}
+
+pub(super) fn nine_slice_longhand_is_valid(name: &str, value: &Value) -> bool {
+    !matches!(
+        match name {
+            "border-image-source" | "mask-border-source" => {
+                validate_background_image_declaration(value)
+            }
+            "border-image-slice" | "mask-border-slice" => {
+                validate_nine_slice_components(value, NineSliceComponent::Slice)
+            }
+            "border-image-width" | "mask-border-width" => {
+                validate_nine_slice_components(value, NineSliceComponent::Width)
+            }
+            "border-image-outset" | "mask-border-outset" => {
+                validate_nine_slice_components(value, NineSliceComponent::Outset)
+            }
+            "border-image-repeat" | "mask-border-repeat" => validate_nine_slice_repeat(value),
+            "mask-border-mode" => validate_keyword_value(value, &["alpha", "luminance"]),
+            _ => DeclarationValidation::Invalid,
+        },
+        DeclarationValidation::Invalid
+    )
+}
+
+pub(crate) fn normalize_nine_slice_specified(property: &str, text: &str) -> Option<String> {
+    if !supports_declaration(property, text) {
+        return None;
+    }
+    let declarations = super::parse_style_attribute(&format!("{property}: {text}"));
+    let value = &declarations
+        .iter()
+        .find(|declaration| declaration.name == property)?
+        .value;
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    if property.ends_with("-slice") {
+        let mut parts = values
+            .iter()
+            .filter(|value| !matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("fill")))
+            .map(render_value)
+            .collect::<Vec<_>>();
+        if values.iter().any(
+            |value| matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("fill")),
+        ) {
+            parts.push("fill".to_string());
+        }
+        return Some(parts.join(" "));
+    }
+    if property.ends_with("-repeat") && values.len() == 2 && values[0] == values[1] {
+        return Some(render_value(&values[0]));
+    }
+    Some(render_value(value))
 }
 
 /// Validates `container-name`: `none`, a CSS-wide keyword, a single custom
@@ -12568,6 +12876,78 @@ fn compute_font_size_adjust(value: &Value, ctx: ResolutionContext) -> Option<Com
     }))
 }
 
+fn compute_nine_slice_value(
+    value: &Value,
+    property_name: &str,
+    ctx: ResolutionContext,
+) -> Option<NineSliceComputedValue> {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    if property_name.ends_with("-repeat") {
+        let values = values
+            .iter()
+            .map(|value| match value {
+                Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("stretch") => {
+                    Some(NineSliceRepeat::Stretch)
+                }
+                Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("repeat") => {
+                    Some(NineSliceRepeat::Repeat)
+                }
+                Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("round") => {
+                    Some(NineSliceRepeat::Round)
+                }
+                Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("space") => {
+                    Some(NineSliceRepeat::Space)
+                }
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        return Some(NineSliceComputedValue::Repeat(values));
+    }
+
+    let mut fill = false;
+    let values = values
+        .iter()
+        .filter_map(|value| match value {
+            Value::Keyword(keyword)
+                if property_name.ends_with("-slice") && keyword.eq_ignore_ascii_case("fill") =>
+            {
+                fill = true;
+                None
+            }
+            Value::Keyword(keyword)
+                if property_name.ends_with("-width") && keyword.eq_ignore_ascii_case("auto") =>
+            {
+                Some(Some(NineSliceLength::Auto))
+            }
+            Value::Number(value) => Some(Some(NineSliceLength::Number(*value))),
+            Value::Percentage(value) => Some(Some(NineSliceLength::Percentage(*value))),
+            Value::Length(value, unit) => {
+                Some(resolve_length_to_px(*value, unit, ctx).map(NineSliceLength::Px))
+            }
+            Value::Function { name, .. } if is_length_percentage_math_function(name) => {
+                Some(match evaluate_length_math_value(value, ctx)? {
+                    LengthMathValue::Number(value) => Some(NineSliceLength::Number(value.max(0.0))),
+                    LengthMathValue::Length(value) if value.is_pure_px() => {
+                        Some(NineSliceLength::Px(value.resolve(0.0).max(0.0)))
+                    }
+                    LengthMathValue::Length(value) => Some(NineSliceLength::Math(value)),
+                })
+            }
+            _ => Some(None),
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if property_name.ends_with("-slice") {
+        Some(NineSliceComputedValue::Slice { values, fill })
+    } else if property_name.ends_with("-width") {
+        Some(NineSliceComputedValue::Width(values))
+    } else {
+        Some(NineSliceComputedValue::Outset(values))
+    }
+}
+
 fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> ComputedValue {
     if matches!(
         property_name,
@@ -12662,6 +13042,21 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
     if property_name == "text-shadow" {
         return text_shadow::compute(value, ctx)
             .unwrap_or_else(|| ComputedValue::Keyword(render_value(value)));
+    }
+    if matches!(
+        property_name,
+        "border-image-slice"
+            | "border-image-width"
+            | "border-image-outset"
+            | "border-image-repeat"
+            | "mask-border-slice"
+            | "mask-border-width"
+            | "mask-border-outset"
+            | "mask-border-repeat"
+    ) {
+        if let Some(value) = compute_nine_slice_value(value, property_name, ctx) {
+            return ComputedValue::NineSlice(value);
+        }
     }
     if property_name.eq_ignore_ascii_case("content") {
         return match value {
@@ -15208,6 +15603,14 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (PropertyId::CounterIncrement, InitialValue::Keyword("none")),
     (PropertyId::ShapeOutside, InitialValue::Keyword("none")),
     (PropertyId::ShapeMargin, InitialValue::Px(0.0)),
+    (PropertyId::BorderImageSource, InitialValue::Keyword("none")),
+    (PropertyId::BorderImageSlice, InitialValue::Keyword("100%")),
+    (PropertyId::BorderImageWidth, InitialValue::Number(1.0)),
+    (PropertyId::BorderImageOutset, InitialValue::Number(0.0)),
+    (
+        PropertyId::BorderImageRepeat,
+        InitialValue::Keyword("stretch"),
+    ),
     (
         PropertyId::BackgroundClip,
         InitialValue::Keyword("border-box"),
@@ -15432,6 +15835,15 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (PropertyId::MaskImage, InitialValue::Keyword("none")),
     (PropertyId::MaskMode, InitialValue::Keyword("match-source")),
     (PropertyId::MaskComposite, InitialValue::Keyword("add")),
+    (PropertyId::MaskBorderSource, InitialValue::Keyword("none")),
+    (PropertyId::MaskBorderSlice, InitialValue::Number(0.0)),
+    (PropertyId::MaskBorderWidth, InitialValue::Keyword("auto")),
+    (PropertyId::MaskBorderOutset, InitialValue::Number(0.0)),
+    (
+        PropertyId::MaskBorderRepeat,
+        InitialValue::Keyword("stretch"),
+    ),
+    (PropertyId::MaskBorderMode, InitialValue::Keyword("alpha")),
     (PropertyId::Transform, InitialValue::Keyword("none")),
     (
         PropertyId::TransformOrigin,
@@ -16661,6 +17073,7 @@ fn computed_value_to_value(cv: &ComputedValue) -> Value {
         ComputedValue::LengthPercentage(value) => Value::Keyword(value.css_text()),
         value @ ComputedValue::TextIndent { .. } => Value::Keyword(value.css_text()),
         value @ ComputedValue::Position { .. } => Value::Keyword(value.css_text()),
+        value @ ComputedValue::NineSlice(_) => Value::Keyword(value.css_text()),
     }
 }
 

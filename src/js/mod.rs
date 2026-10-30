@@ -19237,6 +19237,7 @@ fn computed_value_to_css_string(property_name: &str, value: &ComputedValue) -> S
         value @ ComputedValue::LengthPercentage(_) => value.css_text(),
         value @ ComputedValue::TextIndent { .. } => value.css_text(),
         value @ ComputedValue::Position { .. } => value.css_text(),
+        value @ ComputedValue::NineSlice(_) => value.css_text(),
     }
 }
 
@@ -19297,7 +19298,60 @@ fn computed_style_property_to_css_string(
             return resolved;
         }
     }
+    if matches!(property_name, "border-image-source" | "mask-border-source") {
+        return canonical_computed_gradient(&value.css_text(), style);
+    }
     computed_value_to_css_string(property_name, value)
+}
+
+fn canonical_computed_gradient(value: &str, style: &ComputedStyle) -> String {
+    if !value.to_ascii_lowercase().contains("gradient(") {
+        return value.to_string();
+    }
+    let current_color = style
+        .get("color")
+        .map(|value| computed_color_to_css_string(&value.css_text()))
+        .unwrap_or_else(|| "rgb(0, 0, 0)".to_string());
+    let mut result = value.replace("currentcolor", &current_color);
+    while let Some(start) = result.find("calc(") {
+        let content = start + "calc(".len();
+        let Some(relative_end) = result[content..].find(')') else {
+            break;
+        };
+        let end = content + relative_end;
+        let inner = &result[content..end];
+        if inner.chars().any(char::is_whitespace) {
+            break;
+        }
+        let replacement = inner.to_string();
+        result.replace_range(start..=end, &replacement);
+    }
+    if let Some(from) = result.find("from ") {
+        let start = from + "from ".len();
+        let end = result[start..]
+            .find(char::is_whitespace)
+            .map_or(result.len(), |offset| start + offset);
+        if let Some(radians) = result[start..end].strip_suffix("rad")
+            && let Ok(radians) = radians.parse::<f32>()
+        {
+            result.replace_range(
+                start..end,
+                &format!("{}deg", format_css_number(radians.to_degrees())),
+            );
+        }
+    }
+    if result
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("conic-gradient(")
+        || result
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("repeating-conic-gradient(")
+    {
+        result = result.replace(" at 50% 50%,", ",");
+    }
+    result
 }
 
 /// Serializes a resolved style to JSON with kebab-case CSS property names.
@@ -19957,6 +20011,7 @@ fn computed_style_native(
     args: &[JsValue],
     context: &mut Context,
 ) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
     let flush_only = args.get(3).is_some_and(JsValue::to_boolean);
     let name = args
         .get(4)
@@ -19967,8 +20022,13 @@ fn computed_style_native(
         && name
             .as_deref()
             .is_none_or(ComputedStyle::has_logical_cssom_alias);
-    let style =
-        resolve_native_computed_style(args, needs_used_size, needs_logical_aliases, context)?;
+    let style = resolve_native_computed_style(
+        node_id,
+        args,
+        needs_used_size,
+        needs_logical_aliases,
+        context,
+    )?;
     // A synchronous flush samples transitions before event dispatch, but its
     // caller does not need to materialize a property map until a later read.
     if flush_only {
@@ -19977,6 +20037,17 @@ fn computed_style_native(
     // A named CSSOM read needs only one serialized property. Resolve afresh as
     // above, but avoid allocating the complete JavaScript property map.
     if let Some(name) = name {
+        let image_base = if matches!(name.as_str(), "border-image-source" | "mask-border-source") {
+            with_host_state(|state| {
+                let state = state.borrow();
+                let document = state
+                    .get_node(node_id)
+                    .and_then(|node| document_root_for_node(&node));
+                Ok(document.and_then(|document| state.base_url_for_document(document.identity())))
+            })?
+        } else {
+            None
+        };
         return Ok(style.as_ref().map_or_else(JsValue::undefined, |style| {
             if name == "text-wrap" {
                 return computed_text_wrap(style).map_or_else(JsValue::undefined, |value| {
@@ -19984,7 +20055,11 @@ fn computed_style_native(
                 });
             }
             style.get(&name).map_or_else(JsValue::undefined, |value| {
-                js_string!(computed_style_property_to_css_string(&name, value, style)).into()
+                let mut serialized = computed_style_property_to_css_string(&name, value, style);
+                if matches!(name.as_str(), "border-image-source" | "mask-border-source") {
+                    serialized = absolute_css_url(&serialized, image_base.as_ref());
+                }
+                js_string!(serialized.as_str()).into()
             })
         }));
     }
@@ -20009,6 +20084,19 @@ fn computed_style_native(
     Ok(js_string!(json.as_str()).into())
 }
 
+fn absolute_css_url(value: &str, base: Option<&crate::http::Url>) -> String {
+    let trimmed = value.trim();
+    let Some(inner) = trimmed
+        .strip_prefix("url(")
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return value.to_string();
+    };
+    let reference = inner.trim().trim_matches(['\'', '"']);
+    let resolved = resolve_url_reference(reference, base);
+    format!("url(\"{}\")", resolved.replace('"', "\\\""))
+}
+
 /// Reports whether a computed CSSOM property reads a layout-resolved used
 /// size. Widths, heights, margins, padding and transforms depend on the box;
 /// other named reads can skip layout.
@@ -20031,12 +20119,12 @@ fn cssom_property_uses_used_size(name: &str) -> bool {
 /// Read-only results share the cascade; resolved-value edits copy on write.
 /// Layout runs when `needs_used_size` asks for resolved sizes or a transform matrix.
 fn resolve_native_computed_style(
+    node_id: usize,
     args: &[JsValue],
     needs_used_size: bool,
     needs_logical_aliases: bool,
     context: &mut Context,
 ) -> JsResult<Option<Arc<ComputedStyle>>> {
-    let node_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, node_id)?;
     let pseudo = match args.get(1) {
         Some(value) if !value.is_null_or_undefined() => {

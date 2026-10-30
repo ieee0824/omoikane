@@ -83,6 +83,7 @@ pub(super) fn expand_shorthand(name: &str, value: Value, important: bool) -> Vec
         | "border-block-style"
         | "border-block-color" => expand_logical_border_axis_shorthand(name, value, important),
         "border" => expand_border_shorthand(value, important),
+        "border-image" | "mask-border" => expand_nine_slice_shorthand(name, value, important),
         "border-top" | "border-right" | "border-bottom" | "border-left" => {
             expand_border_side_shorthand(name, value, important)
         }
@@ -166,6 +167,7 @@ pub(super) fn is_deferred_var_shorthand(name: &str) -> bool {
             | "border-style"
             | "border-color"
             | "border"
+            | "border-image"
             | "border-top"
             | "border-right"
             | "border-bottom"
@@ -185,6 +187,7 @@ pub(super) fn is_deferred_var_shorthand(name: &str) -> bool {
             | "background"
             | "background-position"
             | "mask"
+            | "mask-border"
             | "-webkit-mask"
             | "mask-position"
             | "-webkit-mask-position"
@@ -302,6 +305,17 @@ fn expand_css_wide_shorthand(
                             .map(move |suffix| format!("border-{side}-{suffix}"))
                     }),
             );
+            names
+        }
+        "border-image" | "mask-border" => {
+            let prefix = name;
+            let mut names = ["source", "slice", "width", "outset", "repeat"]
+                .into_iter()
+                .map(|suffix| format!("{prefix}-{suffix}"))
+                .collect::<Vec<_>>();
+            if name == "mask-border" {
+                names.push("mask-border-mode".to_string());
+            }
             names
         }
         "border-top" | "border-right" | "border-bottom" | "border-left" => {
@@ -1400,6 +1414,196 @@ fn expand_border_side_shorthand(name: &str, value: Value, important: bool) -> Ve
         });
     }
 
+    declarations
+}
+
+fn expand_nine_slice_shorthand(name: &str, value: Value, important: bool) -> Vec<Declaration> {
+    let invalid = || {
+        vec![Declaration {
+            name: name.to_string(),
+            value: value.clone(),
+            important,
+        }]
+    };
+    let values = match &value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let slashes = values
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            matches!(value, Value::Keyword(keyword) if keyword == "/").then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if slashes.len() > 2 {
+        return invalid();
+    }
+    let first_slash = slashes.first().copied().unwrap_or(values.len());
+    let second_slash = slashes.get(1).copied().unwrap_or(values.len());
+    let before = &values[..first_slash];
+    let mut width_items = if first_slash < values.len() {
+        values[first_slash + 1..second_slash].to_vec()
+    } else {
+        Vec::new()
+    };
+    let mut outset_items = if second_slash < values.len() {
+        values[second_slash + 1..].to_vec()
+    } else {
+        Vec::new()
+    };
+    if before.is_empty()
+        || first_slash < values.len() && width_items.is_empty() && second_slash == values.len()
+        || second_slash < values.len() && outset_items.is_empty()
+    {
+        return invalid();
+    }
+
+    let prefix = name;
+    let mut source = None;
+    let mut slice_items = Vec::new();
+    let mut repeat_items = Vec::new();
+    let mut mode = None;
+    let is_repeat = |item: &Value| matches!(item, Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "stretch" | "repeat" | "round" | "space"));
+    let is_mode = |item: &Value| {
+        name == "mask-border"
+            && matches!(item, Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "alpha" | "luminance"))
+    };
+    let trailing_group = if second_slash < values.len() {
+        &mut outset_items
+    } else {
+        &mut width_items
+    };
+    while trailing_group
+        .last()
+        .is_some_and(|item| is_repeat(item) || is_mode(item))
+    {
+        let item = trailing_group.pop().expect("last item was present");
+        if is_mode(&item) {
+            if mode.replace(item).is_some() {
+                return invalid();
+            }
+        } else {
+            repeat_items.push(item);
+        }
+    }
+    repeat_items.reverse();
+    if second_slash < values.len() && outset_items.is_empty() {
+        return invalid();
+    }
+    for item in before {
+        let repeat = matches!(item, Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "stretch" | "repeat" | "round" | "space"));
+        if repeat {
+            repeat_items.push(item.clone());
+            continue;
+        }
+        let is_mode = name == "mask-border"
+            && matches!(item, Value::Keyword(keyword) if matches!(keyword.to_ascii_lowercase().as_str(), "alpha" | "luminance"));
+        if is_mode {
+            if mode.replace(item.clone()).is_some() {
+                return invalid();
+            }
+            continue;
+        }
+        if super::style::nine_slice_longhand_is_valid(&format!("{prefix}-source"), item) {
+            if source.replace(item.clone()).is_some() {
+                return invalid();
+            }
+            continue;
+        }
+        slice_items.push(item.clone());
+    }
+    if slice_items.is_empty() && first_slash < values.len() || repeat_items.len() > 2 {
+        return invalid();
+    }
+    if let Some(fill_index) = slice_items.iter().position(
+        |value| matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("fill")),
+    ) {
+        if fill_index != 0 && fill_index + 1 != slice_items.len() {
+            return invalid();
+        }
+        let fill = slice_items.remove(fill_index);
+        slice_items.push(fill);
+    }
+    if repeat_items.len() == 2 && repeat_items[0] == repeat_items[1] {
+        repeat_items.pop();
+    }
+    let collapse = |values: &[Value]| match values {
+        [value] => value.clone(),
+        values => Value::List(values.to_vec()),
+    };
+    let slice = if slice_items.is_empty() {
+        if name == "border-image" {
+            Value::Percentage(100.0)
+        } else {
+            Value::Number(0.0)
+        }
+    } else {
+        collapse(&slice_items)
+    };
+    let width = if width_items.is_empty() {
+        if name == "border-image" {
+            Value::Number(1.0)
+        } else {
+            Value::Keyword("auto".to_string())
+        }
+    } else {
+        collapse(&width_items)
+    };
+    let outset = if outset_items.is_empty() {
+        Value::Number(0.0)
+    } else {
+        collapse(&outset_items)
+    };
+    let repeat = if repeat_items.is_empty() {
+        Value::Keyword("stretch".to_string())
+    } else {
+        collapse(&repeat_items)
+    };
+    for (suffix, candidate) in [
+        ("slice", &slice),
+        ("width", &width),
+        ("outset", &outset),
+        ("repeat", &repeat),
+    ] {
+        if !super::style::nine_slice_longhand_is_valid(&format!("{prefix}-{suffix}"), candidate) {
+            return invalid();
+        }
+    }
+    let mut declarations = vec![
+        Declaration {
+            name: format!("{prefix}-source"),
+            value: source.unwrap_or_else(|| Value::Keyword("none".to_string())),
+            important,
+        },
+        Declaration {
+            name: format!("{prefix}-slice"),
+            value: slice,
+            important,
+        },
+        Declaration {
+            name: format!("{prefix}-width"),
+            value: width,
+            important,
+        },
+        Declaration {
+            name: format!("{prefix}-outset"),
+            value: outset,
+            important,
+        },
+        Declaration {
+            name: format!("{prefix}-repeat"),
+            value: repeat,
+            important,
+        },
+    ];
+    if name == "mask-border" {
+        declarations.push(Declaration {
+            name: "mask-border-mode".to_string(),
+            value: mode.unwrap_or_else(|| Value::Keyword("alpha".to_string())),
+            important,
+        });
+    }
     declarations
 }
 

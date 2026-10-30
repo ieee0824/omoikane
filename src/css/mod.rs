@@ -45,8 +45,9 @@ pub(crate) use scope::{ScopePrelude, parse_scope_prelude};
 pub(crate) use style::ContainerContext;
 pub(crate) use style::supports_declaration;
 pub use style::{
-    ComputedStyle, ComputedValue, LengthPercentageMath, Origin, PageBoxGeometry, PageMarginContent,
-    PageSelectorContext, PageSide, ResolvedPageStyle, StyleResolver, StylesheetInput,
+    ComputedStyle, ComputedValue, LengthPercentageMath, NineSliceComputedValue, NineSliceLength,
+    NineSliceRepeat, Origin, PageBoxGeometry, PageMarginContent, PageSelectorContext, PageSide,
+    ResolvedPageStyle, StyleResolver, StylesheetInput,
 };
 pub(crate) use supports::{supports_condition_matches, supports_condition_result};
 pub(crate) use transition::{

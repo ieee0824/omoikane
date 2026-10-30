@@ -1,0 +1,22 @@
+{
+  "tests": [
+    { "path": "css/css-backgrounds/parsing/border-image-valid.html" },
+    { "path": "css/css-backgrounds/parsing/border-image-invalid.html" },
+    { "path": "css/css-backgrounds/parsing/border-image-shorthand.sub.html" },
+    { "path": "css/css-backgrounds/parsing/border-image-source-valid.html" },
+    { "path": "css/css-backgrounds/parsing/border-image-source-invalid.html" },
+    { "path": "css/css-backgrounds/parsing/border-image-source-computed.sub.html" },
+    { "path": "css/css-backgrounds/parsing/border-image-slice-valid.html" },
+    { "path": "css/css-backgrounds/parsing/border-image-slice-invalid.html" },
+    { "path": "css/css-backgrounds/parsing/border-image-slice-computed.html" },
+    { "path": "css/css-backgrounds/parsing/border-image-width-valid.html" },
+    { "path": "css/css-backgrounds/parsing/border-image-width-invalid.html" },
+    { "path": "css/css-backgrounds/parsing/border-image-width-computed.html" },
+    { "path": "css/css-backgrounds/parsing/border-image-outset-valid.html" },
+    { "path": "css/css-backgrounds/parsing/border-image-outset-invalid.html" },
+    { "path": "css/css-backgrounds/parsing/border-image-outset-computed.html" },
+    { "path": "css/css-backgrounds/parsing/border-image-repeat-valid.html" },
+    { "path": "css/css-backgrounds/parsing/border-image-repeat-invalid.html" },
+    { "path": "css/css-backgrounds/parsing/border-image-repeat-computed.html" }
+  ]
+}

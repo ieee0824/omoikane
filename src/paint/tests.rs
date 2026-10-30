@@ -6755,6 +6755,177 @@ fn paint_border_radius_clips_background_corners() {
 }
 
 #[test]
+fn border_image_paints_nine_slice_edges_and_optional_center() {
+    for (fill, expected_center) in [
+        ("", Color::rgb(0, 0, 255)),
+        (" fill", Color::rgb(255, 0, 0)),
+    ] {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let div = NodeHandle::element("div");
+        document.append_child(body.clone());
+        body.append_child(div.clone());
+        let css = format!(
+            "html, body {{ margin: 0; }} div {{ \
+             width: 12px; height: 12px; background: blue; \
+             border: 4px solid transparent; \
+             border-image-source: linear-gradient(red, red); \
+             border-image-slice: 25%{fill}; \
+             border-image-width: 4px; \
+             border-image-outset: 0; \
+             border-image-repeat: stretch; }}"
+        );
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&css).unwrap());
+        let computed = resolver.computed_style(&div);
+        assert_eq!(
+            computed
+                .get("border-image-source")
+                .map(ComputedValue::css_text),
+            Some("linear-gradient(rgb(255, 0, 0), rgb(255, 0, 0))".to_string())
+        );
+        assert!(matches!(
+            computed.get("border-image-slice"),
+            Some(ComputedValue::NineSlice(_))
+        ));
+        assert!(
+            parse_gradient(
+                &computed
+                    .get("border-image-source")
+                    .expect("computed source")
+                    .css_text()
+            )
+            .is_some()
+        );
+        for property in [
+            "border-image-width",
+            "border-image-outset",
+            "border-image-repeat",
+        ] {
+            assert!(
+                matches!(computed.get(property), Some(ComputedValue::NineSlice(_))),
+                "{property}: {:?}",
+                computed.get(property)
+            );
+        }
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 24.0,
+            height: 24.0,
+        };
+        let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+        let canvas = paint_layout(&layout, &mut resolver, viewport);
+        assert_eq!(canvas.pixel(1, 1), Some(Color::rgb(255, 0, 0)));
+        assert_eq!(canvas.pixel(10, 10), Some(expected_center), "fill={fill:?}");
+    }
+}
+
+#[test]
+fn mask_border_composites_nine_slice_alpha_with_optional_center() {
+    for (fill, expected_center) in [
+        ("", Color::rgba(0, 0, 0, 0)),
+        (" fill", Color::rgb(255, 0, 0)),
+    ] {
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let div = NodeHandle::element("div");
+        document.append_child(body.clone());
+        body.append_child(div);
+        let css = format!(
+            "html, body {{ margin: 0; }} div {{ \
+             width: 12px; height: 12px; background: red; \
+             border: 4px solid transparent; \
+             mask-border-source: linear-gradient(white, white); \
+             mask-border-slice: 25%{fill}; \
+             mask-border-width: 4px; \
+             mask-border-outset: 0; \
+             mask-border-repeat: stretch; }}"
+        );
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, parse_stylesheet(&css).unwrap());
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 24.0,
+            height: 24.0,
+        };
+        let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+        let canvas = paint_layout(&layout, &mut resolver, viewport);
+        assert_eq!(canvas.pixel(1, 1), Some(Color::rgb(255, 0, 0)));
+        assert_eq!(canvas.pixel(10, 10), Some(expected_center), "fill={fill:?}");
+    }
+}
+
+#[test]
+fn nine_slice_image_failure_falls_back_to_solid_border() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+    let css = "html, body { margin: 0; } div { \
+               width: 12px; height: 12px; background: blue; \
+               border: 4px solid lime; \
+               border-image-source: url(data:image/png;base64,broken); \
+               border-image-slice: 1; }";
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(css).unwrap());
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 24.0,
+        height: 24.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+    assert_eq!(canvas.pixel(1, 1), Some(Color::rgb(0, 255, 0)));
+    assert_eq!(canvas.pixel(10, 10), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
+fn nine_slice_repaints_when_a_pending_image_becomes_available() {
+    crate::data::clear_blob_urls();
+    let source = "blob:http://example.test/nine-slice";
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    document.append_child(body.clone());
+    body.append_child(div);
+    let css = format!(
+        "html, body {{ margin: 0; }} div {{ width: 12px; height: 12px; \
+         border: 4px solid lime; border-image-source: url(\"{source}\"); \
+         border-image-slice: 1; border-image-width: 4px; }}"
+    );
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, parse_stylesheet(&css).unwrap());
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 24.0,
+        height: 24.0,
+    };
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let before = paint_layout(&layout, &mut resolver, viewport);
+    assert_eq!(before.pixel(1, 1), Some(Color::rgb(0, 255, 0)));
+
+    let mut image = Canvas::new(3, 3);
+    image.fill_rect(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 3.0,
+            height: 3.0,
+        },
+        Color::rgb(255, 0, 0),
+    );
+    crate::data::register_blob_url(source.to_string(), image.encode_png(), "image/png".into());
+    let after = paint_layout(&layout, &mut resolver, viewport);
+    assert_eq!(after.pixel(1, 1), Some(Color::rgb(255, 0, 0)));
+    crate::data::clear_blob_urls();
+}
+
+#[test]
 fn rounded_box_without_paintable_background_image_skips_surface_allocation() {
     for background_image in [
         None,

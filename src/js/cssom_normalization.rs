@@ -73,6 +73,19 @@ const VALIDATED_PROPERTIES: &[&str] = &[
     "border-start-end-radius",
     "border-end-start-radius",
     "border-end-end-radius",
+    "border-image",
+    "border-image-source",
+    "border-image-slice",
+    "border-image-width",
+    "border-image-outset",
+    "border-image-repeat",
+    "mask-border",
+    "mask-border-source",
+    "mask-border-slice",
+    "mask-border-width",
+    "mask-border-outset",
+    "mask-border-repeat",
+    "mask-border-mode",
     "object-position",
     "contain-intrinsic-size",
     "contain-intrinsic-width",
@@ -108,6 +121,19 @@ const VALIDATED_PROPERTIES: &[&str] = &[
 ];
 
 pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
+    if matches!(
+        property,
+        "border-image-slice"
+            | "border-image-width"
+            | "border-image-outset"
+            | "border-image-repeat"
+            | "mask-border-slice"
+            | "mask-border-width"
+            | "mask-border-outset"
+            | "mask-border-repeat"
+    ) {
+        return crate::css::style::normalize_nine_slice_specified(property, value);
+    }
     if matches!(
         property,
         "text-emphasis-position" | "text-autospace" | "text-spacing-trim"
