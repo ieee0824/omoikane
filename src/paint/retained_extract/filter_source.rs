@@ -76,7 +76,7 @@ impl BoundsNode {
             || is_sticky_for_paint(&style)
             || layout.node.scroll_offset() != (0.0, 0.0)
             || has_non_none_value(&style, PropertyId::BoxShadow)
-            || outline::solid_outline_bounds(&style, border_box_rect(layout)).is_some()
+            || outline::outline_bounds(&style, border_box_rect(layout)).is_some()
             || !bounded_filters(&element_filters(&style))
         {
             return filter_reject(layout, "unmodelled_source_bounds", 0);

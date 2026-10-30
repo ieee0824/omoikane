@@ -1012,6 +1012,13 @@
     {"path": "css/css-highlight-api/highlight-pseudo-from-font-computed.html"},
     {"path": "css/css-highlight-api/highlight-pseudo-parsing.html"},
     {"path": "css/css-highlight-api/historical.window.js"},
-    {"path": "css/css-highlight-api/idlharness.window.js"}
+    {"path": "css/css-highlight-api/idlharness.window.js"},
+    {"path": "css/css-masking/parsing/clip-path-valid.html"},
+    {"path": "css/css-masking/parsing/clip-path-invalid.html"},
+    {"path": "css/css-masking/parsing/clip-path-computed.html"},
+    {"path": "css/css-masking/parsing/clip-path-shape-parsing.html"},
+    {"path": "svg/painting/parsing/paint-order-valid.svg"},
+    {"path": "svg/painting/parsing/paint-order-invalid.svg"},
+    {"path": "svg/painting/parsing/paint-order-computed.svg"}
   ]
 }

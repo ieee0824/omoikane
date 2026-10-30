@@ -15390,7 +15390,7 @@ fn collect_script_elements(node: &NodeHandle) -> Vec<NodeHandle> {
 }
 
 fn collect_script_elements_recursive(node: &NodeHandle, out: &mut Vec<NodeHandle>) {
-    if node.tag_name().as_deref() == Some("script") {
+    if node.local_name().as_deref() == Some("script") {
         out.push(node.clone());
         return; // Don't recurse into <script> children
     }

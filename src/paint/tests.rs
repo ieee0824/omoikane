@@ -290,6 +290,7 @@ fn absolute_auto_inset_thumbnail_paints_inside_ratio_padding_box() {
 fn polygon_clip_hit_testing_includes_boundary_but_not_zero_area_shapes() {
     let square = ClipPathShape::Polygon {
         points: vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+        fill_rule: ClipFillRule::NonZero,
         bounds: Rect::default(),
     };
     for point in [
@@ -308,6 +309,7 @@ fn polygon_clip_hit_testing_includes_boundary_but_not_zero_area_shapes() {
     }
     let line = ClipPathShape::Polygon {
         points: vec![(0.0, 5.0), (5.0, 5.0), (10.0, 5.0)],
+        fill_rule: ClipFillRule::NonZero,
         bounds: Rect::default(),
     };
     assert!(!line.contains((5.0, 5.0)));
@@ -2179,6 +2181,87 @@ fn background_clip_text_masks_only_its_matching_layer() {
     });
     assert!(count_pixels(&canvas, Color::rgb(255, 0, 0)) > 0);
     assert_eq!(canvas.pixel(39, 19), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
+fn html_text_paint_order_changes_fill_and_stroke_overlap() {
+    let render = |order: &str| {
+        let stylesheet = parse_stylesheet(&format!(
+            "body {{ margin:0 }} div {{ width:50px;height:40px;font:32px/40px Fixture;\
+             -webkit-text-fill-color:red;-webkit-text-stroke-color:blue;\
+             -webkit-text-stroke-width:6px;paint-order:{order} }}"
+        ))
+        .unwrap();
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        let div = NodeHandle::element("div");
+        div.append_child(NodeHandle::text("X"));
+        body.append_child(div);
+        document.append_child(body.clone());
+        let font = Font::load_from_bytes(
+            include_bytes!(
+                "../../tests/fixtures/anonymized-textarea-lines/LiberationSans-Regular.ttf"
+            )
+            .to_vec(),
+        )
+        .unwrap();
+        let mut registry = crate::font::WebFontRegistry::new();
+        registry.push(
+            "Fixture",
+            crate::font::FontWeight::default(),
+            crate::font::FontStyle::default(),
+            font,
+        );
+        let registry = Arc::new(registry);
+        let viewport = Rect {
+            width: 50.0,
+            height: 40.0,
+            ..Rect::default()
+        };
+        crate::layout::with_layout_fonts(vec![], Some(Arc::clone(&registry)), || {
+            let mut resolver = StyleResolver::new();
+            resolver.add_stylesheet(Origin::Author, stylesheet.clone());
+            let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+            let mut paint_resolver = StyleResolver::new();
+            paint_resolver.add_stylesheet(Origin::Author, stylesheet);
+            paint_layout_with_web_fonts(
+                &layout,
+                &mut paint_resolver,
+                viewport,
+                vec![],
+                Some(registry.as_ref()),
+            )
+        })
+    };
+    let normal = render("normal");
+    let stroke_first = render("stroke fill");
+    let dominant_pixels = |canvas: &Canvas, red: bool| {
+        canvas
+            .pixels
+            .chunks_exact(4)
+            .filter(|pixel| {
+                pixel[3] > 0
+                    && if red {
+                        pixel[0] > pixel[2]
+                    } else {
+                        pixel[2] > pixel[0]
+                    }
+            })
+            .count()
+    };
+    assert!(dominant_pixels(&normal, false) > 0);
+    assert!(dominant_pixels(&stroke_first, true) > 0);
+    let changed = normal
+        .pixels
+        .chunks_exact(4)
+        .zip(stroke_first.pixels.chunks_exact(4))
+        .filter(|(left, right)| left != right)
+        .count();
+    assert!(changed > 0, "paint-order must change overlapping pixels");
+    assert!(
+        dominant_pixels(&stroke_first, true) > dominant_pixels(&normal, true),
+        "fill painted last must cover the inner half of the stroke"
+    );
 }
 
 #[test]
@@ -7673,6 +7756,30 @@ fn clip_path_ellipse_and_polygon_shapes_clip_paint() {
     assert_eq!(ellipse.pixel(10, 5), Some(Color::rgb(0, 0, 255)));
     assert_eq!(ellipse.pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
 
+    let default_radii = basic_shape_from_value(
+        "ellipse(at 25% 50%)",
+        Rect {
+            width: 20.0,
+            height: 10.0,
+            ..Rect::default()
+        },
+    )
+    .expect("omitted ellipse radii resolve to closest-side");
+    assert_eq!(default_radii.bounds().width, 10.0);
+    assert_eq!(default_radii.bounds().height, 10.0);
+
+    let farthest = basic_shape_from_value(
+        "ellipse(farthest-side closest-side at 25% 50%)",
+        Rect {
+            width: 20.0,
+            height: 10.0,
+            ..Rect::default()
+        },
+    )
+    .expect("ellipse side keywords resolve against each axis");
+    assert_eq!(farthest.bounds().width, 30.0);
+    assert_eq!(farthest.bounds().height, 10.0);
+
     let triangle = paint_clip_path_document(
         ".target { width: 20px; height: 20px; background: green; \
          clip-path: polygon(50% 0%, 100% 100%, 0% 100%); }",
@@ -7682,6 +7789,98 @@ fn clip_path_ellipse_and_polygon_shapes_clip_paint() {
     );
     assert_eq!(triangle.pixel(10, 18), Some(Color::rgb(0, 128, 0)));
     assert_eq!(triangle.pixel(1, 1), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn clip_path_xywh_and_reference_boxes_share_paint_geometry() {
+    let xywh = paint_clip_path_document(
+        ".target { width: 20px; height: 20px; background: red; \
+         clip-path: xywh(25% 25% 50% 50% round 2px); }",
+        "<div class='target'></div>",
+        20.0,
+        20.0,
+    );
+    assert_eq!(xywh.pixel(10, 10), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(xywh.pixel(2, 10), Some(Color::rgba(0, 0, 0, 0)));
+
+    let content_box = paint_clip_path_document(
+        ".target { box-sizing:border-box;width:20px;height:20px;padding:3px;border:2px solid blue;\
+         background:red;clip-path:content-box; }",
+        "<div class='target'></div>",
+        20.0,
+        20.0,
+    );
+    assert_eq!(content_box.pixel(10, 10), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(content_box.pixel(3, 10), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn clip_path_polygon_preserves_typed_fill_rule() {
+    let mut style = ComputedStyle::default();
+    style.set_paint_value(
+        "clip-path",
+        "polygon(evenodd, 0 0, 10px 0, 0 10px)".to_string(),
+    );
+    let shape = clip_path_shape(
+        &style,
+        Rect {
+            width: 10.0,
+            height: 10.0,
+            ..Rect::default()
+        },
+    )
+    .expect("valid polygon");
+    assert!(matches!(
+        shape,
+        ClipPathShape::Polygon {
+            fill_rule: ClipFillRule::EvenOdd,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn clip_path_path_and_shape_clip_with_shared_compound_geometry() {
+    let path = paint_clip_path_document(
+        ".target { width:20px;height:20px;background:red;\
+         clip-path:path(evenodd, 'M0 0 H20 V20 H0 Z M5 5 H15 V15 H5 Z'); }",
+        "<div class='target'></div>",
+        20.0,
+        20.0,
+    );
+    assert_eq!(path.pixel(2, 2), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(path.pixel(10, 10), Some(Color::rgba(0, 0, 0, 0)));
+
+    let shape = paint_clip_path_document(
+        ".target { width:20px;height:20px;background:blue;\
+         clip-path:shape(from 0 0, line to 100% 0, line to 0 100%, close); }",
+        "<div class='target'></div>",
+        20.0,
+        20.0,
+    );
+    assert_eq!(shape.pixel(2, 2), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(shape.pixel(18, 18), Some(Color::rgba(0, 0, 0, 0)));
+
+    let reference = Rect {
+        width: 20.0,
+        height: 20.0,
+        ..Rect::default()
+    };
+    let curve = basic_shape_from_value(
+        "shape(from 0 20px, curve to 20px 20px with 0 0 / 20px 0, close)",
+        reference,
+    )
+    .expect("cubic shape command should produce shared path geometry");
+    assert!(curve.contains((10.0, 12.0)));
+    assert!(!curve.contains((10.0, 2.0)));
+
+    let arc = basic_shape_from_value(
+        "shape(from 0 10px, arc by 20px 0 of 10px cw, line by 0 10px, line to 0 20px, close)",
+        reference,
+    )
+    .expect("relative arc command should produce shared path geometry");
+    assert!(matches!(arc, ClipPathShape::Path { .. }));
+    assert_eq!(arc.bounds().width, 20.0);
 }
 
 #[test]

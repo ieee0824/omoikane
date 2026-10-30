@@ -22,6 +22,7 @@ const VALIDATED_PROPERTIES: &[&str] = &[
     "text-decoration",
     "text-decoration-color",
     "text-decoration-thickness",
+    "paint-order",
     "clip-path",
     "-webkit-clip-path",
     "shape-outside",
@@ -129,6 +130,12 @@ const VALIDATED_PROPERTIES: &[&str] = &[
 ];
 
 pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
+    if property == "paint-order" {
+        return crate::css::style::normalize_paint_order_specified(value);
+    }
+    if matches!(property, "clip-path" | "-webkit-clip-path") {
+        return crate::css::style::normalize_clip_path_specified(value);
+    }
     if matches!(
         property,
         "accent-color"

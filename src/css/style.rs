@@ -7516,27 +7516,16 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         }
         "shape-margin" => return validate_shape_margin_declaration(name, value),
         "clip-path" => {
-            return match value {
-                Value::Keyword(keyword)
-                    if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                        || keyword.eq_ignore_ascii_case("none") =>
-                {
-                    DeclarationValidation::Unvalidated
-                }
-                Value::Function { name: function, .. }
-                    if matches!(
-                        function.to_ascii_lowercase().as_str(),
-                        "inset" | "circle" | "ellipse" | "polygon"
-                    ) =>
-                {
-                    let rendered = render_value(value);
-                    if crate::paint::is_valid_clip_path_value(&rendered) {
-                        DeclarationValidation::Unvalidated
-                    } else {
-                        DeclarationValidation::Invalid
-                    }
-                }
-                _ => DeclarationValidation::Invalid,
+            if matches!(value, Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()) || keyword.eq_ignore_ascii_case("none"))
+            {
+                return DeclarationValidation::Unvalidated;
+            }
+            return if clip_path_path_argument_is_string(value)
+                && crate::paint::is_valid_clip_path_value(&render_clip_path_validation_value(value))
+            {
+                DeclarationValidation::Unvalidated
+            } else {
+                DeclarationValidation::Invalid
             };
         }
         "mask-repeat" | "background-repeat" => return validate_repeat_style_value(value),
@@ -7562,6 +7551,57 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
                 ));
             }
             return validate_color_value(value);
+        }
+        "-webkit-text-fill-color" | "-webkit-text-stroke-color" => {
+            return validate_color_value(value);
+        }
+        "-webkit-text-stroke-width" => {
+            let valid = match value {
+                Value::Keyword(keyword) => is_css_wide_keyword(&keyword.to_ascii_lowercase()),
+                Value::Number(number) => *number == 0.0,
+                Value::Length(number, unit) => {
+                    number.is_finite() && *number >= 0.0 && is_css_length_unit(unit)
+                }
+                Value::Function { name, .. }
+                    if name.eq_ignore_ascii_case("var") || name.eq_ignore_ascii_case("env") =>
+                {
+                    true
+                }
+                Value::Function { .. } | Value::List(_) => {
+                    typed_math::infer(value, Some(typed_math::NumericType::LENGTH))
+                        == Some(typed_math::NumericType::LENGTH)
+                }
+                _ => false,
+            };
+            return if valid {
+                DeclarationValidation::Unvalidated
+            } else {
+                DeclarationValidation::Invalid
+            };
+        }
+        "paint-order" => {
+            let rendered = render_value(value).to_ascii_lowercase();
+            let parts = super::split_top_level_whitespace(&rendered);
+            if parts.len() == 1 && is_css_wide_keyword(parts[0]) {
+                return DeclarationValidation::Unvalidated;
+            }
+            let valid = parts.as_slice() == ["normal"]
+                || (!parts.is_empty()
+                    && parts.len() <= 3
+                    && parts
+                        .iter()
+                        .all(|part| matches!(*part, "fill" | "stroke" | "markers"))
+                    && parts.iter().collect::<HashSet<_>>().len() == parts.len());
+            return if valid {
+                let canonical = if parts.as_slice() == ["normal"] {
+                    rendered
+                } else {
+                    canonical_paint_order(&parts)
+                };
+                DeclarationValidation::Valid(ComputedValue::Keyword(canonical))
+            } else {
+                DeclarationValidation::Invalid
+            };
         }
         "appearance" => {
             return validate_keyword_value(
@@ -7735,6 +7775,306 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     DeclarationValidation::Unvalidated
+}
+
+fn canonical_paint_order(parts: &[&str]) -> String {
+    const DEFAULT: [&str; 3] = ["fill", "stroke", "markers"];
+    let mut target = parts.to_vec();
+    for layer in DEFAULT {
+        if !target.contains(&layer) {
+            target.push(layer);
+        }
+    }
+    for retained in 1..=target.len() {
+        let mut expanded = target[..retained].to_vec();
+        for layer in DEFAULT {
+            if !expanded.contains(&layer) {
+                expanded.push(layer);
+            }
+        }
+        if expanded == target {
+            return target[..retained].join(" ");
+        }
+    }
+    target.join(" ")
+}
+
+pub(crate) fn normalize_paint_order_specified(value: &str) -> Option<String> {
+    let rendered = value.trim().to_ascii_lowercase();
+    let parts = super::split_top_level_whitespace(&rendered);
+    if parts.as_slice() == ["normal"] {
+        return Some(rendered);
+    }
+    (!parts.is_empty()
+        && parts.len() <= 3
+        && parts
+            .iter()
+            .all(|part| matches!(*part, "fill" | "stroke" | "markers"))
+        && parts.iter().collect::<HashSet<_>>().len() == parts.len())
+    .then(|| canonical_paint_order(&parts))
+}
+
+pub(crate) fn normalize_clip_path_specified(value: &str) -> Option<String> {
+    if !supports_declaration("clip-path", value) {
+        return None;
+    }
+    let value = value.trim();
+    let parts = super::split_top_level_whitespace(value);
+    let value = if parts.len() == 2
+        && parts
+            .iter()
+            .any(|part| part.eq_ignore_ascii_case("border-box"))
+    {
+        parts
+            .into_iter()
+            .find(|part| !part.eq_ignore_ascii_case("border-box"))?
+    } else {
+        value
+    };
+    if value.eq_ignore_ascii_case("none")
+        || matches!(
+            value.to_ascii_lowercase().as_str(),
+            "margin-box"
+                | "border-box"
+                | "padding-box"
+                | "content-box"
+                | "fill-box"
+                | "stroke-box"
+                | "view-box"
+        )
+    {
+        return Some(value.to_ascii_lowercase());
+    }
+    let open = value.find('(')?;
+    if !value.ends_with(')') {
+        return Some(value.to_string());
+    }
+    let name = value[..open].trim().to_ascii_lowercase();
+    let body = &value[open + 1..value.len() - 1];
+    if name != "shape" {
+        return Some(normalize_basic_shape_specified(&name, body));
+    }
+    if body.contains("var(") {
+        return Some(value.to_string());
+    }
+    let mut components = crate::css::split_top_level_commas(body)
+        .into_iter()
+        .map(|component| {
+            super::split_top_level_whitespace(component.trim())
+                .into_iter()
+                .map(|part| {
+                    let lower = part.to_ascii_lowercase();
+                    if matches!(
+                        lower.as_str(),
+                        "evenodd"
+                            | "nonzero"
+                            | "from"
+                            | "move"
+                            | "line"
+                            | "hline"
+                            | "vline"
+                            | "curve"
+                            | "smooth"
+                            | "arc"
+                            | "close"
+                            | "to"
+                            | "by"
+                            | "with"
+                            | "of"
+                            | "small"
+                            | "large"
+                            | "cw"
+                            | "ccw"
+                            | "rotate"
+                    ) || lower.ends_with("px")
+                    {
+                        lower
+                    } else {
+                        part.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>();
+    if let Some(first) = components.first_mut()
+        && first.starts_with("nonzero ")
+    {
+        *first = first[8..].to_string();
+    }
+    for component in &mut components {
+        if component.starts_with("arc ") {
+            *component = component
+                .strip_suffix(" small rotate 0deg")
+                .or_else(|| component.strip_suffix(" rotate 0deg small"))
+                .unwrap_or(component)
+                .to_string();
+        }
+    }
+    Some(format!("shape({})", components.join(", ")))
+}
+
+fn normalize_basic_shape_specified(name: &str, body: &str) -> String {
+    if name == "path" {
+        let body = body
+            .strip_prefix("nonzero, ")
+            .or_else(|| body.strip_prefix("nonzero,"))
+            .unwrap_or(body);
+        let body = body.trim();
+        if body.len() >= 2
+            && ((body.starts_with('"') && body.ends_with('"'))
+                || (body.starts_with('\'') && body.ends_with('\'')))
+        {
+            return format!(
+                "path(\"{}\")",
+                canonicalize_svg_path_data(&body[1..body.len() - 1])
+            );
+        }
+        return format!("path({body})");
+    }
+    let mut components = crate::css::split_top_level_commas(body)
+        .into_iter()
+        .map(normalize_basic_shape_component)
+        .collect::<Vec<_>>();
+    if name == "circle" {
+        if components[0] == "closest-side" {
+            components[0].clear();
+        }
+        components[0] = normalize_shape_position_order(&components[0]);
+    } else if name == "ellipse" {
+        components[0] = components[0]
+            .strip_prefix("closest-side closest-side")
+            .map(|rest| rest.trim_start().to_string())
+            .unwrap_or_else(|| components[0].clone());
+        components[0] = normalize_shape_position_order(&components[0]);
+    } else if name == "polygon" {
+        let header = components[0].clone();
+        if header == "nonzero" || header == "round 0px" {
+            components.remove(0);
+        } else if let Some(rest) = header.strip_prefix("nonzero ") {
+            components[0] = rest.to_string();
+        }
+    } else if matches!(name, "xywh" | "rect") {
+        let first = &mut components[0];
+        if let Some(prefix) = first.strip_suffix(" round 0px") {
+            *first = prefix.to_string();
+        }
+    }
+    format!("{name}({})", components.join(", "))
+}
+
+fn canonicalize_svg_path_data(data: &str) -> String {
+    const COMMANDS: &str = "MmZzLlHhVvCcSsQqTtAa";
+    let mut tokens = Vec::new();
+    let mut number = String::new();
+    let flush_number = |number: &mut String, tokens: &mut Vec<String>| {
+        if !number.is_empty() {
+            tokens.push(std::mem::take(number));
+        }
+    };
+    for character in data.chars() {
+        if COMMANDS.contains(character) {
+            flush_number(&mut number, &mut tokens);
+            tokens.push(if matches!(character, 'z' | 'Z') {
+                "Z".to_string()
+            } else {
+                character.to_string()
+            });
+        } else if character == ',' || character.is_whitespace() {
+            flush_number(&mut number, &mut tokens);
+        } else if matches!(character, '+' | '-')
+            && !number.is_empty()
+            && !matches!(number.chars().last(), Some('e' | 'E'))
+        {
+            flush_number(&mut number, &mut tokens);
+            number.push(character);
+        } else {
+            number.push(character);
+        }
+    }
+    flush_number(&mut number, &mut tokens);
+    tokens.join(" ")
+}
+
+fn normalize_basic_shape_component(component: &str) -> String {
+    super::split_top_level_whitespace(component.trim())
+        .into_iter()
+        .map(|part| {
+            if part == "0" {
+                "0px".to_string()
+            } else if part.contains("var(") {
+                part.to_string()
+            } else {
+                part.to_ascii_lowercase()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalize_shape_position_order(component: &str) -> String {
+    let Some((before, position)) = component.split_once(" at ") else {
+        return component.to_string();
+    };
+    let parts = super::split_top_level_whitespace(position);
+    let position = match parts.as_slice() {
+        [
+            vertical @ ("top" | "bottom"),
+            horizontal @ ("left" | "right"),
+        ] => {
+            format!("{horizontal} {vertical}")
+        }
+        _ => position.to_string(),
+    };
+    if before.is_empty() {
+        format!("at {position}")
+    } else {
+        format!("{before} at {position}")
+    }
+}
+
+fn clip_path_path_argument_is_string(value: &Value) -> bool {
+    fn contains_string(value: &Value) -> bool {
+        match value {
+            Value::String(_) => true,
+            Value::List(values) | Value::CommaList(values) => values.iter().any(contains_string),
+            _ => false,
+        }
+    }
+    match value {
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("path") => {
+            arguments.iter().any(contains_string)
+        }
+        Value::List(values) | Value::CommaList(values) => {
+            values.iter().all(clip_path_path_argument_is_string)
+        }
+        _ => true,
+    }
+}
+
+fn render_clip_path_validation_value(value: &Value) -> String {
+    match value {
+        Value::String(value) => format!("\"{}\"", value.replace('"', "\\\"")),
+        Value::Function { name, arguments } => format!(
+            "{name}({})",
+            arguments
+                .iter()
+                .map(render_clip_path_validation_value)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::List(values) => values
+            .iter()
+            .map(render_clip_path_validation_value)
+            .collect::<Vec<_>>()
+            .join(" "),
+        Value::CommaList(values) => values
+            .iter()
+            .map(render_clip_path_validation_value)
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => render_value(value),
+    }
 }
 
 pub(crate) fn normalize_cjk_specified(property: &str, value: &str) -> Option<String> {
@@ -10736,6 +11076,7 @@ fn is_length_property(name: &str) -> bool {
             | "column-rule-width"
             | "outline-width"
             | "outline-offset"
+            | "-webkit-text-stroke-width"
             | "shape-margin"
     )
 }
@@ -14337,19 +14678,22 @@ fn render_clip_path_value(value: &Value, ctx: ResolutionContext) -> String {
         Value::Function { name, arguments }
             if matches!(
                 name.to_ascii_lowercase().as_str(),
-                "inset" | "circle" | "ellipse" | "polygon"
+                "inset" | "circle" | "ellipse" | "polygon" | "xywh" | "rect" | "path" | "shape"
             ) =>
         {
             let canonical_name = name.to_ascii_lowercase();
-            format!(
-                "{}({})",
-                canonical_name,
-                arguments
-                    .iter()
-                    .map(|argument| render_clip_path_value(argument, ctx))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+            let body = arguments
+                .iter()
+                .map(|argument| render_clip_path_value(argument, ctx))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if matches!(canonical_name.as_str(), "xywh" | "rect")
+                && let Some(inset) = computed_basic_shape_rect(&canonical_name, &body)
+            {
+                return inset;
+            }
+            let body = canonicalize_computed_clip_shape_body(&canonical_name, &body);
+            format!("{canonical_name}({body})")
         }
         Value::List(values) => values
             .iter()
@@ -14363,6 +14707,194 @@ fn render_clip_path_value(value: &Value, ctx: ResolutionContext) -> String {
             .join(", "),
         _ => render_value(value),
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct ClipLengthPercentage {
+    percentage: f32,
+    px: f32,
+    percentage_syntax: bool,
+}
+
+impl ClipLengthPercentage {
+    fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value == "0" || value == "0px" || value == "0%" {
+            return Some(Self::default());
+        }
+        if let Some(number) = value.strip_suffix("px") {
+            return Some(Self {
+                px: number.parse().ok()?,
+                ..Self::default()
+            });
+        }
+        if let Some(number) = value.strip_suffix('%') {
+            return Some(Self {
+                percentage: number.parse().ok()?,
+                percentage_syntax: true,
+                ..Self::default()
+            });
+        }
+        let body = value.strip_prefix("calc(")?.strip_suffix(')')?;
+        let parts = super::split_top_level_whitespace(body);
+        match parts.as_slice() {
+            [value] => Self::parse(value),
+            [first, op @ ("+" | "-"), second] => {
+                let first = Self::parse(first)?;
+                let mut second = Self::parse(second)?;
+                if *op == "-" {
+                    second.percentage = -second.percentage;
+                    second.px = -second.px;
+                }
+                Some(Self {
+                    percentage: first.percentage + second.percentage,
+                    px: first.px + second.px,
+                    percentage_syntax: first.percentage_syntax || second.percentage_syntax,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn css_text(self) -> String {
+        let percentage = if self.percentage == 0.0 {
+            None
+        } else {
+            Some(format!("{}%", self.percentage))
+        };
+        let px = if self.px == 0.0 {
+            None
+        } else {
+            Some(format!("{}px", self.px.abs()))
+        };
+        match (percentage, px) {
+            (None, None) if self.percentage_syntax => "0%".to_string(),
+            (None, None) => "0px".to_string(),
+            (Some(value), None) => value,
+            (None, Some(value)) if self.px >= 0.0 => value,
+            (None, Some(value)) => format!("-{}", value),
+            (Some(percentage), Some(px)) => format!(
+                "calc({percentage} {} {px})",
+                if self.px < 0.0 { "-" } else { "+" }
+            ),
+        }
+    }
+}
+
+fn computed_basic_shape_rect(name: &str, body: &str) -> Option<String> {
+    let parts = super::split_top_level_whitespace(body);
+    let round = parts.iter().position(|part| *part == "round");
+    let edges = &parts[..round.unwrap_or(parts.len())];
+    let [a, b, c, d] = edges else { return None };
+    let auto = |value: &str, fallback: ClipLengthPercentage| {
+        if value == "auto" {
+            Some(fallback)
+        } else {
+            ClipLengthPercentage::parse(value)
+        }
+    };
+    let full = ClipLengthPercentage {
+        percentage: 100.0,
+        px: 0.0,
+        percentage_syntax: true,
+    };
+    let zero = ClipLengthPercentage {
+        percentage_syntax: true,
+        ..ClipLengthPercentage::default()
+    };
+    let (top, right, bottom, left) = if name == "xywh" {
+        let x = ClipLengthPercentage::parse(a)?;
+        let y = ClipLengthPercentage::parse(b)?;
+        let width = ClipLengthPercentage::parse(c)?;
+        let height = ClipLengthPercentage::parse(d)?;
+        (
+            y,
+            ClipLengthPercentage {
+                percentage: full.percentage - x.percentage - width.percentage,
+                px: -x.px - width.px,
+                percentage_syntax: true,
+            },
+            ClipLengthPercentage {
+                percentage: full.percentage - y.percentage - height.percentage,
+                px: -y.px - height.px,
+                percentage_syntax: true,
+            },
+            x,
+        )
+    } else {
+        let top = auto(a, zero)?;
+        let right_edge = auto(b, full)?;
+        let bottom_edge = auto(c, full)?;
+        let left = auto(d, zero)?;
+        (
+            top,
+            ClipLengthPercentage {
+                percentage: full.percentage - right_edge.percentage,
+                px: -right_edge.px,
+                percentage_syntax: true,
+            },
+            ClipLengthPercentage {
+                percentage: full.percentage - bottom_edge.percentage,
+                px: -bottom_edge.px,
+                percentage_syntax: true,
+            },
+            left,
+        )
+    };
+    let mut rendered = vec![
+        top.css_text(),
+        right.css_text(),
+        bottom.css_text(),
+        left.css_text(),
+    ];
+    if rendered[3] == rendered[1] {
+        rendered.pop();
+    }
+    if rendered.len() == 3 && rendered[2] == rendered[0] {
+        rendered.pop();
+    }
+    if rendered.len() == 2 && rendered[1] == rendered[0] {
+        rendered.pop();
+    }
+    let mut result = rendered.join(" ");
+    if let Some(index) = round {
+        let radii = parts[index + 1..]
+            .iter()
+            .map(|value| {
+                ClipLengthPercentage::parse(value)
+                    .map(ClipLengthPercentage::css_text)
+                    .unwrap_or_else(|| (*value).to_string())
+            })
+            .collect::<Vec<_>>();
+        if radii.iter().any(|value| value != "0px") {
+            result.push_str(" round ");
+            result.push_str(&radii.join(" "));
+        }
+    }
+    Some(format!("inset({result})"))
+}
+
+fn canonicalize_computed_clip_shape_body(name: &str, body: &str) -> String {
+    if name == "circle" {
+        let mut parts = super::split_top_level_whitespace(body);
+        if let Some(radius) = parts.first_mut()
+            && let Some(value) = radius
+                .strip_suffix("px")
+                .and_then(|value| value.parse::<f32>().ok())
+            && value < 0.0
+        {
+            *radius = "0px";
+        }
+        return parts.join(" ");
+    }
+    if name == "polygon" {
+        return body
+            .strip_prefix("round 0px, ")
+            .or_else(|| body.strip_prefix("nonzero round 0px, "))
+            .unwrap_or(body)
+            .to_string();
+    }
+    body.to_string()
 }
 
 fn render_shape_outside_value(value: &Value, ctx: ResolutionContext) -> String {
@@ -16148,6 +16680,8 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (PropertyId::CounterSet, InitialValue::Keyword("none")),
     (PropertyId::Quotes, InitialValue::Keyword("auto")),
     (PropertyId::CounterIncrement, InitialValue::Keyword("none")),
+    (PropertyId::ClipPath, InitialValue::Keyword("none")),
+    (PropertyId::WebkitClipPath, InitialValue::Keyword("none")),
     (PropertyId::ShapeOutside, InitialValue::Keyword("none")),
     (PropertyId::ShapeMargin, InitialValue::Px(0.0)),
     (PropertyId::BorderImageSource, InitialValue::Keyword("none")),
@@ -16374,6 +16908,16 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (PropertyId::OutlineWidth, InitialValue::Px(3.0)),
     (PropertyId::OutlineOffset, InitialValue::Px(0.0)),
     (PropertyId::OutlineColor, InitialValue::Keyword("auto")),
+    (
+        PropertyId::WebkitTextFillColor,
+        InitialValue::Keyword("currentcolor"),
+    ),
+    (
+        PropertyId::WebkitTextStrokeColor,
+        InitialValue::Keyword("currentcolor"),
+    ),
+    (PropertyId::WebkitTextStrokeWidth, InitialValue::Px(0.0)),
+    (PropertyId::PaintOrder, InitialValue::Keyword("normal")),
     (PropertyId::BreakBefore, InitialValue::Keyword("auto")),
     (PropertyId::BreakAfter, InitialValue::Keyword("auto")),
     (PropertyId::BreakInside, InitialValue::Keyword("auto")),
@@ -16717,6 +17261,10 @@ const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
     PropertyId::BorderCollapse,
     PropertyId::BorderSpacing,
     PropertyId::Color,
+    PropertyId::WebkitTextFillColor,
+    PropertyId::WebkitTextStrokeColor,
+    PropertyId::WebkitTextStrokeWidth,
+    PropertyId::PaintOrder,
     PropertyId::Cursor,
     PropertyId::Direction,
     PropertyId::FontFamily,
