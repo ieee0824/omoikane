@@ -60,6 +60,7 @@ const MAX_TILE_PIXELS: u64 = 16_777_216;
 
 thread_local! {
     static FORCE_OPACITY: Cell<bool> = const { Cell::new(false) };
+    static FORCE_TEXT_MASK: Cell<bool> = const { Cell::new(false) };
     static LAST_RENDER_TIMINGS: RefCell<RenderTimings> = RefCell::new(RenderTimings::default());
     #[cfg(test)]
     static EFFECT_SURFACE_PIXELS: Cell<u64> = const { Cell::new(0) };
@@ -67,6 +68,19 @@ thread_local! {
     static BACKDROP_SURFACE_PIXELS: Cell<u64> = const { Cell::new(0) };
     #[cfg(test)]
     static BACKGROUND_IMAGE_SURFACE_PIXELS: Cell<u64> = const { Cell::new(0) };
+}
+
+fn with_forced_text_mask<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FORCE_TEXT_MASK.with(|cell| cell.set(self.0));
+        }
+    }
+    FORCE_TEXT_MASK.with(|cell| {
+        let _restore = Restore(cell.replace(true));
+        f()
+    })
 }
 
 #[cfg(test)]
@@ -1516,6 +1530,11 @@ impl Canvas {
         color: Color,
         clip: Option<Rect>,
     ) {
+        let color = if FORCE_TEXT_MASK.with(Cell::get) {
+            Color::rgb(255, 255, 255)
+        } else {
+            color
+        };
         let destination = Rect {
             x,
             y,
@@ -5702,8 +5721,23 @@ fn paint_box_internal_to(
             .iter()
             .any(|mode| !mode.eq_ignore_ascii_case("normal"))
             && u64::from(canvas.width) * u64::from(canvas.height) <= MAX_TILE_PIXELS;
-        if isolated {
+        let text_clipped = background_list(style, "background-clip", "border-box")
+            .iter()
+            .any(|clip| clip.eq_ignore_ascii_case("text"))
+            && u64::from(canvas.width) * u64::from(canvas.height) <= MAX_TILE_PIXELS;
+        if isolated || text_clipped {
             let mut background = Canvas::new(canvas.width, canvas.height);
+            let text_mask = text_clipped.then(|| {
+                build_background_text_mask(
+                    canvas.width,
+                    canvas.height,
+                    layout,
+                    resolver,
+                    context,
+                    inherited_clip,
+                    offset,
+                )
+            });
             paint_box_backgrounds(
                 &mut background,
                 layout,
@@ -5714,6 +5748,7 @@ fn paint_box_internal_to(
                 viewport,
                 offset,
                 context.propagated_background_node,
+                text_mask.as_ref(),
             );
             canvas.draw_image(&background.into_image(), 0.0, 0.0);
         } else {
@@ -5727,6 +5762,7 @@ fn paint_box_internal_to(
                 viewport,
                 offset,
                 context.propagated_background_node,
+                None,
             );
         }
     }
@@ -5849,6 +5885,50 @@ fn paint_box_internal_to(
     }
 }
 
+fn build_background_text_mask(
+    width: u32,
+    height: u32,
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    context: PaintContext<'_>,
+    clip: Option<Rect>,
+    offset: PaintOffset,
+) -> Canvas {
+    let mut mask = Canvas::new(width, height);
+    with_forced_text_mask(|| {
+        paint_text_mask_subtree(&mut mask, layout, resolver, context, clip, offset);
+    });
+    mask
+}
+
+fn apply_background_text_mask(background: &mut Canvas, mask: &Canvas) {
+    for (pixel, mask) in background
+        .pixels
+        .chunks_exact_mut(4)
+        .zip(mask.pixels.chunks_exact(4))
+    {
+        pixel[3] = ((u16::from(pixel[3]) * u16::from(mask[3]) + 127) / 255) as u8;
+    }
+}
+
+fn paint_text_mask_subtree(
+    mask: &mut Canvas,
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    context: PaintContext<'_>,
+    clip: Option<Rect>,
+    offset: PaintOffset,
+) {
+    if layout.visibility == Visibility::Hidden || layout.content_visibility_contents_skipped {
+        return;
+    }
+    let style = paint_box_style(layout, resolver);
+    text::paint_text_with_context(mask, layout, resolver, &style, clip, context, offset);
+    for child in &layout.children {
+        paint_text_mask_subtree(mask, child, resolver, context, clip, offset);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_box_backgrounds(
     canvas: &mut Canvas,
@@ -5860,6 +5940,7 @@ fn paint_box_backgrounds(
     viewport: Rect,
     offset: PaintOffset,
     propagated_background_node: Option<usize>,
+    text_mask: Option<&Canvas>,
 ) {
     let image_count = background_list(style, "background-image", "none")
         .len()
@@ -5879,9 +5960,12 @@ fn paint_box_backgrounds(
                 || propagated_background_node != Some(layout.node.identity())
         })
     {
+        let text_clipped = color_clip.eq_ignore_ascii_case("text");
+        let mut text_layer = text_clipped.then(|| Canvas::new(canvas.width, canvas.height));
+        let target = text_layer.as_mut().unwrap_or(canvas);
         if background_radii != (0.0, 0.0, 0.0, 0.0) {
             let (tl, tr, br, bl) = background_radii;
-            canvas.fill_rounded_rect(
+            target.fill_rounded_rect(
                 background_clip_rect,
                 background,
                 tl,
@@ -5891,7 +5975,11 @@ fn paint_box_backgrounds(
                 Some(background_clip),
             );
         } else {
-            canvas.fill_rect_clipped(background_clip_rect, background, Some(background_clip));
+            target.fill_rect_clipped(background_clip_rect, background, Some(background_clip));
+        }
+        if let (Some(mut text_layer), Some(text_mask)) = (text_layer, text_mask) {
+            apply_background_text_mask(&mut text_layer, text_mask);
+            canvas.draw_image(&text_layer.into_image(), 0.0, 0.0);
         }
     }
     paint_background_images_for_box(
@@ -5903,6 +5991,7 @@ fn paint_box_backgrounds(
         inherited_clip,
         viewport,
         offset,
+        text_mask,
     );
 }
 
@@ -8810,6 +8899,7 @@ fn paint_background_images_for_box(
     inherited_clip: Option<Rect>,
     viewport: Rect,
     offset: PaintOffset,
+    text_mask: Option<&Canvas>,
 ) {
     let images = background_list(style, "background-image", "none");
     let origins = background_list(style, "background-origin", "padding-box");
@@ -8842,7 +8932,7 @@ fn paint_background_images_for_box(
         let Some(clip) = clip else {
             continue;
         };
-        let layer_style = background_layer_style(
+        let mut layer_style = background_layer_style(
             &images[index],
             &positions_x[index % positions_x.len()],
             &positions_y[index % positions_y.len()],
@@ -8850,6 +8940,9 @@ fn paint_background_images_for_box(
             &repeats[index % repeats.len()],
             &attachments[index % attachments.len()],
         );
+        if let Some(value) = style.get_by_id(PropertyId::ImageRendering) {
+            layer_style.set_paint_value("image-rendering", value.css_text());
+        }
         if background_attachment(&layer_style) == BackgroundAttachment::Local
             && layout.is_scroll_container()
         {
@@ -8864,7 +8957,8 @@ fn paint_background_images_for_box(
             origin.height += extra_height;
         }
         let blend_mode = &blend_modes[index % blend_modes.len()];
-        if blend_mode.eq_ignore_ascii_case("normal")
+        let text_clipped = clips[index % clips.len()].eq_ignore_ascii_case("text");
+        if (blend_mode.eq_ignore_ascii_case("normal") && !text_clipped)
             || u64::from(canvas.width) * u64::from(canvas.height) > MAX_TILE_PIXELS
         {
             paint_background_image_rounded(
@@ -8887,7 +8981,14 @@ fn paint_background_images_for_box(
                 clip_rect,
                 radii,
             );
-            composite_background_blend(canvas, &layer, blend_mode, clip);
+            if text_clipped && let Some(text_mask) = text_mask {
+                apply_background_text_mask(&mut layer, text_mask);
+            }
+            if blend_mode.eq_ignore_ascii_case("normal") {
+                canvas.draw_image(&layer.into_image(), 0.0, 0.0);
+            } else {
+                composite_background_blend(canvas, &layer, blend_mode, clip);
+            }
         }
     }
 }

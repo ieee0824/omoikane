@@ -1985,6 +1985,69 @@ fn nonseparable_background_blend_modes_use_cross_channel_components() {
 }
 
 #[test]
+fn background_clip_text_uses_glyph_alpha_even_for_transparent_text() {
+    let stylesheet = parse_stylesheet(
+        "body { margin: 0; } div { width: 40px; height: 20px; font: 16px/20px sans-serif; \
+         color: transparent; background: red; background-clip: text; }",
+    )
+    .unwrap();
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    div.append_child(NodeHandle::text("X"));
+    body.append_child(div);
+    document.append_child(body.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, stylesheet.clone());
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 40.0,
+        height: 20.0,
+    };
+    let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    let mut paint_resolver = StyleResolver::new();
+    paint_resolver.add_stylesheet(Origin::Author, stylesheet);
+    let canvas = paint_layout(&layout, &mut paint_resolver, viewport);
+    let red = count_pixels(&canvas, Color::rgb(255, 0, 0));
+    assert!(
+        red > 0 && red < 40 * 20,
+        "unexpected red pixel count: {red}"
+    );
+    assert_eq!(canvas.pixel(39, 19), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn background_clip_text_masks_only_its_matching_layer() {
+    let stylesheet = parse_stylesheet(
+        "body { margin: 0; } div { width: 40px; height: 20px; font: 16px/20px sans-serif; \
+         color: transparent; background-image: linear-gradient(red, red), \
+         linear-gradient(blue, blue); background-clip: text, border-box; }",
+    )
+    .unwrap();
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    div.append_child(NodeHandle::text("X"));
+    body.append_child(div);
+    document.append_child(body.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, stylesheet.clone());
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 40.0,
+        height: 20.0,
+    };
+    let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    let mut paint_resolver = StyleResolver::new();
+    paint_resolver.add_stylesheet(Origin::Author, stylesheet);
+    let canvas = paint_layout(&layout, &mut paint_resolver, viewport);
+    assert!(count_pixels(&canvas, Color::rgb(255, 0, 0)) > 0);
+    assert_eq!(canvas.pixel(39, 19), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
 fn paints_non_repeating_background_images_once() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
