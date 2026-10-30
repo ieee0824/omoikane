@@ -5863,6 +5863,23 @@ fn invalid_clip_shape_and_mask_mode_declarations_are_ignored() {
 
 #[test]
 fn validates_clip_shape_function_arguments() {
+    assert!(supports_declaration(
+        "clip-path",
+        "xywh(10% 20% 60% 50% round 4px) content-box"
+    ));
+    assert!(supports_declaration(
+        "clip-path",
+        "polygon(evenodd, 0% 0%, 100% 0%, 0% 100%) padding-box"
+    ));
+    assert!(supports_declaration("clip-path", "content-box"));
+    assert!(!supports_declaration(
+        "clip-path",
+        "xywh(0 0 10px) border-box"
+    ));
+    assert!(!supports_declaration(
+        "clip-path",
+        "circle(10px) border-box padding-box"
+    ));
     assert!(!supports_declaration("clip-path", "circle(not-a-length)"));
     assert!(!supports_declaration("clip-path", "inset(1px round)"));
     assert!(!supports_declaration(

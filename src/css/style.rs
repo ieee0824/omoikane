@@ -7516,27 +7516,14 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         }
         "shape-margin" => return validate_shape_margin_declaration(name, value),
         "clip-path" => {
-            return match value {
-                Value::Keyword(keyword)
-                    if is_css_wide_keyword(&keyword.to_ascii_lowercase())
-                        || keyword.eq_ignore_ascii_case("none") =>
-                {
-                    DeclarationValidation::Unvalidated
-                }
-                Value::Function { name: function, .. }
-                    if matches!(
-                        function.to_ascii_lowercase().as_str(),
-                        "inset" | "circle" | "ellipse" | "polygon"
-                    ) =>
-                {
-                    let rendered = render_value(value);
-                    if crate::paint::is_valid_clip_path_value(&rendered) {
-                        DeclarationValidation::Unvalidated
-                    } else {
-                        DeclarationValidation::Invalid
-                    }
-                }
-                _ => DeclarationValidation::Invalid,
+            if matches!(value, Value::Keyword(keyword) if is_css_wide_keyword(&keyword.to_ascii_lowercase()) || keyword.eq_ignore_ascii_case("none"))
+            {
+                return DeclarationValidation::Unvalidated;
+            }
+            return if crate::paint::is_valid_clip_path_value(&render_value(value)) {
+                DeclarationValidation::Unvalidated
+            } else {
+                DeclarationValidation::Invalid
             };
         }
         "mask-repeat" | "background-repeat" => return validate_repeat_style_value(value),
@@ -14381,7 +14368,7 @@ fn render_clip_path_value(value: &Value, ctx: ResolutionContext) -> String {
         Value::Function { name, arguments }
             if matches!(
                 name.to_ascii_lowercase().as_str(),
-                "inset" | "circle" | "ellipse" | "polygon"
+                "inset" | "circle" | "ellipse" | "polygon" | "xywh"
             ) =>
         {
             let canonical_name = name.to_ascii_lowercase();

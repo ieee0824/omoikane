@@ -290,6 +290,7 @@ fn absolute_auto_inset_thumbnail_paints_inside_ratio_padding_box() {
 fn polygon_clip_hit_testing_includes_boundary_but_not_zero_area_shapes() {
     let square = ClipPathShape::Polygon {
         points: vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+        fill_rule: ClipFillRule::NonZero,
         bounds: Rect::default(),
     };
     for point in [
@@ -308,6 +309,7 @@ fn polygon_clip_hit_testing_includes_boundary_but_not_zero_area_shapes() {
     }
     let line = ClipPathShape::Polygon {
         points: vec![(0.0, 5.0), (5.0, 5.0), (10.0, 5.0)],
+        fill_rule: ClipFillRule::NonZero,
         bounds: Rect::default(),
     };
     assert!(!line.contains((5.0, 5.0)));
@@ -7763,6 +7765,54 @@ fn clip_path_ellipse_and_polygon_shapes_clip_paint() {
     );
     assert_eq!(triangle.pixel(10, 18), Some(Color::rgb(0, 128, 0)));
     assert_eq!(triangle.pixel(1, 1), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn clip_path_xywh_and_reference_boxes_share_paint_geometry() {
+    let xywh = paint_clip_path_document(
+        ".target { width: 20px; height: 20px; background: red; \
+         clip-path: xywh(25% 25% 50% 50% round 2px); }",
+        "<div class='target'></div>",
+        20.0,
+        20.0,
+    );
+    assert_eq!(xywh.pixel(10, 10), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(xywh.pixel(2, 10), Some(Color::rgba(0, 0, 0, 0)));
+
+    let content_box = paint_clip_path_document(
+        ".target { box-sizing:border-box;width:20px;height:20px;padding:3px;border:2px solid blue;\
+         background:red;clip-path:content-box; }",
+        "<div class='target'></div>",
+        20.0,
+        20.0,
+    );
+    assert_eq!(content_box.pixel(10, 10), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(content_box.pixel(3, 10), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn clip_path_polygon_preserves_typed_fill_rule() {
+    let mut style = ComputedStyle::default();
+    style.set_paint_value(
+        "clip-path",
+        "polygon(evenodd, 0 0, 10px 0, 0 10px)".to_string(),
+    );
+    let shape = clip_path_shape(
+        &style,
+        Rect {
+            width: 10.0,
+            height: 10.0,
+            ..Rect::default()
+        },
+    )
+    .expect("valid polygon");
+    assert!(matches!(
+        shape,
+        ClipPathShape::Polygon {
+            fill_rule: ClipFillRule::EvenOdd,
+            ..
+        }
+    ));
 }
 
 #[test]

@@ -7211,6 +7211,13 @@ impl ClipPathInsetLength {
 
 const MAX_CLIP_PATH_POLYGON_POINTS: usize = 256;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ClipFillRule {
+    #[default]
+    NonZero,
+    EvenOdd,
+}
+
 /// A paint-time representation of the basic-shape forms accepted by
 /// `clip-path`.  The layout engine keeps the shape in the element's local
 /// border-box coordinate space; callers apply the same shape to descendants,
@@ -7233,6 +7240,7 @@ pub(crate) enum ClipPathShape {
     },
     Polygon {
         points: Vec<(f32, f32)>,
+        fill_rule: ClipFillRule,
         bounds: Rect,
     },
 }
@@ -7283,12 +7291,50 @@ impl ClipPathShape {
                 let dy = (point.1 - center.1) / *ry;
                 dx * dx + dy * dy <= 1.0 + 1e-4
             }
-            Self::Polygon { points, .. } => crate::geometry::point_in_polygon(
-                point,
-                points,
-                crate::geometry::PolygonUse::CssClip,
-            ),
+            Self::Polygon {
+                points, fill_rule, ..
+            } => point_in_clip_subpaths(point, std::slice::from_ref(points), *fill_rule),
         }
+    }
+}
+
+fn point_in_clip_subpaths(
+    point: (f32, f32),
+    subpaths: &[Vec<(f32, f32)>],
+    fill_rule: ClipFillRule,
+) -> bool {
+    let mut winding = 0i32;
+    for points in subpaths {
+        let area = points
+            .iter()
+            .zip(points.iter().cycle().skip(1))
+            .take(points.len())
+            .map(|(&(x0, y0), &(x1, y1))| x0 * y1 - x1 * y0)
+            .sum::<f32>();
+        for index in 0..points.len() {
+            let (x0, y0) = points[index];
+            let (x1, y1) = points[(index + 1) % points.len()];
+            let cross = (point.0 - x0) * (y1 - y0) - (point.1 - y0) * (x1 - x0);
+            if area.abs() > 1e-6
+                && cross.abs() <= 1e-5
+                && point.0 >= x0.min(x1) - 1e-6
+                && point.0 <= x0.max(x1) + 1e-6
+                && point.1 >= y0.min(y1) - 1e-6
+                && point.1 <= y0.max(y1) + 1e-6
+            {
+                return true;
+            }
+            if (y0 <= point.1 && y1 > point.1) || (y1 <= point.1 && y0 > point.1) {
+                let x = x0 + (point.1 - y0) * (x1 - x0) / (y1 - y0);
+                if x > point.0 {
+                    winding += if y1 > y0 { 1 } else { -1 };
+                }
+            }
+        }
+    }
+    match fill_rule {
+        ClipFillRule::NonZero => winding != 0,
+        ClipFillRule::EvenOdd => winding.unsigned_abs() % 2 == 1,
     }
 }
 
@@ -7376,7 +7422,79 @@ fn clip_path_shape(style: &ComputedStyle, border_box: Rect) -> Option<ClipPathSh
         Some(ComputedValue::Keyword(value)) | Some(ComputedValue::String(value)) => value.trim(),
         _ => return None,
     };
-    basic_shape_from_value(value, border_box)
+    let (shape, reference) = split_clip_path_value(value)?;
+    let reference_box = clip_path_reference_box(style, border_box, reference);
+    if shape.is_empty() {
+        return Some(ClipPathShape::RoundedRect {
+            rect: reference_box,
+            radii: (0.0, 0.0, 0.0, 0.0),
+        });
+    }
+    basic_shape_from_value(shape, reference_box)
+}
+
+fn split_clip_path_value(value: &str) -> Option<(&str, Option<&str>)> {
+    let parts = split_top_level_whitespace(value.trim());
+    let is_box = |part: &str| {
+        matches!(
+            part.to_ascii_lowercase().as_str(),
+            "margin-box" | "border-box" | "padding-box" | "content-box"
+        )
+    };
+    match parts.as_slice() {
+        [shape] if !is_box(shape) => Some((shape, None)),
+        [reference] if is_box(reference) => Some(("", Some(reference))),
+        [shape, reference] if is_box(reference) => Some((shape, Some(reference))),
+        [reference, shape] if is_box(reference) => Some((shape, Some(reference))),
+        _ => None,
+    }
+}
+
+fn clip_path_reference_box(style: &ComputedStyle, border: Rect, reference: Option<&str>) -> Rect {
+    let inset = |rect: Rect, top: f32, right: f32, bottom: f32, left: f32| Rect {
+        x: rect.x + left,
+        y: rect.y + top,
+        width: (rect.width - left - right).max(0.0),
+        height: (rect.height - top - bottom).max(0.0),
+    };
+    let edges = |prefix: &str| {
+        let name = |side: &str| {
+            if prefix == "border" {
+                format!("border-{side}-width")
+            } else {
+                format!("{prefix}-{side}")
+            }
+        };
+        (
+            length_property(style, &name("top")).unwrap_or(0.0),
+            length_property(style, &name("right")).unwrap_or(0.0),
+            length_property(style, &name("bottom")).unwrap_or(0.0),
+            length_property(style, &name("left")).unwrap_or(0.0),
+        )
+    };
+    let (bt, br, bb, bl) = edges("border");
+    let padding = inset(border, bt, br, bb, bl);
+    match reference
+        .unwrap_or("border-box")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "padding-box" => padding,
+        "content-box" => {
+            let (pt, pr, pb, pl) = edges("padding");
+            inset(padding, pt, pr, pb, pl)
+        }
+        "margin-box" => {
+            let (mt, mr, mb, ml) = edges("margin");
+            Rect {
+                x: border.x - ml,
+                y: border.y - mt,
+                width: border.width + ml + mr,
+                height: border.height + mt + mb,
+            }
+        }
+        _ => border,
+    }
 }
 
 /// Resolves a supported CSS basic shape against the supplied reference box.
@@ -7496,8 +7614,22 @@ pub(crate) fn basic_shape_from_value(value: &str, border_box: Rect) -> Option<Cl
             })
         }
         "polygon" => {
+            let mut fill_rule = ClipFillRule::NonZero;
             let mut points = Vec::new();
-            for component in crate::css::split_top_level_commas(body.trim()) {
+            let mut components = crate::css::split_top_level_commas(body.trim());
+            if components.first().is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "nonzero" | "evenodd"
+                )
+            }) {
+                fill_rule = if components.remove(0).trim().eq_ignore_ascii_case("evenodd") {
+                    ClipFillRule::EvenOdd
+                } else {
+                    ClipFillRule::NonZero
+                };
+            }
+            for component in components {
                 let components = split_top_level_whitespace(component.trim());
                 if components.len() != 2 {
                     return None;
@@ -7527,6 +7659,7 @@ pub(crate) fn basic_shape_from_value(value: &str, border_box: Rect) -> Option<Cl
                 .fold(f32::NEG_INFINITY, f32::max);
             Some(ClipPathShape::Polygon {
                 points,
+                fill_rule,
                 bounds: Rect {
                     x: min_x,
                     y: min_y,
@@ -7534,6 +7667,26 @@ pub(crate) fn basic_shape_from_value(value: &str, border_box: Rect) -> Option<Cl
                     height: max_y - min_y,
                 },
             })
+        }
+        "xywh" => {
+            let parts = split_top_level_whitespace(body.trim());
+            let round_at = parts
+                .iter()
+                .position(|part| part.eq_ignore_ascii_case("round"));
+            let geometry = round_at.map_or(&parts[..], |index| &parts[..index]);
+            if geometry.len() != 4 {
+                return None;
+            }
+            let rect = Rect {
+                x: border_box.x + shape_length(geometry[0], border_box.width)?,
+                y: border_box.y + shape_length(geometry[1], border_box.height)?,
+                width: shape_length(geometry[2], border_box.width)?.max(0.0),
+                height: shape_length(geometry[3], border_box.height)?.max(0.0),
+            };
+            let radii = round_at
+                .map(|index| parse_shape_radii(&parts[index + 1..].join(" "), rect))
+                .unwrap_or(Some((0.0, 0.0, 0.0, 0.0)))?;
+            Some(ClipPathShape::RoundedRect { rect, radii })
         }
         _ => None,
     }
@@ -7576,7 +7729,12 @@ pub(crate) fn is_valid_shape_outside_value(value: &str) -> bool {
 /// This is intentionally syntax-only: dimensions are resolved later against
 /// the element's border box, so a valid shape must not depend on its size.
 pub(crate) fn is_valid_clip_path_value(value: &str) -> bool {
-    let value = value.trim();
+    let Some((value, reference)) = split_clip_path_value(value) else {
+        return false;
+    };
+    if value.is_empty() {
+        return reference.is_some();
+    }
     let Some(open) = value.find('(') else {
         return false;
     };
@@ -7590,6 +7748,7 @@ pub(crate) fn is_valid_clip_path_value(value: &str) -> bool {
         "circle" => valid_clip_path_circle_body(body),
         "ellipse" => valid_clip_path_ellipse_body(body),
         "polygon" => valid_clip_path_polygon_body(body),
+        "xywh" => valid_clip_path_xywh_body(body),
         _ => false,
     }
 }
@@ -7721,12 +7880,34 @@ fn valid_clip_path_ellipse_body(body: &str) -> bool {
 }
 
 fn valid_clip_path_polygon_body(body: &str) -> bool {
-    let components = crate::css::split_top_level_commas(body.trim());
+    let mut components = crate::css::split_top_level_commas(body.trim());
+    if components.first().is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "nonzero" | "evenodd"
+        )
+    }) {
+        components.remove(0);
+    }
     (3..=MAX_CLIP_PATH_POLYGON_POINTS).contains(&components.len())
         && components.iter().all(|component| {
             let point = split_top_level_whitespace(component.trim());
             point.len() == 2 && point.iter().all(|part| valid_clip_path_length(part))
         })
+}
+
+fn valid_clip_path_xywh_body(body: &str) -> bool {
+    let parts = split_top_level_whitespace(body.trim());
+    let round_at = parts
+        .iter()
+        .position(|part| part.eq_ignore_ascii_case("round"));
+    let geometry = round_at.map_or(&parts[..], |index| &parts[..index]);
+    let radii = round_at.map_or(&[][..], |index| &parts[index + 1..]);
+    geometry.len() == 4
+        && geometry.iter().all(|part| valid_clip_path_length(part))
+        && (round_at.is_none()
+            || ((1..=4).contains(&radii.len())
+                && radii.iter().all(|part| valid_clip_path_length(part))))
 }
 
 /// Returns `None` for unsupported clip shapes, `Some(None)` for an empty inset,
