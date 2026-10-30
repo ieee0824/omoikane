@@ -7756,6 +7756,30 @@ fn clip_path_ellipse_and_polygon_shapes_clip_paint() {
     assert_eq!(ellipse.pixel(10, 5), Some(Color::rgb(0, 0, 255)));
     assert_eq!(ellipse.pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
 
+    let default_radii = basic_shape_from_value(
+        "ellipse(at 25% 50%)",
+        Rect {
+            width: 20.0,
+            height: 10.0,
+            ..Rect::default()
+        },
+    )
+    .expect("omitted ellipse radii resolve to closest-side");
+    assert_eq!(default_radii.bounds().width, 10.0);
+    assert_eq!(default_radii.bounds().height, 10.0);
+
+    let farthest = basic_shape_from_value(
+        "ellipse(farthest-side closest-side at 25% 50%)",
+        Rect {
+            width: 20.0,
+            height: 10.0,
+            ..Rect::default()
+        },
+    )
+    .expect("ellipse side keywords resolve against each axis");
+    assert_eq!(farthest.bounds().width, 30.0);
+    assert_eq!(farthest.bounds().height, 10.0);
+
     let triangle = paint_clip_path_document(
         ".target { width: 20px; height: 20px; background: green; \
          clip-path: polygon(50% 0%, 100% 100%, 0% 100%); }",
@@ -7836,6 +7860,27 @@ fn clip_path_path_and_shape_clip_with_shared_compound_geometry() {
     );
     assert_eq!(shape.pixel(2, 2), Some(Color::rgb(0, 0, 255)));
     assert_eq!(shape.pixel(18, 18), Some(Color::rgba(0, 0, 0, 0)));
+
+    let reference = Rect {
+        width: 20.0,
+        height: 20.0,
+        ..Rect::default()
+    };
+    let curve = basic_shape_from_value(
+        "shape(from 0 20px, curve to 20px 20px with 0 0 / 20px 0, close)",
+        reference,
+    )
+    .expect("cubic shape command should produce shared path geometry");
+    assert!(curve.contains((10.0, 12.0)));
+    assert!(!curve.contains((10.0, 2.0)));
+
+    let arc = basic_shape_from_value(
+        "shape(from 0 10px, arc by 20px 0 of 10px cw, line by 0 10px, line to 0 20px, close)",
+        reference,
+    )
+    .expect("relative arc command should produce shared path geometry");
+    assert!(matches!(arc, ClipPathShape::Path { .. }));
+    assert_eq!(arc.bounds().width, 20.0);
 }
 
 #[test]

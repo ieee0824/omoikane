@@ -5673,7 +5673,10 @@ fn canonicalizes_clip_path_inset_and_webkit_alias() {
         title_style.get("clip-path"),
         Some(&ComputedValue::Keyword("inset(0 0 100% 0)".to_string()))
     );
-    assert_eq!(title_style.get("-webkit-clip-path"), None);
+    assert_eq!(
+        title_style.get("-webkit-clip-path"),
+        Some(&ComputedValue::Keyword("none".to_string()))
+    );
     assert!(is_supported_property("clip-path"));
     assert!(is_supported_property("-webkit-clip-path"));
 }
@@ -5876,14 +5879,48 @@ fn validates_clip_shape_function_arguments() {
         "clip-path",
         "path(evenodd, 'M0 0 H20 V20 H0 Z M5 5 H15 V15 H5 Z')"
     ));
+    assert!(supports_declaration(
+        "clip-path",
+        "path(nonzero, \"M20,20h60 v60 h-60z M30,30 h40 v40 h-40z\")"
+    ));
     assert!(!supports_declaration(
         "clip-path",
         "path(M0 0 H20 V20 H0 Z)"
     ));
+    assert_eq!(
+        normalize_clip_path_specified("circle(4% at top right)"),
+        Some("circle(4% at right top)".to_string())
+    );
+    assert_eq!(
+        normalize_clip_path_specified("xywh(0 1% 2px 3em round 0)"),
+        Some("xywh(0px 1% 2px 3em)".to_string())
+    );
+    assert_eq!(
+        normalize_clip_path_specified("polygon(nonzero round 1px, 1px 2px, 3em 4em)"),
+        Some("polygon(round 1px, 1px 2px, 3em 4em)".to_string())
+    );
+    assert_eq!(
+        normalize_clip_path_specified(
+            "path(nonzero, \"M20,20h60 v60 h-60z M30,30 h40 v40 h-40z\")"
+        ),
+        Some("path(\"M 20 20 h 60 v 60 h -60 Z M 30 30 h 40 v 40 h -40 Z\")".to_string())
+    );
     assert!(supports_declaration(
         "clip-path",
         "shape(from 0 0, line to 100% 0, line to 0 100%, close)"
     ));
+    for value in [
+        "shape(evenodd from 0px 0px, close)",
+        "shape(from 10px 10px, move by 10px 5px, line by 20px 40%, close)",
+        "shape(from 10px 10px, hline by 10px, vline to 5rem)",
+        "shape(from 10px 10px, curve to 50px 20px with 10rem 1%)",
+        "shape(from 10px 10px, curve by 50px 20px with 10rem 1px / 20vh 1ch)",
+        "shape(from 10px 10px, smooth to 50px 20px with 10rem 1%)",
+        "shape(from 10px 10px, arc to 50px 1pt of 10px 10px small rotate 0deg)",
+        "shape(from 10% 1rem, arc to 50px 1pt of 20% cw large rotate 25deg)",
+    ] {
+        assert!(supports_declaration("clip-path", value), "{value}");
+    }
     assert!(!supports_declaration(
         "clip-path",
         "xywh(0 0 10px) border-box"
@@ -5894,10 +5931,7 @@ fn validates_clip_shape_function_arguments() {
     ));
     assert!(!supports_declaration("clip-path", "circle(not-a-length)"));
     assert!(!supports_declaration("clip-path", "inset(1px round)"));
-    assert!(!supports_declaration(
-        "clip-path",
-        "polygon(0% 0%, 100% 0%)"
-    ));
+    assert!(supports_declaration("clip-path", "polygon(0% 0%, 100% 0%)"));
     assert!(!supports_declaration(
         "clip-path",
         "polygon(0% 0%, 100% 0%, 0% 100% round 2px)"
@@ -5907,15 +5941,12 @@ fn validates_clip_shape_function_arguments() {
         "clip-path",
         "circle(closest-side at 25% 50%)"
     ));
-    assert!(!supports_declaration(
+    assert!(supports_declaration(
         "clip-path",
         "circle(10px at 1rem 2rem)"
     ));
-    assert!(!supports_declaration("clip-path", "ellipse(1em 2px)"));
-    assert!(!supports_declaration(
-        "clip-path",
-        "inset(calc(1rem + 2px))"
-    ));
+    assert!(supports_declaration("clip-path", "ellipse(1em 2px)"));
+    assert!(supports_declaration("clip-path", "inset(calc(1rem + 2px))"));
     assert!(!supports_declaration(
         "clip-path",
         "circle(10px at right 10px)"
@@ -5928,8 +5959,8 @@ fn validates_clip_shape_function_arguments() {
         "clip-path",
         "inset(calc(1px + 2px + 3px))"
     ));
-    assert!(!supports_declaration("clip-path", "url(#clip)"));
-    assert!(!supports_declaration("-webkit-clip-path", "url(#clip)"));
+    assert!(supports_declaration("clip-path", "url(#clip)"));
+    assert!(supports_declaration("-webkit-clip-path", "url(#clip)"));
     assert!(supports_declaration("mask-repeat", "repeat"));
     assert!(supports_declaration("mask-repeat", "no-repeat repeat"));
     assert!(supports_declaration("-webkit-mask-repeat", "repeat-x"));
@@ -9676,8 +9707,24 @@ fn html_text_fill_stroke_and_paint_order_are_typed_and_inherited() {
     );
     assert_eq!(
         child_style.get("paint-order"),
-        Some(&ComputedValue::Keyword("stroke fill".into()))
+        Some(&ComputedValue::Keyword("stroke".into()))
     );
+
+    for (input, expected) in [
+        ("fill stroke", "fill"),
+        ("fill markers stroke", "fill markers"),
+        ("stroke fill markers", "stroke"),
+        ("markers stroke fill", "markers stroke"),
+    ] {
+        let element = NodeHandle::element("div");
+        element.set_attribute("style", &format!("paint-order:{input}"));
+        assert_eq!(
+            StyleResolver::new()
+                .computed_style(&element)
+                .get("paint-order"),
+            Some(&ComputedValue::Keyword(expected.into()))
+        );
+    }
 }
 
 #[test]
