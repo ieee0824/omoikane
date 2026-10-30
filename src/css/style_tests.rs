@@ -5872,6 +5872,18 @@ fn validates_clip_shape_function_arguments() {
         "polygon(evenodd, 0% 0%, 100% 0%, 0% 100%) padding-box"
     ));
     assert!(supports_declaration("clip-path", "content-box"));
+    assert!(supports_declaration(
+        "clip-path",
+        "path(evenodd, 'M0 0 H20 V20 H0 Z M5 5 H15 V15 H5 Z')"
+    ));
+    assert!(!supports_declaration(
+        "clip-path",
+        "path(M0 0 H20 V20 H0 Z)"
+    ));
+    assert!(supports_declaration(
+        "clip-path",
+        "shape(from 0 0, line to 100% 0, line to 0 100%, close)"
+    ));
     assert!(!supports_declaration(
         "clip-path",
         "xywh(0 0 10px) border-box"

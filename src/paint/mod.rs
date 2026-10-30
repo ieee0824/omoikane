@@ -7243,6 +7243,11 @@ pub(crate) enum ClipPathShape {
         fill_rule: ClipFillRule,
         bounds: Rect,
     },
+    Path {
+        subpaths: Vec<Vec<(f32, f32)>>,
+        fill_rule: ClipFillRule,
+        bounds: Rect,
+    },
 }
 
 impl ClipPathShape {
@@ -7251,7 +7256,8 @@ impl ClipPathShape {
             Self::RoundedRect { rect, .. } => *rect,
             Self::Circle { bounds, .. }
             | Self::Ellipse { bounds, .. }
-            | Self::Polygon { bounds, .. } => *bounds,
+            | Self::Polygon { bounds, .. }
+            | Self::Path { bounds, .. } => *bounds,
         }
     }
 
@@ -7294,6 +7300,11 @@ impl ClipPathShape {
             Self::Polygon {
                 points, fill_rule, ..
             } => point_in_clip_subpaths(point, std::slice::from_ref(points), *fill_rule),
+            Self::Path {
+                subpaths,
+                fill_rule,
+                ..
+            } => point_in_clip_subpaths(point, subpaths, *fill_rule),
         }
     }
 }
@@ -7509,6 +7520,8 @@ pub(crate) fn basic_shape_from_value(value: &str, border_box: Rect) -> Option<Cl
     let name = value[..open].trim().to_ascii_lowercase();
     let body = &value[open + 1..value.len() - 1];
     match name.as_str() {
+        "path" => parse_clip_path_path(body, border_box),
+        "shape" => parse_clip_path_shape_function(body, border_box),
         "inset" => {
             let parts = split_top_level_whitespace(body);
             let round_at = parts
@@ -7692,6 +7705,206 @@ pub(crate) fn basic_shape_from_value(value: &str, border_box: Rect) -> Option<Cl
     }
 }
 
+fn path_shape(subpaths: Vec<Vec<(f32, f32)>>, fill_rule: ClipFillRule) -> Option<ClipPathShape> {
+    let points = subpaths.iter().flatten().copied().collect::<Vec<_>>();
+    if points.len() < 3 {
+        return None;
+    }
+    let min_x = points
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::INFINITY, f32::min);
+    let min_y = points
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::INFINITY, f32::min);
+    let max_x = points
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let max_y = points
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::NEG_INFINITY, f32::max);
+    Some(ClipPathShape::Path {
+        subpaths,
+        fill_rule,
+        bounds: Rect {
+            x: min_x,
+            y: min_y,
+            width: max_x - min_x,
+            height: max_y - min_y,
+        },
+    })
+}
+
+fn parse_clip_path_path(body: &str, reference: Rect) -> Option<ClipPathShape> {
+    let components = crate::css::split_top_level_commas(body.trim());
+    let (fill_rule, data) = match components.as_slice() {
+        [rule, data]
+            if matches!(
+                rule.trim().to_ascii_lowercase().as_str(),
+                "nonzero" | "evenodd"
+            ) =>
+        {
+            (
+                (rule.trim().eq_ignore_ascii_case("evenodd"))
+                    .then_some(ClipFillRule::EvenOdd)
+                    .unwrap_or(ClipFillRule::NonZero),
+                *data,
+            )
+        }
+        [data] => (ClipFillRule::NonZero, *data),
+        _ => return None,
+    };
+    let data = data.trim();
+    let data = if data.len() >= 2
+        && ((data.starts_with('\'') && data.ends_with('\''))
+            || (data.starts_with('"') && data.ends_with('"')))
+    {
+        &data[1..data.len() - 1]
+    } else {
+        data
+    };
+    let commands = crate::svg::parse_path_data(data);
+    let mut subpaths = Vec::new();
+    let mut points = Vec::new();
+    let mut current = (0.0, 0.0);
+    let mut start = current;
+    for command in commands {
+        use crate::svg::PathCommand;
+        match command {
+            PathCommand::MoveTo(x, y) => {
+                if points.len() >= 2 {
+                    subpaths.push(std::mem::take(&mut points));
+                }
+                current = (x, y);
+                start = current;
+                points.push((x + reference.x, y + reference.y));
+            }
+            PathCommand::LineTo(x, y) => {
+                current = (x, y);
+                points.push((x + reference.x, y + reference.y));
+            }
+            PathCommand::HorizontalLineTo(x) => {
+                current.0 = x;
+                points.push((x + reference.x, current.1 + reference.y));
+            }
+            PathCommand::VerticalLineTo(y) => {
+                current.1 = y;
+                points.push((current.0 + reference.x, y + reference.y));
+            }
+            PathCommand::CurveTo(x1, y1, x2, y2, x, y) => {
+                let origin = current;
+                for step in 1..=12 {
+                    let t = step as f32 / 12.0;
+                    let u = 1.0 - t;
+                    points.push((
+                        u.powi(3) * origin.0
+                            + 3.0 * u.powi(2) * t * x1
+                            + 3.0 * u * t.powi(2) * x2
+                            + t.powi(3) * x
+                            + reference.x,
+                        u.powi(3) * origin.1
+                            + 3.0 * u.powi(2) * t * y1
+                            + 3.0 * u * t.powi(2) * y2
+                            + t.powi(3) * y
+                            + reference.y,
+                    ));
+                }
+                current = (x, y);
+            }
+            PathCommand::QuadraticCurveTo(cx, cy, x, y) => {
+                let origin = current;
+                for step in 1..=12 {
+                    let t = step as f32 / 12.0;
+                    let u = 1.0 - t;
+                    points.push((
+                        u.powi(2) * origin.0 + 2.0 * u * t * cx + t.powi(2) * x + reference.x,
+                        u.powi(2) * origin.1 + 2.0 * u * t * cy + t.powi(2) * y + reference.y,
+                    ));
+                }
+                current = (x, y);
+            }
+            PathCommand::ArcTo(rx, ry, rotation, large, sweep, x, y) => {
+                crate::svg::flatten_arc(
+                    &mut points,
+                    current.0,
+                    current.1,
+                    rx,
+                    ry,
+                    rotation,
+                    large,
+                    sweep,
+                    x,
+                    y,
+                    1.0,
+                    1.0,
+                    reference.x,
+                    reference.y,
+                );
+                current = (x, y);
+            }
+            PathCommand::Close => {
+                if points.last().copied() != Some((start.0 + reference.x, start.1 + reference.y)) {
+                    points.push((start.0 + reference.x, start.1 + reference.y));
+                }
+                current = start;
+            }
+        }
+    }
+    if points.len() >= 2 {
+        subpaths.push(points);
+    }
+    path_shape(subpaths, fill_rule)
+}
+
+fn parse_clip_path_shape_function(body: &str, reference: Rect) -> Option<ClipPathShape> {
+    let components = crate::css::split_top_level_commas(body.trim());
+    let first = components.first()?.trim();
+    let (fill_rule, first) = if let Some(rest) = first.strip_prefix("evenodd ") {
+        (ClipFillRule::EvenOdd, rest)
+    } else if let Some(rest) = first.strip_prefix("nonzero ") {
+        (ClipFillRule::NonZero, rest)
+    } else {
+        (ClipFillRule::NonZero, first)
+    };
+    let from = first.strip_prefix("from ")?;
+    let start_parts = split_top_level_whitespace(from);
+    if start_parts.len() != 2 {
+        return None;
+    }
+    let mut current = (
+        reference.x + shape_length(start_parts[0], reference.width)?,
+        reference.y + shape_length(start_parts[1], reference.height)?,
+    );
+    let mut points = vec![current];
+    for component in &components[1..] {
+        let command = component.trim().to_ascii_lowercase();
+        if command == "close" {
+            continue;
+        }
+        if let Some(target) = command.strip_prefix("line to ") {
+            let parts = split_top_level_whitespace(target);
+            if parts.len() != 2 {
+                return None;
+            }
+            current = (
+                reference.x + shape_length(parts[0], reference.width)?,
+                reference.y + shape_length(parts[1], reference.height)?,
+            );
+        } else if let Some(target) = command.strip_prefix("hline to ") {
+            current.0 = reference.x + shape_length(target, reference.width)?;
+        } else if let Some(target) = command.strip_prefix("vline to ") {
+            current.1 = reference.y + shape_length(target, reference.height)?;
+        } else {
+            return None;
+        }
+        points.push(current);
+    }
+    path_shape(vec![points], fill_rule)
+}
+
 /// Validates the `shape-outside` subset implemented by layout. Image-derived
 /// shapes are intentionally excluded; this accepts a basic shape, an optional
 /// reference box, a reference box by itself, or `none`.
@@ -7749,6 +7962,8 @@ pub(crate) fn is_valid_clip_path_value(value: &str) -> bool {
         "ellipse" => valid_clip_path_ellipse_body(body),
         "polygon" => valid_clip_path_polygon_body(body),
         "xywh" => valid_clip_path_xywh_body(body),
+        "path" => valid_clip_path_path_body(body),
+        "shape" => valid_clip_path_shape_body(body),
         _ => false,
     }
 }
@@ -7908,6 +8123,30 @@ fn valid_clip_path_xywh_body(body: &str) -> bool {
         && (round_at.is_none()
             || ((1..=4).contains(&radii.len())
                 && radii.iter().all(|part| valid_clip_path_length(part))))
+}
+
+fn valid_clip_path_path_body(body: &str) -> bool {
+    parse_clip_path_path(
+        body,
+        Rect {
+            width: 100.0,
+            height: 100.0,
+            ..Rect::default()
+        },
+    )
+    .is_some()
+}
+
+fn valid_clip_path_shape_body(body: &str) -> bool {
+    parse_clip_path_shape_function(
+        body,
+        Rect {
+            width: 100.0,
+            height: 100.0,
+            ..Rect::default()
+        },
+    )
+    .is_some()
 }
 
 /// Returns `None` for unsupported clip shapes, `Some(None)` for an empty inset,

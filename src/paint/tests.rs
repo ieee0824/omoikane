@@ -7816,6 +7816,29 @@ fn clip_path_polygon_preserves_typed_fill_rule() {
 }
 
 #[test]
+fn clip_path_path_and_shape_clip_with_shared_compound_geometry() {
+    let path = paint_clip_path_document(
+        ".target { width:20px;height:20px;background:red;\
+         clip-path:path(evenodd, 'M0 0 H20 V20 H0 Z M5 5 H15 V15 H5 Z'); }",
+        "<div class='target'></div>",
+        20.0,
+        20.0,
+    );
+    assert_eq!(path.pixel(2, 2), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(path.pixel(10, 10), Some(Color::rgba(0, 0, 0, 0)));
+
+    let shape = paint_clip_path_document(
+        ".target { width:20px;height:20px;background:blue;\
+         clip-path:shape(from 0 0, line to 100% 0, line to 0 100%, close); }",
+        "<div class='target'></div>",
+        20.0,
+        20.0,
+    );
+    assert_eq!(shape.pixel(2, 2), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(shape.pixel(18, 18), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
 fn clip_path_inset_round_clips_rounded_corners() {
     let canvas = paint_clip_path_document(
         ".target { width: 20px; height: 20px; background: red; \

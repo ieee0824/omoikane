@@ -7520,7 +7520,9 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             {
                 return DeclarationValidation::Unvalidated;
             }
-            return if crate::paint::is_valid_clip_path_value(&render_value(value)) {
+            return if clip_path_path_argument_is_string(value)
+                && crate::paint::is_valid_clip_path_value(&render_value(value))
+            {
                 DeclarationValidation::Unvalidated
             } else {
                 DeclarationValidation::Invalid
@@ -7765,6 +7767,16 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     DeclarationValidation::Unvalidated
+}
+
+fn clip_path_path_argument_is_string(value: &Value) -> bool {
+    match value {
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("path") => {
+            matches!(arguments.last(), Some(Value::String(_)))
+        }
+        Value::List(values) => values.iter().all(clip_path_path_argument_is_string),
+        _ => true,
+    }
 }
 
 pub(crate) fn normalize_cjk_specified(property: &str, value: &str) -> Option<String> {
@@ -14368,7 +14380,7 @@ fn render_clip_path_value(value: &Value, ctx: ResolutionContext) -> String {
         Value::Function { name, arguments }
             if matches!(
                 name.to_ascii_lowercase().as_str(),
-                "inset" | "circle" | "ellipse" | "polygon" | "xywh"
+                "inset" | "circle" | "ellipse" | "polygon" | "xywh" | "path" | "shape"
             ) =>
         {
             let canonical_name = name.to_ascii_lowercase();
