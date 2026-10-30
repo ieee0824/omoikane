@@ -5698,55 +5698,37 @@ fn paint_box_internal_to(
         // box-shadow を背景より前（下）に描画する
         border::paint_box_shadow(canvas, style, border_box, inherited_clip, shadow_masks);
 
-        // `background_list` always supplies at least its default, but keep the
-        // arithmetic robust if its parsing contract changes.
-        let image_count = background_list(style, "background-image", "none")
-            .len()
-            .max(1);
-        let clip_values = background_list(style, "background-clip", "border-box");
-        let color_clip = &clip_values[(image_count - 1) % clip_values.len()];
-        let (background_clip_rect, background_radii) =
-            background_clip_geometry(layout, style, color_clip, border_box, padding_box, offset);
-        let background_clip = match inherited_clip {
-            Some(inherited_clip) => intersect(background_clip_rect, inherited_clip),
-            None => Some(background_clip_rect),
-        };
-        if let Some(background_clip) = background_clip {
-            if let Some(background) = background_color(style).filter(|_| {
-                layout.pseudo.is_some()
-                    || layout.node.is_fullscreen()
-                    || context.propagated_background_node != Some(layout.node.identity())
-            }) {
-                if background_radii != (0.0, 0.0, 0.0, 0.0) {
-                    let (tl, tr, br, bl) = background_radii;
-                    canvas.fill_rounded_rect(
-                        background_clip_rect,
-                        background,
-                        tl,
-                        tr,
-                        br,
-                        bl,
-                        Some(background_clip),
-                    );
-                } else {
-                    canvas.fill_rect_clipped(
-                        background_clip_rect,
-                        background,
-                        Some(background_clip),
-                    );
-                }
-            }
+        let isolated = background_list(style, "background-blend-mode", "normal")
+            .iter()
+            .any(|mode| !mode.eq_ignore_ascii_case("normal"))
+            && u64::from(canvas.width) * u64::from(canvas.height) <= MAX_TILE_PIXELS;
+        if isolated {
+            let mut background = Canvas::new(canvas.width, canvas.height);
+            paint_box_backgrounds(
+                &mut background,
+                layout,
+                style,
+                border_box,
+                padding_box,
+                inherited_clip,
+                viewport,
+                offset,
+                context.propagated_background_node,
+            );
+            canvas.draw_image(&background.into_image(), 0.0, 0.0);
+        } else {
+            paint_box_backgrounds(
+                canvas,
+                layout,
+                style,
+                border_box,
+                padding_box,
+                inherited_clip,
+                viewport,
+                offset,
+                context.propagated_background_node,
+            );
         }
-        paint_background_images_for_box(
-            canvas,
-            style,
-            layout,
-            border_box,
-            padding_box,
-            inherited_clip,
-            viewport,
-            offset,
-        );
     }
     if layout.content_visibility_contents_skipped {
         // The principal box remains visible, but replaced content, generated
@@ -5865,6 +5847,63 @@ fn paint_box_internal_to(
     if paint_decorations {
         outline::paint_solid_outline(canvas, style, border_box, inherited_clip);
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_box_backgrounds(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    style: &ComputedStyle,
+    border_box: Rect,
+    padding_box: Rect,
+    inherited_clip: Option<Rect>,
+    viewport: Rect,
+    offset: PaintOffset,
+    propagated_background_node: Option<usize>,
+) {
+    let image_count = background_list(style, "background-image", "none")
+        .len()
+        .max(1);
+    let clip_values = background_list(style, "background-clip", "border-box");
+    let color_clip = &clip_values[(image_count - 1) % clip_values.len()];
+    let (background_clip_rect, background_radii) =
+        background_clip_geometry(layout, style, color_clip, border_box, padding_box, offset);
+    let background_clip = match inherited_clip {
+        Some(inherited_clip) => intersect(background_clip_rect, inherited_clip),
+        None => Some(background_clip_rect),
+    };
+    if let Some(background_clip) = background_clip
+        && let Some(background) = background_color(style).filter(|_| {
+            layout.pseudo.is_some()
+                || layout.node.is_fullscreen()
+                || propagated_background_node != Some(layout.node.identity())
+        })
+    {
+        if background_radii != (0.0, 0.0, 0.0, 0.0) {
+            let (tl, tr, br, bl) = background_radii;
+            canvas.fill_rounded_rect(
+                background_clip_rect,
+                background,
+                tl,
+                tr,
+                br,
+                bl,
+                Some(background_clip),
+            );
+        } else {
+            canvas.fill_rect_clipped(background_clip_rect, background, Some(background_clip));
+        }
+    }
+    paint_background_images_for_box(
+        canvas,
+        style,
+        layout,
+        border_box,
+        padding_box,
+        inherited_clip,
+        viewport,
+        offset,
+    );
 }
 
 fn paint_scrollbars(
@@ -8780,6 +8819,7 @@ fn paint_background_images_for_box(
     let sizes = background_list(style, "background-size", "auto");
     let repeats = background_list(style, "background-repeat", "repeat");
     let attachments = background_list(style, "background-attachment", "scroll");
+    let blend_modes = background_list(style, "background-blend-mode", "normal");
     for index in (0..images.len()).rev() {
         let mut origin = background_box_rect(
             &origins[index % origins.len()],
@@ -8823,15 +8863,201 @@ fn paint_background_images_for_box(
             origin.width += extra_width;
             origin.height += extra_height;
         }
-        paint_background_image_rounded(
-            canvas,
-            &layer_style,
-            origin,
-            Some(clip),
-            viewport,
-            clip_rect,
-            radii,
-        );
+        let blend_mode = &blend_modes[index % blend_modes.len()];
+        if blend_mode.eq_ignore_ascii_case("normal")
+            || u64::from(canvas.width) * u64::from(canvas.height) > MAX_TILE_PIXELS
+        {
+            paint_background_image_rounded(
+                canvas,
+                &layer_style,
+                origin,
+                Some(clip),
+                viewport,
+                clip_rect,
+                radii,
+            );
+        } else {
+            let mut layer = Canvas::new(canvas.width, canvas.height);
+            paint_background_image_rounded(
+                &mut layer,
+                &layer_style,
+                origin,
+                Some(clip),
+                viewport,
+                clip_rect,
+                radii,
+            );
+            composite_background_blend(canvas, &layer, blend_mode, clip);
+        }
+    }
+}
+
+fn composite_background_blend(destination: &mut Canvas, source: &Canvas, mode: &str, clip: Rect) {
+    let Some(area) = intersect(
+        clip,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: destination.width as f32,
+            height: destination.height as f32,
+        },
+    ) else {
+        return;
+    };
+    let x0 = area.x.floor().max(0.0) as u32;
+    let y0 = area.y.floor().max(0.0) as u32;
+    let x1 = (area.x + area.width).ceil().min(destination.width as f32) as u32;
+    let y1 = (area.y + area.height).ceil().min(destination.height as f32) as u32;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let index = ((y * destination.width + x) * 4) as usize;
+            let source = &source.pixels[index..index + 4];
+            if source[3] == 0 {
+                continue;
+            }
+            blend_background_pixel(&mut destination.pixels[index..index + 4], source, mode);
+        }
+    }
+}
+
+fn blend_background_pixel(destination: &mut [u8], source: &[u8], mode: &str) {
+    let source_alpha = f32::from(source[3]) / 255.0;
+    let backdrop_alpha = f32::from(destination[3]) / 255.0;
+    let output_alpha = source_alpha + backdrop_alpha - source_alpha * backdrop_alpha;
+    if output_alpha <= 0.0 {
+        destination.fill(0);
+        return;
+    }
+    let source_color = std::array::from_fn(|channel| f32::from(source[channel]) / 255.0);
+    let backdrop_color = std::array::from_fn(|channel| f32::from(destination[channel]) / 255.0);
+    let blended_color = blend_background_color(backdrop_color, source_color, mode);
+    for channel in 0..3 {
+        let premultiplied = (1.0 - source_alpha) * backdrop_alpha * backdrop_color[channel]
+            + (1.0 - backdrop_alpha) * source_alpha * source_color[channel]
+            + source_alpha * backdrop_alpha * blended_color[channel];
+        destination[channel] = (premultiplied / output_alpha * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+    }
+    destination[3] = (output_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+}
+
+fn blend_background_color(backdrop: [f32; 3], source: [f32; 3], mode: &str) -> [f32; 3] {
+    match mode.to_ascii_lowercase().as_str() {
+        "hue" => set_blend_luminosity(
+            set_blend_saturation(source, blend_saturation(backdrop)),
+            blend_luminosity(backdrop),
+        ),
+        "saturation" => set_blend_luminosity(
+            set_blend_saturation(backdrop, blend_saturation(source)),
+            blend_luminosity(backdrop),
+        ),
+        "color" => set_blend_luminosity(source, blend_luminosity(backdrop)),
+        "luminosity" => set_blend_luminosity(backdrop, blend_luminosity(source)),
+        _ => std::array::from_fn(|channel| {
+            blend_background_channel(backdrop[channel], source[channel], mode)
+        }),
+    }
+}
+
+fn blend_luminosity(color: [f32; 3]) -> f32 {
+    0.3 * color[0] + 0.59 * color[1] + 0.11 * color[2]
+}
+
+fn blend_saturation(color: [f32; 3]) -> f32 {
+    color.into_iter().fold(f32::NEG_INFINITY, f32::max)
+        - color.into_iter().fold(f32::INFINITY, f32::min)
+}
+
+fn set_blend_luminosity(mut color: [f32; 3], luminosity: f32) -> [f32; 3] {
+    let delta = luminosity - blend_luminosity(color);
+    for channel in &mut color {
+        *channel += delta;
+    }
+    let minimum = color.into_iter().fold(f32::INFINITY, f32::min);
+    let maximum = color.into_iter().fold(f32::NEG_INFINITY, f32::max);
+    let luminosity = blend_luminosity(color);
+    if minimum < 0.0 {
+        for channel in &mut color {
+            *channel = luminosity + (*channel - luminosity) * luminosity / (luminosity - minimum);
+        }
+    }
+    if maximum > 1.0 {
+        for channel in &mut color {
+            *channel =
+                luminosity + (*channel - luminosity) * (1.0 - luminosity) / (maximum - luminosity);
+        }
+    }
+    color
+}
+
+fn set_blend_saturation(mut color: [f32; 3], saturation: f32) -> [f32; 3] {
+    let mut indices = [0usize, 1, 2];
+    indices.sort_by(|left, right| color[*left].total_cmp(&color[*right]));
+    let [minimum, middle, maximum] = indices;
+    if color[maximum] > color[minimum] {
+        color[middle] =
+            (color[middle] - color[minimum]) * saturation / (color[maximum] - color[minimum]);
+        color[maximum] = saturation;
+    } else {
+        color[middle] = 0.0;
+        color[maximum] = 0.0;
+    }
+    color[minimum] = 0.0;
+    color
+}
+
+fn blend_background_channel(backdrop: f32, source: f32, mode: &str) -> f32 {
+    match mode.to_ascii_lowercase().as_str() {
+        "multiply" => backdrop * source,
+        "screen" => backdrop + source - backdrop * source,
+        "overlay" => {
+            if backdrop <= 0.5 {
+                2.0 * backdrop * source
+            } else {
+                1.0 - 2.0 * (1.0 - backdrop) * (1.0 - source)
+            }
+        }
+        "darken" => backdrop.min(source),
+        "lighten" => backdrop.max(source),
+        "color-dodge" => {
+            if source >= 1.0 {
+                1.0
+            } else {
+                (backdrop / (1.0 - source)).min(1.0)
+            }
+        }
+        "color-burn" => {
+            if source <= 0.0 {
+                0.0
+            } else {
+                1.0 - ((1.0 - backdrop) / source).min(1.0)
+            }
+        }
+        "hard-light" => {
+            if source <= 0.5 {
+                2.0 * backdrop * source
+            } else {
+                1.0 - 2.0 * (1.0 - backdrop) * (1.0 - source)
+            }
+        }
+        "soft-light" => {
+            if source <= 0.5 {
+                backdrop - (1.0 - 2.0 * source) * backdrop * (1.0 - backdrop)
+            } else {
+                let d = if backdrop <= 0.25 {
+                    ((16.0 * backdrop - 12.0) * backdrop + 4.0) * backdrop
+                } else {
+                    backdrop.sqrt()
+                };
+                backdrop + (2.0 * source - 1.0) * (d - backdrop)
+            }
+        }
+        "difference" => (backdrop - source).abs(),
+        "exclusion" => backdrop + source - 2.0 * backdrop * source,
+        "plus-darker" => (backdrop + source - 1.0).max(0.0),
+        "plus-lighter" => (backdrop + source).min(1.0),
+        _ => source,
     }
 }
 

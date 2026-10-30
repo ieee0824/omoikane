@@ -1921,6 +1921,70 @@ fn paints_cross_fade_as_a_premultiplied_generated_background_image() {
 }
 
 #[test]
+fn background_blend_mode_composites_layers_in_background_order() {
+    let stylesheet = parse_stylesheet(
+        "body { margin: 0; } div { width: 2px; height: 2px; \
+         background-image: linear-gradient(red, red), linear-gradient(blue, blue); \
+         background-blend-mode: multiply; }",
+    )
+    .unwrap();
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    body.append_child(NodeHandle::element("div"));
+    document.append_child(body.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, stylesheet.clone());
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 4.0,
+        height: 4.0,
+    };
+    let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    let mut paint_resolver = StyleResolver::new();
+    paint_resolver.add_stylesheet(Origin::Author, stylesheet);
+    let canvas = paint_layout(&layout, &mut paint_resolver, viewport);
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(0, 0, 0)));
+}
+
+#[test]
+fn background_blend_group_is_isolated_from_the_backdrop() {
+    let stylesheet = parse_stylesheet(
+        "body { margin: 0; background: green; } div { width: 2px; height: 2px; \
+         background-image: linear-gradient(red, red); background-blend-mode: multiply; }",
+    )
+    .unwrap();
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    body.append_child(NodeHandle::element("div"));
+    document.append_child(body.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, stylesheet.clone());
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 4.0,
+        height: 4.0,
+    };
+    let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    let mut paint_resolver = StyleResolver::new();
+    paint_resolver.add_stylesheet(Origin::Author, stylesheet);
+    let canvas = paint_layout(&layout, &mut paint_resolver, viewport);
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
+fn nonseparable_background_blend_modes_use_cross_channel_components() {
+    let mut blue = [0, 0, 255, 255];
+    blend_background_pixel(&mut blue, &[255, 0, 0, 255], "hue");
+    assert_eq!(blue, [94, 0, 0, 255]);
+
+    let mut red = [255, 0, 0, 255];
+    blend_background_pixel(&mut red, &[0, 0, 255, 255], "luminosity");
+    assert_eq!(red, [94, 0, 0, 255]);
+}
+
+#[test]
 fn paints_non_repeating_background_images_once() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
