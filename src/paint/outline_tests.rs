@@ -157,6 +157,29 @@ fn large_negative_offset_clamps_each_axis_independently() {
 }
 
 #[test]
+fn negative_offset_on_a_thin_rounded_box_keeps_elliptical_corners() {
+    let pixels = white_page(
+        "<html style='background:white'><body style='margin:0'>\
+         <div style='position:absolute;left:20px;top:20px;width:2px;height:100px;\
+         border-radius:50px;outline:2px solid blue;outline-offset:-20px'></div>\
+         </body></html>",
+        60.0,
+        140.0,
+    );
+    let blue = Some(Color::rgb(0, 0, 255));
+    assert_ne!(
+        pixels.pixel(20, 38),
+        blue,
+        "the top of the narrow outline must curve instead of forming a rectangular cap"
+    );
+    assert_eq!(
+        pixels.pixel(20, 70),
+        blue,
+        "the center of the elliptical outline remains fully covered"
+    );
+}
+
+#[test]
 fn dashed_dotted_double_and_auto_outline_styles_paint_distinct_patterns() {
     let pixels = white_page(
         "<html style='background:white'><body style='margin:0'>\
