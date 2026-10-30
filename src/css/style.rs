@@ -15280,6 +15280,11 @@ fn apply_ua_defaults(
             properties
                 .entry(PropertyId::BackgroundColor)
                 .or_insert(ComputedValue::Keyword("black".to_string()));
+        } else if node.is_modal_dialog() {
+            // HTML: `dialog:modal::backdrop { background: rgba(0, 0, 0, 0.1) }`.
+            properties
+                .entry(PropertyId::BackgroundColor)
+                .or_insert(ComputedValue::Color("rgba(0, 0, 0, 0.1)".to_string()));
         }
         return;
     }
@@ -15474,7 +15479,7 @@ fn apply_ua_defaults(
                 .entry(PropertyId::Display)
                 .or_insert(ComputedValue::Keyword("list-item".to_string()));
         }
-        "dialog" => apply_dialog_ua_defaults(node, properties),
+        "dialog" => apply_dialog_ua_defaults(node, properties, parent_font_size),
         "time" => {
             properties
                 .entry(PropertyId::Display)
@@ -15637,18 +15642,70 @@ fn apply_audio_ua_defaults(node: &NodeHandle, properties: &mut PropertyMap) {
     }
 }
 
-/// `<dialog>`'s UA default: hidden unless it has an `open` attribute.
-fn apply_dialog_ua_defaults(node: &NodeHandle, properties: &mut PropertyMap) {
+/// `<dialog>`'s UA defaults from the HTML rendering section.
+///
+/// Closed dialogs are hidden. An open dialog is an absolutely positioned,
+/// fit-content box centered inline by auto margins; a modal dialog is fixed
+/// and also centered in the block axis.
+fn apply_dialog_ua_defaults(
+    node: &NodeHandle,
+    properties: &mut PropertyMap,
+    parent_font_size: f32,
+) {
     if node.get_attribute("open").is_none() {
         properties.insert(
             PropertyId::Display,
             ComputedValue::Keyword("none".to_string()),
         );
-    } else {
-        properties
-            .entry(PropertyId::Display)
-            .or_insert(ComputedValue::Keyword("block".to_string()));
+        return;
     }
+    let keyword = |value: &str| ComputedValue::Keyword(value.to_string());
+    let modal = node.is_modal_dialog();
+    let mut defaults = vec![
+        (PropertyId::Display, keyword("block")),
+        (
+            PropertyId::Position,
+            keyword(if modal { "fixed" } else { "absolute" }),
+        ),
+        (PropertyId::Left, ComputedValue::Px(0.0)),
+        (PropertyId::Right, ComputedValue::Px(0.0)),
+        (PropertyId::Width, keyword("fit-content")),
+        (PropertyId::Height, keyword("fit-content")),
+        (PropertyId::MarginTop, keyword("auto")),
+        (PropertyId::MarginRight, keyword("auto")),
+        (PropertyId::MarginBottom, keyword("auto")),
+        (PropertyId::MarginLeft, keyword("auto")),
+        (
+            PropertyId::BackgroundColor,
+            ComputedValue::Color("white".to_string()),
+        ),
+        (PropertyId::Color, ComputedValue::Color("black".to_string())),
+    ];
+    let font_size = match properties.get(&PropertyId::FontSize) {
+        Some(ComputedValue::Px(size)) => *size,
+        _ => parent_font_size,
+    };
+    for side in [
+        PropertyId::PaddingTop,
+        PropertyId::PaddingRight,
+        PropertyId::PaddingBottom,
+        PropertyId::PaddingLeft,
+    ] {
+        defaults.push((side, ComputedValue::Px(font_size)));
+    }
+    if modal {
+        defaults.extend([
+            (PropertyId::Top, ComputedValue::Px(0.0)),
+            (PropertyId::Bottom, ComputedValue::Px(0.0)),
+            (PropertyId::OverflowX, keyword("auto")),
+            (PropertyId::OverflowY, keyword("auto")),
+        ]);
+    }
+    for (property, value) in defaults {
+        properties.entry(property).or_insert(value);
+    }
+    // `border: solid` uses the initial medium width and currentColor.
+    apply_uniform_border(properties, "solid", 3.0, None);
 }
 
 /// `<progress>`/`<meter>`'s shared UA default: a fixed-size inline-block box

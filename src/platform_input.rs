@@ -724,6 +724,8 @@ mod tests {
         };
 
         input.key_event(&mut session, escape.clone()).unwrap();
+        // The close event is queued; evaluating runs the pending tasks.
+        evaluate(&mut session, "0");
         assert_eq!(
             evaluate(
                 &mut session,
@@ -736,6 +738,19 @@ mod tests {
             &mut session,
             "globalThis.blockCancel=true;dialog.showModal()",
         );
+        // Only a user activation lets the cancel listener block the request.
+        input
+            .key_event(
+                &mut session,
+                PlatformKeyEvent {
+                    pressed: true,
+                    key: "Control".into(),
+                    code: "ControlLeft".into(),
+                    text: None,
+                    repeat: false,
+                },
+            )
+            .unwrap();
         input.key_event(&mut session, escape).unwrap();
         assert_eq!(
             evaluate(
