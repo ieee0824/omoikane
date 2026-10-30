@@ -171,6 +171,9 @@ GCカウンターの取得は行わない。
 `local_data_attribute`はHTMLの`data-*`属性変更について、セレクターへの影響が
 変更要素のlight-DOM部分木に収まると確認できた場合を数える。兄弟要素などへ
 影響する場合は全体無効化へ戻す。レイアウトと描画の要求範囲は縮めない。
+`local_tree_mutation`は通常の子リスト変更（挿入・削除・置換）について、変更した親と
+移動したノードの部分木だけを破棄した場合を数える。`:has()`・フォーム部品・
+`dir=auto`の祖先などで部分木外へ影響し得る場合は`ordinary_node_mutation_full`になる。
 `fallback_*`はinline style変更が
 全体無効化へ戻った理由を表す。`ordinary_node_mutation_full`は通常のDOM変更に
 よるresolverキャッシュの全消去、`other_full`はそれ以外の共通全消去経路である。

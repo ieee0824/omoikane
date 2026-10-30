@@ -22,6 +22,7 @@ mod sibling_functions;
 mod specified_math;
 mod style_cache;
 pub(crate) mod text_shadow;
+mod tree_mutation_invalidation;
 mod typed_math;
 mod will_change;
 
@@ -1058,6 +1059,9 @@ pub struct StyleResolver {
     class_selector_dependencies: HashMap<String, class_invalidation::ClassReach>,
     /// Bounded subjects that can observe changed hover/active/focus flags.
     user_action_dependencies: user_action::UserActionDependencies,
+    /// Whether selectors can observe child-list changes outside the changed
+    /// parents' subtrees, cleared when stylesheets change.
+    tree_mutation_reach: Option<tree_mutation_invalidation::TreeMutationReach>,
     /// Whether declarations in the current stylesheet set read a given
     /// `data-*` attribute through `attr()`. This is separate from selector
     /// reach because an unobserved attribute can still affect computed values.
@@ -3451,6 +3455,7 @@ impl StyleResolver {
         self.data_attribute_selector_dependencies.clear();
         self.class_selector_dependencies.clear();
         self.user_action_dependencies.clear();
+        self.tree_mutation_reach = None;
         self.data_attribute_value_dependencies.clear();
         self.style_attribute_selector_dependency = self
             .style_attribute_selector_dependency
