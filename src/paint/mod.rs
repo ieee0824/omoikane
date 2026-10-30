@@ -5816,8 +5816,9 @@ fn paint_scrollbar_axis(
     canvas.fill_rect_clipped(track_rect, track, clip);
     let viewport_length = track_length;
     let content_length = viewport_length + max_offset;
-    let thumb_length = (viewport_length * viewport_length / content_length)
-        .clamp(track_rect.width.min(track_rect.height) * 2.0, track_length);
+    let minimum_thumb = (track_rect.width.min(track_rect.height) * 2.0).min(track_length);
+    let thumb_length =
+        (viewport_length * viewport_length / content_length).clamp(minimum_thumb, track_length);
     let thumb_position = if max_offset > 0.0 {
         (track_length - thumb_length) * (offset / max_offset).clamp(0.0, 1.0)
     } else {
