@@ -1,0 +1,6 @@
+# Compress DWARF sections when linking on Linux. Test executables keep the
+# line tables used by backtraces, but each one links all of omoikane, so the
+# uncompressed debug sections dominate target size (#1554). macOS keeps debug
+# information outside the executable, so it is not affected.
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-Wl,--compress-debug-sections=zlib"]
