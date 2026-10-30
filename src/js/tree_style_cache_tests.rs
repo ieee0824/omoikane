@@ -90,9 +90,21 @@ fn inserted_inline_styles_still_observe_csp() {
             .as_number(),
         Some(40.0)
     );
-    assert!(
-        generation(&runtime) > initial,
-        "inline-style insertion must retain the conservative CSP refresh"
+    assert_eq!(
+        generation(&runtime),
+        initial,
+        "CSP membership is refreshed per inserted element without a rebuild"
+    );
+    runtime
+        .eval("child.setAttribute('style','width:98px')")
+        .unwrap();
+    assert_eq!(
+        runtime
+            .eval("child.getBoundingClientRect().width")
+            .unwrap()
+            .as_number(),
+        Some(40.0),
+        "the blocked attribute stays blocked after a later change"
     );
 }
 
@@ -131,7 +143,7 @@ fn replacement_inline_styles_still_observe_csp() {
             .as_number(),
         Some(40.0)
     );
-    assert!(generation(&runtime) > initial);
+    assert_eq!(generation(&runtime), initial);
 }
 
 #[test]
@@ -498,5 +510,54 @@ fn animation_inside_the_changed_parent_stays_local_and_resamples() {
             .eval("getComputedStyle(skeleton).opacity==='0.5'")
             .unwrap()
             .to_boolean()
+    );
+}
+
+#[test]
+fn inserted_inline_styles_apply_without_rebuilding_rules() {
+    let mut runtime = runtime();
+    let initial = generation(&runtime);
+    runtime
+        .eval("globalThis.child=document.createElement('div');child.className='item';child.setAttribute('style','width:99px');host.appendChild(child)")
+        .unwrap();
+    assert_eq!(
+        runtime
+            .eval("child.getBoundingClientRect().width")
+            .unwrap()
+            .as_number(),
+        Some(99.0)
+    );
+    runtime
+        .eval("host.innerHTML='<div class=item style=\"width:77px\"></div>'")
+        .unwrap();
+    assert_eq!(
+        runtime
+            .eval("host.firstElementChild.getBoundingClientRect().width")
+            .unwrap()
+            .as_number(),
+        Some(77.0)
+    );
+    assert_eq!(generation(&runtime), initial);
+}
+
+#[test]
+fn non_stylesheet_links_retain_rules_until_they_become_stylesheets() {
+    let mut runtime = runtime();
+    let initial = generation(&runtime);
+    runtime
+        .eval("globalThis.link=document.createElement('link');link.rel='preconnect';document.head.appendChild(link);host.getBoundingClientRect()")
+        .unwrap();
+    assert_eq!(generation(&runtime), initial);
+    runtime
+        .eval("link.rel='stylesheet';host.getBoundingClientRect()")
+        .unwrap();
+    assert!(generation(&runtime) > initial);
+    let stylesheet = generation(&runtime);
+    runtime
+        .eval("const other=document.createElement('link');other.setAttribute('rel','Alternate StyleSheet');document.head.appendChild(other);host.getBoundingClientRect()")
+        .unwrap();
+    assert!(
+        generation(&runtime) > stylesheet,
+        "rel tokens are matched case-insensitively"
     );
 }
