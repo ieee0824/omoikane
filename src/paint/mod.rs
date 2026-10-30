@@ -6445,6 +6445,8 @@ fn paint_background_image_rounded(
 enum PreparedBackgroundImage {
     Gradient(color::Gradient),
     Image(Image),
+    Color(Color),
+    CrossFade(Vec<(PreparedBackgroundImage, f32)>),
 }
 
 fn prepare_background_image(style: &ComputedStyle) -> Option<PreparedBackgroundImage> {
@@ -6469,6 +6471,9 @@ fn prepare_background_image_value(
     if let Some(gradient) = color::parse_gradient(&serialized) {
         return Some(PreparedBackgroundImage::Gradient(gradient));
     }
+    if let Some(color) = color::parse_color(&serialized) {
+        return Some(PreparedBackgroundImage::Color(color));
+    }
     match value {
         Value::Function { name, arguments }
             if matches!(
@@ -6477,6 +6482,9 @@ fn prepare_background_image_value(
             ) =>
         {
             prepare_image_set(arguments, device_pixel_ratio)
+        }
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("cross-fade") => {
+            prepare_cross_fade(arguments, device_pixel_ratio)
         }
         Value::Function { name, .. } if name.eq_ignore_ascii_case("url") => {
             image::parse_background_image_value(&serialized).map(PreparedBackgroundImage::Image)
@@ -6489,6 +6497,50 @@ fn prepare_background_image_value(
         }
         _ => None,
     }
+}
+
+fn prepare_cross_fade(
+    entries: &[Value],
+    device_pixel_ratio: f32,
+) -> Option<PreparedBackgroundImage> {
+    let mut prepared = Vec::with_capacity(entries.len());
+    let mut explicit_sum = 0.0;
+    let mut omitted = 0usize;
+    for entry in entries {
+        let values = match entry {
+            Value::List(values) => values.as_slice(),
+            value => std::slice::from_ref(value),
+        };
+        let (image, weight) = match values {
+            [image] => {
+                omitted += 1;
+                (image, None)
+            }
+            [image, Value::Percentage(weight)] if weight.is_finite() && *weight >= 0.0 => {
+                let weight = *weight / 100.0;
+                explicit_sum += weight;
+                (image, Some(weight))
+            }
+            _ => return None,
+        };
+        prepared.push((
+            prepare_background_image_value(image, device_pixel_ratio)?,
+            weight,
+        ));
+    }
+    let omitted_weight = if omitted == 0 {
+        0.0
+    } else {
+        (1.0 - explicit_sum).max(0.0) / omitted as f32
+    };
+    let total = explicit_sum + omitted_weight * omitted as f32;
+    let scale = if total > 1.0 { 1.0 / total } else { 1.0 };
+    Some(PreparedBackgroundImage::CrossFade(
+        prepared
+            .into_iter()
+            .map(|(image, weight)| (image, weight.unwrap_or(omitted_weight) * scale))
+            .collect(),
+    ))
 }
 
 fn prepare_image_set(
@@ -8710,6 +8762,16 @@ fn paint_prepared_background_image(
         return;
     };
 
+    if let PreparedBackgroundImage::CrossFade(sources) = background {
+        paint_cross_fade_background(canvas, style, area, clip, viewport, sources);
+        return;
+    }
+
+    if let PreparedBackgroundImage::Color(color) = background {
+        canvas.fill_rect_clipped(area, *color, clip);
+        return;
+    }
+
     // CSS gradients share the same background tiling, positioning and clipping path.
     if let PreparedBackgroundImage::Gradient(gradient) = background {
         let has_explicit_size = match style.get_by_id(PropertyId::BackgroundSize) {
@@ -8733,6 +8795,62 @@ fn paint_prepared_background_image(
         return;
     };
     paint_tiled_image_background(canvas, style, area, clip, viewport, image);
+}
+
+fn paint_cross_fade_background(
+    canvas: &mut Canvas,
+    style: &ComputedStyle,
+    area: Rect,
+    clip: Option<Rect>,
+    viewport: Rect,
+    sources: &[(PreparedBackgroundImage, f32)],
+) {
+    let width = area.width.ceil().max(1.0) as u32;
+    let height = area.height.ceil().max(1.0) as u32;
+    if u64::from(width) * u64::from(height) > MAX_TILE_PIXELS {
+        return;
+    }
+    let translate = |rect: Rect| Rect {
+        x: rect.x - area.x,
+        y: rect.y - area.y,
+        ..rect
+    };
+    let local_area = translate(area);
+    let local_clip = clip.map(translate);
+    let local_viewport = translate(viewport);
+    let mut accumulated = vec![[0.0f32; 4]; width as usize * height as usize];
+    for (source, weight) in sources {
+        if *weight <= 0.0 {
+            continue;
+        }
+        let mut layer = Canvas::new(width, height);
+        paint_prepared_background_image(
+            &mut layer,
+            style,
+            local_area,
+            local_clip,
+            local_viewport,
+            source,
+        );
+        for (sum, pixel) in accumulated.iter_mut().zip(layer.pixels.chunks_exact(4)) {
+            let alpha = f32::from(pixel[3]) / 255.0 * *weight;
+            sum[0] += f32::from(pixel[0]) / 255.0 * alpha;
+            sum[1] += f32::from(pixel[1]) / 255.0 * alpha;
+            sum[2] += f32::from(pixel[2]) / 255.0 * alpha;
+            sum[3] += alpha;
+        }
+    }
+    let mut layer = Canvas::new(width, height);
+    for (output, sum) in layer.pixels.chunks_exact_mut(4).zip(accumulated) {
+        let alpha = sum[3].clamp(0.0, 1.0);
+        if alpha > 0.0 {
+            output[0] = (sum[0] / alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+            output[1] = (sum[1] / alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+            output[2] = (sum[2] / alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+            output[3] = (alpha * 255.0).round() as u8;
+        }
+    }
+    canvas.draw_image(&layer.into_image(), area.x, area.y);
 }
 
 /// Paints a repeating/positioned CSS gradient background when

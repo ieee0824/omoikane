@@ -1855,6 +1855,35 @@ fn paints_selected_image_set_candidate_as_a_background_layer() {
 }
 
 #[test]
+fn paints_cross_fade_as_a_premultiplied_generated_background_image() {
+    let red = pixel_data_uri(Color::rgb(255, 0, 0));
+    let blue = pixel_data_uri(Color::rgb(0, 0, 255));
+    let stylesheet = format!(
+        "body {{ margin: 0; }} div {{ width: 2px; height: 2px; \
+         background-image: cross-fade(url(\"{red}\") 50%, url(\"{blue}\") 50%); \
+         background-repeat: no-repeat; }}"
+    );
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    body.append_child(NodeHandle::element("div"));
+    document.append_child(body.clone());
+    let sheet = parse_stylesheet(&stylesheet).unwrap();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, sheet.clone());
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 4.0,
+        height: 4.0,
+    };
+    let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    let mut paint_resolver = StyleResolver::new();
+    paint_resolver.add_stylesheet(Origin::Author, sheet);
+    let canvas = paint_layout(&layout, &mut paint_resolver, viewport);
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(128, 0, 128)));
+}
+
+#[test]
 fn paints_non_repeating_background_images_once() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
