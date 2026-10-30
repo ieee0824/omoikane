@@ -21,7 +21,6 @@ pub enum InsertionMode {
     InTableBody,
     InRow,
     InCell,
-    InSelect,
     AfterBody,
     AfterAfterBody,
 }
@@ -116,6 +115,7 @@ impl TreeBuilder {
             .tokenize_with_script_positions();
         let mut builder = Builder::new();
         builder.process_tokens_with_script_positions(tokens, &positions, &mut errors);
+        crate::dom::select::reset_selects_in(&builder.document);
         ParseResult {
             document: builder.document,
             quirks_mode: builder.quirks_mode,
@@ -129,6 +129,7 @@ impl TreeBuilder {
             .tokenize_with_script_positions();
         let mut builder = Builder::new();
         builder.process_tokens_with_script_positions(tokens, &positions, &mut errors);
+        crate::dom::select::reset_selects_in(&builder.document);
         ParseResult {
             document: builder.document,
             quirks_mode: builder.quirks_mode,
@@ -185,6 +186,7 @@ impl TreeBuilder {
             }
         }
         builder.process_tokens(tokens, &mut errors);
+        crate::dom::select::reset_selects_in(&container);
         let context_shadow_root = if allow_shadow_roots && existing_shadow.is_none() {
             container.shadow_root()
         } else {
@@ -501,7 +503,6 @@ impl Builder {
             InsertionMode::InTableBody => self.handle_in_table_body(token, errors),
             InsertionMode::InRow => self.handle_in_row(token, errors),
             InsertionMode::InCell => self.handle_in_cell(token, errors),
-            InsertionMode::InSelect => self.handle_in_select(token, errors),
             InsertionMode::AfterBody => self.handle_after_body(token, errors),
             InsertionMode::AfterAfterBody => self.handle_after_after_body(token, errors),
         }
@@ -789,6 +790,18 @@ impl Builder {
                             self.open_elements.push(element);
                         }
                     }
+                    "select" | "input" | "hr" | "option" | "optgroup"
+                        if self.handle_select_content_start(&name) =>
+                    {
+                        let element = self.insert_element_with_attributes(&name, attributes);
+                        if !self_closing && !is_void_element(&name) {
+                            self.open_elements.push(element);
+                        }
+                        if name == "select" {
+                            self.frameset_ok_after_select();
+                        }
+                    }
+                    "select" | "input" | "hr" | "option" | "optgroup" => {}
                     "table" => {
                         let table = self.insert_element_with_attributes("table", attributes);
                         if !self_closing {
@@ -1215,110 +1228,93 @@ impl Builder {
         }
     }
 
-    fn handle_in_select(&mut self, token: Token, errors: &mut Vec<HtmlParseError>) {
-        match token {
-            Token::Character(data) => {
-                if !data.is_empty() {
-                    self.insert_text(data);
+    /// Applies the "in body" rules of the customizable-select parser for a
+    /// `select`, `input`, `hr`, `option` or `optgroup` start tag. Returns
+    /// whether the element should still be inserted.
+    fn handle_select_content_start(&mut self, name: &str) -> bool {
+        let fragment_select = self.fragment
+            && self
+                .open_elements
+                .get(1)
+                .is_some_and(|node| node.tag_name().as_deref() == Some("select"));
+        match name {
+            "select" | "input" if fragment_select => false,
+            "select" if self.has_select_in_scope() => {
+                self.pop_until("select");
+                false
+            }
+            "input" => {
+                if self.has_select_in_scope() {
+                    self.pop_until("select");
                 }
+                true
             }
-            Token::ProcessingInstruction { target, data } => {
-                self.insert_processing_instruction(target, data)
+            "hr" | "optgroup" if self.has_select_in_scope() => {
+                self.generate_implied_end_tags(None);
+                true
             }
-            Token::Comment(data) => {
-                self.append_node(&self.insertion_parent(), NodeHandle::comment(data))
+            "option" if self.has_select_in_scope() => {
+                self.generate_implied_end_tags(Some("optgroup"));
+                true
             }
-            Token::StartTag {
-                name,
-                attributes,
-                self_closing,
-            } if name == "option" => {
+            "option" | "optgroup" => {
                 if self.current_node().tag_name().as_deref() == Some("option") {
                     self.open_elements.pop();
                 }
-                let option = self.insert_element_with_attributes("option", attributes);
-                if !self_closing {
-                    self.open_elements.push(option);
-                }
+                true
             }
-            Token::StartTag {
-                name,
-                attributes,
-                self_closing,
-            } if name == "optgroup" => {
-                if self.current_node().tag_name().as_deref() == Some("option") {
-                    self.open_elements.pop();
-                }
-                if self.current_node().tag_name().as_deref() == Some("optgroup") {
-                    self.open_elements.pop();
-                }
-                let group = self.insert_element_with_attributes("optgroup", attributes);
-                if !self_closing {
-                    self.open_elements.push(group);
-                }
-            }
-            Token::StartTag { name, .. } if name == "select" => {
-                self.close_select();
-            }
-            token if matches!(&token, Token::StartTag { name, .. } if name == "script" || name == "template") => {
-                self.handle_in_head(token, errors)
-            }
-            Token::EndTag { name } if name == "option" => {
-                if self.current_node().tag_name().as_deref() == Some("option") {
-                    self.open_elements.pop();
-                }
-            }
-            Token::EndTag { name } if name == "optgroup" => {
-                if self.current_node().tag_name().as_deref() == Some("option") {
-                    self.open_elements.pop();
-                }
-                if self.current_node().tag_name().as_deref() == Some("optgroup") {
-                    self.open_elements.pop();
-                }
-            }
-            Token::EndTag { name } if name == "select" => {
-                self.close_select();
-            }
-            token
-                if matches!(&token, Token::StartTag { name, .. }
-                if matches!(name.as_str(), "input" | "keygen" | "textarea")) =>
-            {
-                if self.close_select() {
-                    self.process_token(token, errors);
-                }
-            }
-            token
-                if self.current_table().is_some()
-                    && matches!(&token,
-                Token::StartTag { name, .. } | Token::EndTag { name }
-                if matches!(name.as_str(), "caption" | "table" | "tbody" | "tfoot" | "thead" | "tr" | "td" | "th")) =>
-            {
-                if self.close_select() {
-                    self.process_token(token, errors);
-                }
-            }
-            Token::Doctype(_) => {}
-            Token::Eof => self.mode = InsertionMode::AfterAfterBody,
-            _ => {}
+            _ => true,
         }
     }
 
-    fn close_select(&mut self) -> bool {
-        let Some(index) = self
-            .open_elements
-            .iter()
-            .rposition(|node| node.tag_name().as_deref() == Some("select"))
-        else {
-            return false;
-        };
-        // The synthetic context element in fragment parsing is not an open
-        // select token: an end tag must not escape that fragment context.
-        if self.fragment && index == 1 {
-            return false;
+    /// The `select` start tag sets frameset-ok to "not ok"; this builder has
+    /// no frameset state, so nothing else is required.
+    fn frameset_ok_after_select(&mut self) {}
+
+    /// Whether the stack of open elements has a `select` element in scope.
+    fn has_select_in_scope(&self) -> bool {
+        for node in self.open_elements.iter().rev() {
+            let html = node
+                .namespace_uri()
+                .as_deref()
+                .is_none_or(|namespace| namespace == HTML_NAMESPACE);
+            let name = node.local_name().unwrap_or_default();
+            if html {
+                match name.as_str() {
+                    "select" => return true,
+                    "applet" | "caption" | "html" | "table" | "td" | "th" | "marquee"
+                    | "object" | "template" => return false,
+                    _ => {}
+                }
+            } else if matches!(
+                name.as_str(),
+                "mi" | "mo"
+                    | "mn"
+                    | "ms"
+                    | "mtext"
+                    | "annotation-xml"
+                    | "foreignObject"
+                    | "desc"
+                    | "title"
+            ) {
+                return false;
+            }
         }
-        self.open_elements.truncate(index);
-        self.reset_insertion_mode();
-        true
+        false
+    }
+
+    /// Generate implied end tags, optionally excluding one element type.
+    fn generate_implied_end_tags(&mut self, except: Option<&str>) {
+        while let Some(name) = self.current_node().tag_name() {
+            let implied = matches!(
+                name.as_str(),
+                "dd" | "dt" | "li" | "optgroup" | "option" | "p" | "rb" | "rp" | "rt" | "rtc"
+            );
+            if !implied || except == Some(name.as_str()) || self.open_elements.len() <= 1 {
+                return;
+            }
+            self.open_elements.pop();
+        }
     }
 
     fn process_foreign_token(
@@ -1871,6 +1867,11 @@ impl Builder {
             .iter()
             .rposition(|node| node.tag_name().as_deref() == Some(tag_name))
         {
+            // The synthetic fragment context element is not an open element
+            // of the input; its end tag must not escape the fragment.
+            if self.fragment && index == 1 {
+                return;
+            }
             self.open_elements.truncate(index);
         }
     }
@@ -1898,7 +1899,6 @@ impl Builder {
                 Some("tbody" | "thead" | "tfoot") => Some(InsertionMode::InTableBody),
                 Some("colgroup") => Some(InsertionMode::InColumnGroup),
                 Some("table") => Some(InsertionMode::InTable),
-                Some("select" | "optgroup" | "option") => Some(InsertionMode::InSelect),
                 Some("body") => Some(InsertionMode::InBody),
                 Some("head") => Some(InsertionMode::InHead),
                 Some("html") => Some(InsertionMode::BeforeHead),
@@ -1981,7 +1981,6 @@ fn fragment_insertion_mode(context_name: &str) -> InsertionMode {
         "colgroup" => InsertionMode::InColumnGroup,
         "tr" => InsertionMode::InRow,
         "td" | "th" => InsertionMode::InCell,
-        "select" | "optgroup" | "option" => InsertionMode::InSelect,
         _ => InsertionMode::InBody,
     }
 }
@@ -2894,10 +2893,17 @@ mod tests {
                 .as_deref(),
             Some("after")
         );
+        // Customizable select: a select fragment keeps arbitrary content, and
+        // its end tag cannot close the context element.
         let context = NodeHandle::element("select");
         let fragment =
-            TreeBuilder::parse_fragment("</select><p>ignored</p><option>kept", &context).fragment();
-        assert!(fragment.query_selector("p").is_none());
+            TreeBuilder::parse_fragment("</select><p>kept</p><option>kept", &context).fragment();
+        assert_eq!(
+            fragment.query_selector("p").unwrap().child_nodes()[0]
+                .data()
+                .as_deref(),
+            Some("kept")
+        );
         assert_eq!(
             fragment.query_selector("option").unwrap().child_nodes()[0]
                 .data()

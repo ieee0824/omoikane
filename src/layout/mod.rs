@@ -42,6 +42,7 @@ mod margins;
 mod multicol;
 mod paged;
 mod profile;
+pub(crate) mod select_picker;
 mod shapes;
 mod table;
 
@@ -2974,6 +2975,7 @@ fn layout_document(
             children.push(layout);
         }
     }
+    select_picker::append_open_pickers(node, resolver, viewport, &mut children);
 
     Some(LayoutBox {
         node: node.clone(),

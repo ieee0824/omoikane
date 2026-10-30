@@ -389,6 +389,9 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                                 | "placeholder"
                                 | "selection"
                                 | "file-selector-button"
+                                | "picker(select)"
+                                | "picker-icon"
+                                | "checkmark"
                         )
                         || name.split_once('(').is_some_and(|(function, rest)| {
                             let argument = rest.strip_suffix(')').unwrap_or("");
@@ -1371,7 +1374,14 @@ impl Parser {
             self.next();
             let name = self.expect_ident()?;
             if !matches!(self.peek(), Some(CssToken::ParenOpen)) {
+                if name.eq_ignore_ascii_case("picker") {
+                    return Err(CssParseError::InvalidSelector);
+                }
                 return Ok(SimpleSelector::PseudoElement(name));
+            }
+            if name.eq_ignore_ascii_case("picker") {
+                self.next(); // consume ParenOpen
+                return parse_picker_pseudo_argument(&self.collect_parenthesized_tokens()?);
             }
             if !name.eq_ignore_ascii_case("slotted") && !name.eq_ignore_ascii_case("part") {
                 return Err(CssParseError::InvalidSelector);
@@ -2483,6 +2493,21 @@ fn is_part_pseudo(simple: &SimpleSelector) -> bool {
         if name.split_once('(').is_some_and(|(function, _)| function.eq_ignore_ascii_case("part")))
 }
 
+/// `::picker(select)`, `::picker-icon` and `::checkmark`, which accept only
+/// user-action pseudo-classes after them.
+fn is_form_control_pseudo(simple: &SimpleSelector) -> bool {
+    matches!(simple, SimpleSelector::PseudoElement(name)
+        if matches!(name.to_ascii_lowercase().as_str(), "picker(select)" | "picker-icon" | "checkmark"))
+}
+
+fn is_user_action_pseudo_class(simple: &SimpleSelector) -> bool {
+    matches!(simple, SimpleSelector::PseudoClass(name)
+    if matches!(
+        name.to_ascii_lowercase().as_str(),
+        "hover" | "active" | "focus" | "focus-visible" | "focus-within"
+    ))
+}
+
 fn valid_part_suffix(simples: &[SimpleSelector]) -> bool {
     let pseudo_start = simples
         .iter()
@@ -2514,12 +2539,33 @@ fn valid_part_suffix(simples: &[SimpleSelector]) -> bool {
     }
 }
 
+/// CSS Forms: `::picker(<form-control-identifier>)`, where `select` is the
+/// only identifier. The result is normalized to `picker(select)`.
+fn parse_picker_pseudo_argument(tokens: &[CssToken]) -> Result<SimpleSelector, CssParseError> {
+    let mut significant = tokens
+        .iter()
+        .filter(|token| **token != CssToken::Whitespace);
+    match (significant.next(), significant.next()) {
+        (Some(CssToken::Ident(identifier)), None) if identifier.eq_ignore_ascii_case("select") => {
+            Ok(SimpleSelector::PseudoElement("picker(select)".to_string()))
+        }
+        _ => Err(CssParseError::InvalidSelector),
+    }
+}
+
 fn validate_pseudo_element_placement(parts: &[SelectorPart]) -> Result<(), CssParseError> {
     let mut part_location = None;
     let mut pseudo_count = 0;
     for (part_index, part) in parts.iter().enumerate() {
         let mut state_allowed = true;
+        let mut only_user_action = false;
         for (index, simple) in part.simples.iter().enumerate() {
+            if only_user_action && !is_user_action_pseudo_class(simple) {
+                return Err(CssParseError::InvalidSelector);
+            }
+            if is_form_control_pseudo(simple) {
+                only_user_action = true;
+            }
             let element_state = matches!(simple, SimpleSelector::CustomState(_))
                 || matches!(simple, SimpleSelector::PseudoClass(name)
                     if name.eq_ignore_ascii_case("read-only") || name.eq_ignore_ascii_case("read-write"));
