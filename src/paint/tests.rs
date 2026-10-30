@@ -1912,6 +1912,51 @@ fn paints_selected_image_set_candidate_as_a_background_layer() {
 }
 
 #[test]
+fn image_set_repaints_when_the_selected_candidate_becomes_available() {
+    crate::data::clear_blob_urls();
+    let source = "blob:http://example.test/image-set-candidate";
+    let stylesheet = parse_stylesheet(&format!(
+        "body {{ margin: 0; }} div {{ width: 2px; height: 2px; background-color: green; \
+         background-image: image-set(url(\"{source}\") 1x); background-repeat: no-repeat; }}"
+    ))
+    .unwrap();
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    body.append_child(NodeHandle::element("div"));
+    document.append_child(body.clone());
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 4.0,
+        height: 4.0,
+    };
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, stylesheet);
+    let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    assert_eq!(
+        paint_layout(&layout, &mut resolver, viewport).pixel(0, 0),
+        Some(Color::rgb(0, 128, 0))
+    );
+
+    let mut image = Canvas::new(1, 1);
+    image.fill_rect(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        },
+        Color::rgb(255, 0, 0),
+    );
+    crate::data::register_blob_url(source.to_string(), image.encode_png(), "image/png".into());
+    assert_eq!(
+        paint_layout(&layout, &mut resolver, viewport).pixel(0, 0),
+        Some(Color::rgb(255, 0, 0))
+    );
+    crate::data::clear_blob_urls();
+}
+
+#[test]
 fn paints_cross_fade_as_a_premultiplied_generated_background_image() {
     let red = pixel_data_uri(Color::rgb(255, 0, 0));
     let blue = pixel_data_uri(Color::rgb(0, 0, 255));
@@ -1991,6 +2036,43 @@ fn background_blend_group_is_isolated_from_the_backdrop() {
     paint_resolver.add_stylesheet(Origin::Author, stylesheet);
     let canvas = paint_layout(&layout, &mut paint_resolver, viewport);
     assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
+fn background_blend_finishes_before_element_opacity_filter_and_mask() {
+    let cases = [
+        ("opacity: .5", Color::rgba(0, 0, 0, 128)),
+        ("filter: invert(1)", Color::rgb(255, 255, 255)),
+        (
+            "mask-image: linear-gradient(rgba(0, 0, 0, .5), rgba(0, 0, 0, .5))",
+            Color::rgba(0, 0, 0, 128),
+        ),
+    ];
+    for (effect, expected) in cases {
+        let stylesheet = parse_stylesheet(&format!(
+            "body {{ margin: 0; }} div {{ width: 2px; height: 2px; \
+             background-image: linear-gradient(red, red), linear-gradient(blue, blue); \
+             background-blend-mode: multiply; {effect}; }}"
+        ))
+        .unwrap();
+        let document = NodeHandle::document();
+        let body = NodeHandle::element("body");
+        body.append_child(NodeHandle::element("div"));
+        document.append_child(body.clone());
+        let viewport = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 4.0,
+            height: 4.0,
+        };
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(Origin::Author, stylesheet.clone());
+        let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+        let mut paint_resolver = StyleResolver::new();
+        paint_resolver.add_stylesheet(Origin::Author, stylesheet);
+        let canvas = paint_layout(&layout, &mut paint_resolver, viewport);
+        assert_eq!(canvas.pixel(0, 0), Some(expected), "effect: {effect}");
+    }
 }
 
 #[test]
