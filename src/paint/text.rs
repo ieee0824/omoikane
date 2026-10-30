@@ -407,6 +407,15 @@ pub(super) fn paint_text_with_context(
             let fragment_rect = offset.rect(fragment.rect);
             match &fragment.content {
                 InlineFragmentContent::Text(text) => {
+                    let highlights = super::highlight::fragment_highlight_overlays(
+                        fragment, resolver, web_fonts,
+                    );
+                    super::highlight::paint_highlight_backgrounds(
+                        canvas,
+                        &highlights,
+                        offset,
+                        clip,
+                    );
                     let ink_rects = if fragment
                         .style
                         .text_decorations
@@ -441,6 +450,21 @@ pub(super) fn paint_text_with_context(
                         web_fonts,
                         clip,
                         None,
+                    );
+                    paint_highlight_text_colors(
+                        canvas,
+                        &highlights,
+                        HighlightTextPaint {
+                            fragment,
+                            fragment_rect,
+                            text,
+                            fallback_color,
+                            fonts,
+                            web_fonts,
+                            clip,
+                            offset,
+                        },
+                        resolver,
                     );
                     paint_text_fragment_emphasis(
                         canvas,
@@ -570,6 +594,50 @@ pub(super) fn paint_text_with_context(
                 }
             }
         }
+    }
+}
+
+/// Inputs for repainting a text fragment's glyphs in highlight colors.
+struct HighlightTextPaint<'a> {
+    fragment: &'a crate::layout::InlineFragment,
+    fragment_rect: Rect,
+    text: &'a str,
+    fallback_color: Color,
+    fonts: &'a [Arc<Font>],
+    web_fonts: Option<&'a WebFontRegistry>,
+    clip: Option<Rect>,
+    offset: super::PaintOffset,
+}
+
+/// Repaints the glyphs covered by each highlight that sets a text color.
+fn paint_highlight_text_colors(
+    canvas: &mut Canvas,
+    overlays: &[super::highlight::HighlightOverlay],
+    paint: HighlightTextPaint<'_>,
+    resolver: &mut crate::css::StyleResolver,
+) {
+    for overlay in overlays {
+        let Some(color) = overlay.color else {
+            continue;
+        };
+        let overlay_rect = paint.offset.rect(overlay.rect);
+        let Some(overlay_clip) = paint.clip.map_or(Some(overlay_rect), |clip| {
+            super::intersect(clip, overlay_rect)
+        }) else {
+            continue;
+        };
+        paint_text_fragment_glyphs(
+            canvas,
+            paint.fragment,
+            paint.fragment_rect,
+            paint.text,
+            resolver,
+            paint.fallback_color,
+            paint.fonts,
+            paint.web_fonts,
+            Some(overlay_clip),
+            Some(color),
+        );
     }
 }
 

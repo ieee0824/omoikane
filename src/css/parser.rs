@@ -396,6 +396,7 @@ fn selector_is_supported(selector: &Selector, context: SelectorSupportContext) -
                         || name.split_once('(').is_some_and(|(function, rest)| {
                             let argument = rest.strip_suffix(')').unwrap_or("");
                             function.eq_ignore_ascii_case("part")
+                                || function.eq_ignore_ascii_case("highlight")
                                 || (function.eq_ignore_ascii_case("slotted")
                                     && supported_compound_selector(argument, context))
                         }))
@@ -1374,7 +1375,9 @@ impl Parser {
             self.next();
             let name = self.expect_ident()?;
             if !matches!(self.peek(), Some(CssToken::ParenOpen)) {
-                if name.eq_ignore_ascii_case("picker") {
+                // `::highlight` and `::picker` are only defined in their
+                // functional forms.
+                if name.eq_ignore_ascii_case("highlight") || name.eq_ignore_ascii_case("picker") {
                     return Err(CssParseError::InvalidSelector);
                 }
                 return Ok(SimpleSelector::PseudoElement(name));
@@ -1383,11 +1386,28 @@ impl Parser {
                 self.next(); // consume ParenOpen
                 return parse_picker_pseudo_argument(&self.collect_parenthesized_tokens()?);
             }
-            if !name.eq_ignore_ascii_case("slotted") && !name.eq_ignore_ascii_case("part") {
+            if !name.eq_ignore_ascii_case("slotted")
+                && !name.eq_ignore_ascii_case("part")
+                && !name.eq_ignore_ascii_case("highlight")
+            {
                 return Err(CssParseError::InvalidSelector);
             }
             self.next(); // consume ParenOpen
             let argument_tokens = self.collect_parenthesized_tokens()?;
+            if name.eq_ignore_ascii_case("highlight") {
+                // `::highlight(<custom-ident>)`, stored with its serialized name.
+                let significant: Vec<&CssToken> = argument_tokens
+                    .iter()
+                    .filter(|token| **token != CssToken::Whitespace)
+                    .collect();
+                let [CssToken::Ident(ident)] = significant.as_slice() else {
+                    return Err(CssParseError::InvalidSelector);
+                };
+                return Ok(SimpleSelector::PseudoElement(format!(
+                    "highlight({})",
+                    serialize_selector_ident(ident)
+                )));
+            }
             let argument = render_tokens(&argument_tokens).trim().to_string();
             if argument.is_empty() {
                 return Err(CssParseError::InvalidSelector);
@@ -1475,9 +1495,15 @@ impl Parser {
                 "where" => Ok(SimpleSelector::Where(parse_forgiving_selector_list(
                     &argument_tokens,
                 ))),
-                "not" => Ok(SimpleSelector::Not(parse_nested_selector_tokens(
-                    &argument_tokens,
-                )?)),
+                "not" => {
+                    let selectors = parse_nested_selector_tokens(&argument_tokens)?;
+                    // Highlight pseudo-elements never match an element, so
+                    // logical combinations cannot contain them.
+                    if selectors.iter().any(selector_has_highlight_pseudo) {
+                        return Err(CssParseError::InvalidSelector);
+                    }
+                    Ok(SimpleSelector::Not(selectors))
+                }
                 "has" => Ok(SimpleSelector::Has(parse_relative_selector_list(
                     &argument_tokens,
                 )?)),
@@ -1939,7 +1965,8 @@ pub(crate) fn canonical_state_selector_text(input: &str) -> Option<String> {
     let tokens = tokenize(input).ok()?;
     if !tokens.windows(3).any(|tokens| {
         matches!(&tokens[0], CssToken::Colon)
-            && matches!(&tokens[1], CssToken::Ident(name) if name.eq_ignore_ascii_case("state"))
+            && matches!(&tokens[1], CssToken::Ident(name)
+                if name.eq_ignore_ascii_case("state") || name.eq_ignore_ascii_case("highlight"))
             && matches!(&tokens[2], CssToken::ParenOpen)
     }) {
         return None;
@@ -1952,6 +1979,31 @@ pub(super) fn render_selector_tokens(tokens: &[CssToken]) -> String {
     let mut rendered = String::new();
     let mut index = 0;
     while index < tokens.len() {
+        // `::highlight(<ident>)` serializes its custom highlight name.
+        if matches!(tokens.get(index), Some(CssToken::Colon))
+            && matches!(tokens.get(index + 1), Some(CssToken::Colon))
+            && matches!(tokens.get(index + 2), Some(CssToken::Ident(name)) if name.eq_ignore_ascii_case("highlight"))
+            && matches!(tokens.get(index + 3), Some(CssToken::ParenOpen))
+        {
+            let mut end = index + 4;
+            while matches!(tokens.get(end), Some(CssToken::Whitespace)) {
+                end += 1;
+            }
+            if let Some(CssToken::Ident(name)) = tokens.get(end) {
+                let name = name.clone();
+                end += 1;
+                while matches!(tokens.get(end), Some(CssToken::Whitespace)) {
+                    end += 1;
+                }
+                if matches!(tokens.get(end), Some(CssToken::ParenClose)) {
+                    rendered.push_str("::highlight(");
+                    rendered.push_str(&serialize_selector_ident(&name));
+                    rendered.push(')');
+                    index = end + 1;
+                    continue;
+                }
+            }
+        }
         if matches!(tokens.get(index), Some(CssToken::Colon))
             && matches!(tokens.get(index + 1), Some(CssToken::Ident(name)) if name.eq_ignore_ascii_case("state"))
             && matches!(tokens.get(index + 2), Some(CssToken::ParenOpen))
@@ -2539,6 +2591,38 @@ fn valid_part_suffix(simples: &[SimpleSelector]) -> bool {
     }
 }
 
+fn selector_has_highlight_pseudo(selector: &Selector) -> bool {
+    selector
+        .parts
+        .iter()
+        .any(|part| part.simples.iter().any(is_highlight_pseudo))
+}
+
+fn is_highlight_pseudo(simple: &SimpleSelector) -> bool {
+    matches!(simple, SimpleSelector::PseudoElement(name)
+        if name.split_once('(').is_some_and(|(function, _)| function.eq_ignore_ascii_case("highlight")))
+}
+
+/// `::highlight()` ends its selector; only `::part()` may precede it.
+fn valid_highlight_placement(parts: &[SelectorPart]) -> bool {
+    for (part_index, part) in parts.iter().enumerate() {
+        for (index, simple) in part.simples.iter().enumerate() {
+            if !is_highlight_pseudo(simple) {
+                continue;
+            }
+            let last = part_index + 1 == parts.len() && index + 1 == part.simples.len();
+            let preceded_only_by_part = part.simples[..index].iter().all(|simple| {
+                !(matches!(simple, SimpleSelector::PseudoElement(_)) || is_generated_pseudo(simple))
+                    || is_part_pseudo(simple)
+            });
+            if !last || !preceded_only_by_part {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// CSS Forms: `::picker(<form-control-identifier>)`, where `select` is the
 /// only identifier. The result is normalized to `picker(select)`.
 fn parse_picker_pseudo_argument(tokens: &[CssToken]) -> Result<SimpleSelector, CssParseError> {
@@ -2554,6 +2638,9 @@ fn parse_picker_pseudo_argument(tokens: &[CssToken]) -> Result<SimpleSelector, C
 }
 
 fn validate_pseudo_element_placement(parts: &[SelectorPart]) -> Result<(), CssParseError> {
+    if !valid_highlight_placement(parts) {
+        return Err(CssParseError::InvalidSelector);
+    }
     let mut part_location = None;
     let mut pseudo_count = 0;
     for (part_index, part) in parts.iter().enumerate() {

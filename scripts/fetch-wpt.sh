@@ -41,6 +41,7 @@ collect_pattern "/close-watcher/" "/html/semantics/the-button-element/command-an
   "/html/semantics/forms/the-input-element/show-picker*" "/html/semantics/forms/the-input-element/resources/" \
   "/html/semantics/forms/the-input-element/input-types.js" "/common/top-layer.js" \
   "/html/semantics/popovers/resources/popover-utils.js"
+collect_pattern "/css/css-highlight-api/"
 collect_pattern \
   "/css/css-color/parsing/color-computed-color-function.html" \
   "/css/css-color/parsing/color-computed-hwb.html" \

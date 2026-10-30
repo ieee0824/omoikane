@@ -267,36 +267,9 @@ pub(crate) fn text_range_rects_layout(
     for line in &layout.lines {
         let mut line_rects = Vec::new();
         for fragment in &line.fragments {
-            if !fragment.text_source.iter().any(|span| {
-                span.node == *node && span.dom_range.start < end && start < span.dom_range.end
-            }) {
-                continue;
-            }
-            let positions = fragment_dom_carets(fragment, node, web_fonts);
-            let Some(first) = positions
-                .iter()
-                .filter(|(offset, _)| *offset <= start)
-                .max_by_key(|(offset, _)| *offset)
-                .or_else(|| positions.iter().min_by_key(|(offset, _)| *offset))
-            else {
+            let Some(rect) = fragment_text_range_rect(fragment, node, start, end, web_fonts) else {
                 continue;
             };
-            let Some(last) = positions
-                .iter()
-                .filter(|(offset, _)| *offset >= end)
-                .min_by_key(|(offset, _)| *offset)
-                .or_else(|| positions.iter().max_by_key(|(offset, _)| *offset))
-            else {
-                continue;
-            };
-            let low = first.1.min(last.1);
-            let high = first.1.max(last.1);
-            let mut rect = caret_rect(fragment, AffineTransform::identity(), low);
-            if is_vertical(&fragment.style) {
-                rect.height = high - low;
-            } else {
-                rect.width = high - low;
-            }
             push_line_text_rect(&mut line_rects, rect, is_vertical(&fragment.style));
         }
         result.extend(
@@ -308,6 +281,44 @@ pub(crate) fn text_range_rects_layout(
     for child in &layout.children {
         text_range_rects_layout(child, node, start, end, transform, web_fonts, result);
     }
+}
+
+/// Returns the untransformed layout rectangle that one fragment paints for a
+/// UTF-16 interval of `node`, or `None` when the fragment shows none of it.
+pub(crate) fn fragment_text_range_rect(
+    fragment: &InlineFragment,
+    node: &NodeHandle,
+    start: usize,
+    end: usize,
+    web_fonts: Option<&WebFontRegistry>,
+) -> Option<Rect> {
+    if !fragment
+        .text_source
+        .iter()
+        .any(|span| span.node == *node && span.dom_range.start < end && start < span.dom_range.end)
+    {
+        return None;
+    }
+    let positions = fragment_dom_carets(fragment, node, web_fonts);
+    let first = positions
+        .iter()
+        .filter(|(offset, _)| *offset <= start)
+        .max_by_key(|(offset, _)| *offset)
+        .or_else(|| positions.iter().min_by_key(|(offset, _)| *offset))?;
+    let last = positions
+        .iter()
+        .filter(|(offset, _)| *offset >= end)
+        .min_by_key(|(offset, _)| *offset)
+        .or_else(|| positions.iter().max_by_key(|(offset, _)| *offset))?;
+    let low = first.1.min(last.1);
+    let high = first.1.max(last.1);
+    let mut rect = caret_rect(fragment, AffineTransform::identity(), low);
+    if is_vertical(&fragment.style) {
+        rect.height = high - low;
+    } else {
+        rect.width = high - low;
+    }
+    Some(rect)
 }
 
 fn push_line_text_rect(rects: &mut Vec<Rect>, rect: Rect, vertical: bool) {

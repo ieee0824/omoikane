@@ -310,7 +310,23 @@ struct NodeInner {
     /// attribute. Weak handles preserve identity without retaining detached
     /// subtrees; direct content-attribute mutation clears the matching entry.
     aria_element_references: HashMap<String, Vec<WeakNodeHandle>>,
+    /// Custom highlight intervals painted over this Text node. Script owns the
+    /// registry and republishes these whenever ranges or registrations change.
+    text_highlights: Option<Box<[TextHighlight]>>,
     data: NodeData,
+}
+
+/// One custom highlight interval within a Text node (CSS Custom Highlight API).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TextHighlight {
+    /// UTF-16 start offset within the Text node.
+    pub start: usize,
+    /// UTF-16 end offset within the Text node.
+    pub end: usize,
+    /// [`crate::css::highlight_name_key`] of the registered highlight name.
+    pub name_key: u64,
+    /// Painting order; larger values paint above smaller ones.
+    pub order: u32,
 }
 
 impl NodeInner {
@@ -1096,6 +1112,7 @@ impl NodeHandle {
             parent_slot: 0,
             children: children::Children::default(),
             aria_element_references: HashMap::new(),
+            text_highlights: None,
             data,
         })))
     }
@@ -2869,6 +2886,22 @@ impl NodeHandle {
                 focused,
             });
         }
+    }
+
+    /// Replaces the custom highlight intervals painted over this Text node.
+    pub(crate) fn set_text_highlights(&self, highlights: Vec<TextHighlight>) {
+        self.0.borrow_mut().text_highlights =
+            (!highlights.is_empty()).then(|| highlights.into_boxed_slice());
+    }
+
+    /// Returns the custom highlight intervals painted over this Text node.
+    pub(crate) fn text_highlights(&self) -> Vec<TextHighlight> {
+        self.0
+            .borrow()
+            .text_highlights
+            .as_deref()
+            .map(<[TextHighlight]>::to_vec)
+            .unwrap_or_default()
     }
 
     /// Returns the live editing state for a text control, when JavaScript has initialized it.

@@ -30,12 +30,50 @@ pub enum PseudoElement {
     BeforeMarker,
     /// The list marker whose originating pseudo-element is `::after`.
     AfterMarker,
+    /// `::highlight(<name>)`, keyed by [`highlight_name_key`] of the decoded
+    /// custom highlight name.
+    Highlight(u64),
     /// A base appearance select's drop-down box (`::picker(select)`).
     Picker,
     /// The arrow icon of a base appearance select (`::picker-icon`).
     PickerIcon,
     /// The selection indicator of a base appearance option (`::checkmark`).
     Checkmark,
+}
+
+/// Returns the stable key that identifies a custom highlight name.
+///
+/// The key is a 64-bit FNV-1a hash of the decoded, case-sensitive name, so
+/// `PseudoElement` stays `Copy` while selectors and the highlight registry
+/// agree without sharing state.
+pub fn highlight_name_key(name: &str) -> u64 {
+    name.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// Parses the stored argument of a `highlight(...)` pseudo-element name.
+///
+/// Selector parsing stores the name serialized, so it is tokenized again to
+/// recover the decoded identifier. Returns `None` unless the argument is a
+/// single identifier.
+pub(crate) fn highlight_pseudo_from_name(name: &str) -> Option<PseudoElement> {
+    let (function, rest) = name.split_once('(')?;
+    if !function.eq_ignore_ascii_case("highlight") {
+        return None;
+    }
+    let argument = rest.strip_suffix(')')?;
+    let tokens = super::tokenizer::tokenize(argument).ok()?;
+    let mut significant = tokens
+        .iter()
+        .filter(|token| !matches!(token, super::CssToken::Whitespace));
+    let Some(super::CssToken::Ident(ident)) = significant.next() else {
+        return None;
+    };
+    significant
+        .next()
+        .is_none()
+        .then(|| PseudoElement::Highlight(highlight_name_key(ident)))
 }
 
 impl PseudoElement {
@@ -50,6 +88,7 @@ impl PseudoElement {
             Self::Marker => "marker",
             Self::BeforeMarker => "before::marker",
             Self::AfterMarker => "after::marker",
+            Self::Highlight(_) => "highlight",
             Self::Picker => "picker(select)",
             Self::PickerIcon => "picker-icon",
             Self::Checkmark => "checkmark",
@@ -263,7 +302,7 @@ pub fn selector_pseudo_element(selector: &Selector) -> Option<PseudoElement> {
                     "picker(select)" => PseudoElement::Picker,
                     "picker-icon" => PseudoElement::PickerIcon,
                     "checkmark" => PseudoElement::Checkmark,
-                    _ => return None,
+                    _ => highlight_pseudo_from_name(name)?,
                 };
                 pseudo = Some(match (pseudo, current) {
                     (None, current) => current,
@@ -1005,7 +1044,10 @@ fn matches_pseudo_element(name: &str, pseudo: Option<PseudoElement>) -> bool {
             pseudo,
             Some(PseudoElement::Marker | PseudoElement::BeforeMarker | PseudoElement::AfterMarker)
         ),
-        _ => false,
+        _ => {
+            matches!(pseudo, Some(PseudoElement::Highlight(_)))
+                && highlight_pseudo_from_name(name) == pseudo
+        }
     }
 }
 
