@@ -69,6 +69,16 @@ pub(super) fn replacement_requires_rebuild(
         .any(|node| sensitive_subtree(node, &mut remaining))
 }
 
+/// Only a `<link>` whose `rel` includes `stylesheet` owns an author sheet.
+/// Later `rel`/`href` changes rebuild through the attribute mutation path.
+fn stylesheet_link(node: &NodeHandle) -> bool {
+    node.tag_name().as_deref() == Some("link")
+        && node.get_attribute("rel").is_some_and(|rel| {
+            rel.split_ascii_whitespace()
+                .any(|token| token.eq_ignore_ascii_case("stylesheet"))
+        })
+}
+
 fn sensitive_ancestry(node: &NodeHandle) -> bool {
     let mut current = Some(node.clone());
     for _ in 0..ANCESTOR_BUDGET {
@@ -77,11 +87,11 @@ fn sensitive_ancestry(node: &NodeHandle) -> bool {
             NodeType::Document => return !node.is_html_document(),
             NodeType::Element if node.is_html_element() => {
                 if node.shadow_root().is_some()
+                    || stylesheet_link(&node)
                     || matches!(
                         node.tag_name().as_deref(),
                         Some(
                             "style"
-                                | "link"
                                 | "base"
                                 | "meta"
                                 | "noscript"
@@ -113,14 +123,14 @@ fn sensitive_subtree(root: &NodeHandle, remaining: &mut usize) -> bool {
         match node.node_type() {
             NodeType::Text | NodeType::Comment => {}
             NodeType::Element if node.is_html_element() => {
-                // Insertion of inline style also needs the existing CSP membership refresh.
-                if node.has_attribute("style")
-                    || node.shadow_root().is_some()
+                // Inline `style` attributes refresh their CSP membership per
+                // element instead; see `refresh_inserted_inline_style_policy`.
+                if node.shadow_root().is_some()
+                    || stylesheet_link(&node)
                     || matches!(
                         node.tag_name().as_deref(),
                         Some(
                             "style"
-                                | "link"
                                 | "base"
                                 | "meta"
                                 | "noscript"
@@ -293,6 +303,28 @@ fn auto_direction_ancestry(parent: &NodeHandle) -> bool {
 }
 
 impl HostState {
+    /// Updates CSP `style-src-attr` membership for moved elements now in
+    /// `document`, as a resolver rebuild would. Their cached styles are
+    /// discarded with the moved subtrees, so the new state applies.
+    fn refresh_inserted_inline_style_policy(
+        &mut self,
+        document: &NodeHandle,
+        change: &ChildListChange,
+    ) {
+        for root in &change.moved {
+            if document_root_for_node(root).as_ref() != Some(document) {
+                continue;
+            }
+            let mut pending = vec![root.clone()];
+            while let Some(node) = pending.pop() {
+                if node.node_type() == NodeType::Element && node.has_attribute("style") {
+                    self.refresh_csp_inline_style_nodes(&node);
+                }
+                pending.extend(node.child_nodes());
+            }
+        }
+    }
+
     /// Invalidates the document containing `node` after `node`'s children or
     /// character data changed in place. An `<iframe>`'s fallback children are
     /// also part of its layout box, so its child document is rebuilt too.
@@ -332,6 +364,7 @@ impl HostState {
             self.mark_document_style_dirty(document);
             return;
         }
+        self.refresh_inserted_inline_style_policy(document, change);
         self.form_validation.invalidate();
         if !document.is_html_document() || change.reaches_shared_state() {
             self.invalidate_document_style_cache_keeping_validation(
