@@ -65,7 +65,7 @@ jobs:
             os: ubuntu-24.04-arm
             archive: omoikane-linux-aarch64.tar.gz
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             archive: omoikane-macos-aarch64.tar.gz
     env:
       CARGO_BUILD_JOBS: '2'
