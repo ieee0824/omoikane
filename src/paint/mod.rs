@@ -6454,10 +6454,98 @@ fn prepare_background_image(style: &ComputedStyle) -> Option<PreparedBackgroundI
         | Some(ComputedValue::Color(value)) => value,
         _ => return None,
     };
-    if let Some(gradient) = color::parse_gradient(value.trim_start()) {
+    let declaration = crate::css::parse_style_attribute(&format!("background-image:{value}"))
+        .into_iter()
+        .find(|declaration| declaration.name == "background-image")?;
+    let device_pixel_ratio = crate::layout::current_image_device_pixel_ratio();
+    prepare_background_image_value(&declaration.value, device_pixel_ratio)
+}
+
+fn prepare_background_image_value(
+    value: &Value,
+    device_pixel_ratio: f32,
+) -> Option<PreparedBackgroundImage> {
+    let serialized = crate::css::serialize_specified_value(value);
+    if let Some(gradient) = color::parse_gradient(&serialized) {
         return Some(PreparedBackgroundImage::Gradient(gradient));
     }
-    background_image(style).map(PreparedBackgroundImage::Image)
+    match value {
+        Value::Function { name, arguments }
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "image-set" | "-webkit-image-set"
+            ) =>
+        {
+            prepare_image_set(arguments, device_pixel_ratio)
+        }
+        Value::Function { name, .. } if name.eq_ignore_ascii_case("url") => {
+            image::parse_background_image_value(&serialized).map(PreparedBackgroundImage::Image)
+        }
+        Value::String(url) => {
+            image::parse_background_image_value(url).map(PreparedBackgroundImage::Image)
+        }
+        Value::Keyword(url) if url.trim_start().to_ascii_lowercase().starts_with("url(") => {
+            image::parse_background_image_value(url).map(PreparedBackgroundImage::Image)
+        }
+        _ => None,
+    }
+}
+
+fn prepare_image_set(
+    entries: &[Value],
+    device_pixel_ratio: f32,
+) -> Option<PreparedBackgroundImage> {
+    let mut candidates = entries
+        .iter()
+        .filter_map(image_set_candidate)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let selected = candidates
+        .iter()
+        .position(|(density, _)| *density >= device_pixel_ratio)
+        .unwrap_or_else(|| candidates.len().saturating_sub(1));
+    candidates
+        .get(selected..)
+        .into_iter()
+        .flatten()
+        .chain(candidates[..selected].iter().rev())
+        .find_map(|(_, image)| prepare_background_image_value(image, device_pixel_ratio))
+}
+
+fn image_set_candidate(value: &Value) -> Option<(f32, &Value)> {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let (image, descriptors) = values.split_first()?;
+    let mut density = 1.0;
+    for descriptor in descriptors {
+        match descriptor {
+            Value::Length(value, unit) if value.is_finite() && *value > 0.0 => {
+                density = match unit.to_ascii_lowercase().as_str() {
+                    "dppx" | "x" => *value,
+                    "dpi" => *value / 96.0,
+                    "dpcm" => *value * 2.54 / 96.0,
+                    _ => return None,
+                };
+            }
+            Value::Function { name, arguments } if name.eq_ignore_ascii_case("type") => {
+                let mime = arguments
+                    .first()
+                    .map(crate::css::serialize_specified_value)?
+                    .trim_matches(['\'', '"'])
+                    .to_ascii_lowercase();
+                if !matches!(
+                    mime.as_str(),
+                    "image/png" | "image/jpeg" | "image/jpg" | "image/webp"
+                ) {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some((density, image))
 }
 
 fn background_image(style: &ComputedStyle) -> Option<Image> {

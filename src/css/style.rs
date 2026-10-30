@@ -7433,10 +7433,28 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             );
         }
         "isolation" => return validate_keyword_value(value, &["auto", "isolate"]),
-        "background-origin" | "background-clip" => {
+        "background-origin" => {
             return validate_keyword_value(value, &["border-box", "padding-box", "content-box"]);
         }
+        "background-clip" => {
+            return validate_keyword_value(
+                value,
+                &["border-box", "padding-box", "content-box", "text"],
+            );
+        }
+        "background-blend-mode" => {
+            return validate_blend_mode_list(value);
+        }
         "background-image" => return validate_background_image_declaration(value),
+        "image-rendering" => {
+            return validate_keyword_value(
+                value,
+                &["auto", "smooth", "high-quality", "crisp-edges", "pixelated"],
+            );
+        }
+        "image-orientation" => {
+            return validate_keyword_value(value, &["from-image", "none"]);
+        }
         "border-image-source" | "mask-border-source" => {
             return validate_background_image_declaration(value);
         }
@@ -7884,9 +7902,61 @@ fn valid_composite_image(value: &Value) -> bool {
     }
 }
 
+fn validate_blend_mode_list(value: &Value) -> DeclarationValidation {
+    const MODES: &[&str] = &[
+        "normal",
+        "multiply",
+        "screen",
+        "overlay",
+        "darken",
+        "lighten",
+        "color-dodge",
+        "color-burn",
+        "hard-light",
+        "soft-light",
+        "difference",
+        "exclusion",
+        "hue",
+        "saturation",
+        "color",
+        "luminosity",
+        "plus-darker",
+        "plus-lighter",
+    ];
+    if let Value::Keyword(keyword) = value {
+        let keyword = keyword.to_ascii_lowercase();
+        return if is_css_wide_keyword(&keyword) || MODES.contains(&keyword.as_str()) {
+            DeclarationValidation::Valid(ComputedValue::Keyword(keyword))
+        } else {
+            DeclarationValidation::Invalid
+        };
+    }
+    let Value::CommaList(values) = value else {
+        return DeclarationValidation::Invalid;
+    };
+    let modes = values
+        .iter()
+        .map(|value| match value {
+            Value::Keyword(keyword) if MODES.contains(&keyword.to_ascii_lowercase().as_str()) => {
+                Some(keyword.to_ascii_lowercase())
+            }
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>();
+    match modes {
+        Some(modes) if !modes.is_empty() => {
+            DeclarationValidation::Valid(ComputedValue::Keyword(modes.join(", ")))
+        }
+        _ => DeclarationValidation::Invalid,
+    }
+}
+
 fn valid_image_component(value: &Value) -> bool {
     match value {
         Value::Function { name, .. } if name.eq_ignore_ascii_case("url") => true,
+        Value::Keyword(value) if value.trim_start().to_ascii_lowercase().starts_with("url(") => {
+            true
+        }
         Value::Function { name, .. } if name.to_ascii_lowercase().ends_with("gradient") => {
             crate::paint::parse_gradient(&render_value(value)).is_some()
         }
@@ -16021,6 +16091,10 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
         InitialValue::Keyword("stretch"),
     ),
     (
+        PropertyId::BackgroundBlendMode,
+        InitialValue::Keyword("normal"),
+    ),
+    (
         PropertyId::BackgroundClip,
         InitialValue::Keyword("border-box"),
     ),
@@ -16043,6 +16117,11 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
         InitialValue::Keyword("normal"),
     ),
     (PropertyId::FontPalette, InitialValue::Keyword("normal")),
+    (
+        PropertyId::ImageOrientation,
+        InitialValue::Keyword("from-image"),
+    ),
+    (PropertyId::ImageRendering, InitialValue::Keyword("auto")),
     (PropertyId::FontKerning, InitialValue::Keyword("auto")),
     (PropertyId::FontOpticalSizing, InitialValue::Keyword("auto")),
     (PropertyId::FontSizeAdjust, InitialValue::Keyword("none")),
@@ -16367,6 +16446,7 @@ fn normalize_background_layer_lists(properties: &mut PropertyMap) {
         ("background-attachment", "scroll"),
         ("background-origin", "padding-box"),
         ("background-clip", "border-box"),
+        ("background-blend-mode", "normal"),
     ] {
         let raw = properties
             .get(name)
@@ -16590,6 +16670,8 @@ const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
     PropertyId::FontVariantPosition,
     PropertyId::FontVariationSettings,
     PropertyId::FontWeight,
+    PropertyId::ImageOrientation,
+    PropertyId::ImageRendering,
     PropertyId::LetterSpacing,
     PropertyId::LineBreak,
     PropertyId::LineHeight,

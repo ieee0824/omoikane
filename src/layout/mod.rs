@@ -545,6 +545,10 @@ fn current_image_selection_environment() -> (f32, f32, f32) {
     IMAGE_SELECTION_ENVIRONMENT.with(Cell::get)
 }
 
+pub(crate) fn current_image_device_pixel_ratio() -> f32 {
+    current_image_selection_environment().2
+}
+
 /// Runs image resolution with the browsing session's Cookie store and site.
 /// Cached responses are scoped to the Document that selected those cookies.
 pub(crate) fn with_image_cookie_store<T>(

@@ -1802,6 +1802,59 @@ fn paints_tiled_background_images_from_data_uris() {
 }
 
 #[test]
+fn image_set_selects_the_smallest_supported_density_at_or_above_dpr() {
+    let red = pixel_data_uri(Color::rgb(255, 0, 0));
+    let blue = pixel_data_uri(Color::rgb(0, 0, 255));
+    let declaration = crate::css::parse_style_attribute(&format!(
+        "background-image:image-set(url(\"{red}\") 1x, url(\"{blue}\") 2x)"
+    ))
+    .remove(0);
+    let Value::Function { arguments, .. } = declaration.value else {
+        panic!("image-set did not retain its owned argument tree");
+    };
+    let Some(PreparedBackgroundImage::Image(image)) = prepare_image_set(&arguments, 2.0) else {
+        panic!("image-set did not resolve a supported candidate: {arguments:?}");
+    };
+    assert_eq!(image.pixels(), &[0, 0, 255, 255]);
+}
+
+#[test]
+fn paints_selected_image_set_candidate_as_a_background_layer() {
+    let red = pixel_data_uri(Color::rgb(255, 0, 0));
+    let blue = pixel_data_uri(Color::rgb(0, 0, 255));
+    let stylesheet = format!(
+        "body {{ margin: 0; }} div {{ width: 2px; height: 2px; \
+         background-image: image-set(url(\"{red}\") 1x, url(\"{blue}\") 2x); \
+         background-repeat: no-repeat; }}"
+    );
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let div = NodeHandle::element("div");
+    body.append_child(div.clone());
+    document.append_child(body.clone());
+    let sheet = parse_stylesheet(&stylesheet).unwrap();
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(Origin::Author, sheet.clone());
+    assert!(
+        resolver
+            .computed_style(&div)
+            .get("background-image")
+            .is_some_and(|value| value.css_text().starts_with("image-set("))
+    );
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 4.0,
+        height: 4.0,
+    };
+    let layout = layout_tree(&body, &mut resolver, viewport).unwrap();
+    let mut paint_resolver = StyleResolver::new();
+    paint_resolver.add_stylesheet(Origin::Author, sheet);
+    let canvas = paint_layout(&layout, &mut paint_resolver, viewport);
+    assert_eq!(canvas.pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
 fn paints_non_repeating_background_images_once() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
@@ -4684,7 +4737,7 @@ fn count_pixels(canvas: &Canvas, color: Color) -> usize {
     count
 }
 
-fn red_pixel_data_uri() -> String {
+fn pixel_data_uri(color: Color) -> String {
     let mut canvas = Canvas::new(1, 1);
     canvas.fill_rect(
         Rect {
@@ -4693,10 +4746,14 @@ fn red_pixel_data_uri() -> String {
             width: 1.0,
             height: 1.0,
         },
-        Color::rgb(255, 0, 0),
+        color,
     );
     let encoded = base64::engine::general_purpose::STANDARD.encode(canvas.encode_png());
     format!("data:image/png;base64,{encoded}")
+}
+
+fn red_pixel_data_uri() -> String {
+    pixel_data_uri(Color::rgb(255, 0, 0))
 }
 
 fn rgba_mask_data_uri(width: u32, height: u32, alphas: &[u8]) -> String {
