@@ -7364,10 +7364,10 @@ fn point_in_clip_subpaths(
             let cross = (point.0 - x0) * (y1 - y0) - (point.1 - y0) * (x1 - x0);
             if area.abs() > 1e-6
                 && cross.abs() <= 1e-5
-                && point.0 >= x0.min(x1) - 1e-6
-                && point.0 <= x0.max(x1) + 1e-6
-                && point.1 >= y0.min(y1) - 1e-6
-                && point.1 <= y0.max(y1) + 1e-6
+                && point.0 >= x0.min(x1)
+                && point.0 <= x0.max(x1)
+                && point.1 >= y0.min(y1)
+                && point.1 <= y0.max(y1)
             {
                 return true;
             }

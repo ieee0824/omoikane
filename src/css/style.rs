@@ -7582,6 +7582,9 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         "paint-order" => {
             let rendered = render_value(value).to_ascii_lowercase();
             let parts = super::split_top_level_whitespace(&rendered);
+            if parts.len() == 1 && is_css_wide_keyword(parts[0]) {
+                return DeclarationValidation::Unvalidated;
+            }
             let valid = parts.as_slice() == ["normal"]
                 || (!parts.is_empty()
                     && parts.len() <= 3
@@ -16905,10 +16908,13 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (PropertyId::OutlineWidth, InitialValue::Px(3.0)),
     (PropertyId::OutlineOffset, InitialValue::Px(0.0)),
     (PropertyId::OutlineColor, InitialValue::Keyword("auto")),
-    (PropertyId::WebkitTextFillColor, InitialValue::CurrentColor),
+    (
+        PropertyId::WebkitTextFillColor,
+        InitialValue::Keyword("currentcolor"),
+    ),
     (
         PropertyId::WebkitTextStrokeColor,
-        InitialValue::CurrentColor,
+        InitialValue::Keyword("currentcolor"),
     ),
     (PropertyId::WebkitTextStrokeWidth, InitialValue::Px(0.0)),
     (PropertyId::PaintOrder, InitialValue::Keyword("normal")),
