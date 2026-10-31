@@ -15031,9 +15031,17 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
             if matches!(
                 name.to_ascii_lowercase().as_str(),
                 "rgb" | "rgba" | "hsl" | "hsla"
-            ) && render_value(value)
-                .split_once('(')
-                .is_some_and(|(_, body)| body.trim_start().starts_with("from ")) =>
+            ) && {
+                let rendered = render_value(value);
+                rendered
+                    .split_once('(')
+                    .is_some_and(|(_, body)| body.trim_start().starts_with("from "))
+                    || rendered
+                        .split(|character: char| {
+                            !character.is_ascii_alphanumeric() && character != '-'
+                        })
+                        .any(|token| token.eq_ignore_ascii_case("none"))
+            } =>
         {
             compute_color4_value(value, ctx)
         }

@@ -235,7 +235,7 @@ fn parse_modern_legacy_color(
         _ => return None,
     };
     let space = if is_hsl { Space::Hsl } else { Space::Srgb };
-    if channels.iter().all(Option::is_some) && space == Space::Hsl {
+    if channels.iter().all(Option::is_some) && alpha.is_some() && space == Space::Hsl {
         channels = hsl_to_rgb(channels.map(Option::unwrap)).map(Some);
         return Some(CssColor {
             space: Space::Srgb,

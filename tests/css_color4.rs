@@ -145,6 +145,28 @@ fn relative_color_resolves_current_color_at_the_owning_element() {
     assert_eq!(actual, "[\"color(srgb 0 0 1)\",\"color(srgb 0 0 1)\"]");
 }
 
+#[test]
+fn relative_hsl_preserves_a_missing_alpha_in_computed_style() {
+    let document = TreeBuilder::parse(
+        "<div id='target' style='color:hsl(from rebeccapurple h s l / none)'></div>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let actual = runtime
+        .eval(
+            "(() => { const e=document.getElementById('target'); const first=getComputedStyle(e).color;\
+             e.style.color=first; return JSON.stringify([first,getComputedStyle(e).color]); })()",
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        actual,
+        "[\"hsl(270 50% 40% / none)\",\"hsl(270 50% 40% / none)\"]"
+    );
+}
+
 fn color4_paint_cases() -> Vec<(String, String)> {
     let mut colors = vec![
         ("hwb(0 0% 0%)".to_owned(), "red".to_owned()),
