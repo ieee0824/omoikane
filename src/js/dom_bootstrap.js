@@ -1152,6 +1152,9 @@ let omoikaneUserActivationState;
     name === "hyphenate-character" ||
     name === "initial-letter" || name === "text-box-edge" ||
     logicalBoxStyleProperties.has(name) ||
+    name === "position-area" || name === "position-try-fallbacks" ||
+    name === "position-visibility" ||
+    (!name.startsWith("--") && /anchor-size\s*\(/i.test(value)) ||
     validatesSpecialStyleProperties.has(name) ||
     (!name.startsWith("--") && numericMathFunctionPattern.test(value)) ||
     (!name.startsWith("--") && /sibling-(?:index|count)\s*\(/i.test(value));
@@ -3467,6 +3470,10 @@ let omoikaneUserActivationState;
   // No focus event is cancelable, and all four are composed so they cross
   // shadow boundaries. Bubbling differs per event — `focusin` and `focusout`
   // bubble, `focus` and `blur` do not — so each caller passes it in.
+  // Set by the Event Timing section once the performance timeline exists.
+  // `var` keeps dispatches during bootstrap from reading it before then.
+  var eventTimingRecorder = null;
+
   function fireFocusEvent(target, type, relatedTarget, bubbles) {
     const event = new FocusEvent(type, {
       bubbles,
@@ -4137,12 +4144,17 @@ let omoikaneUserActivationState;
     dispatchEvent(event) {
       const dispatchEvent = isEventInstance(event) ? event : new Event(event);
       const activationInfo = dispatchEvent.type === "click" ? { target: null } : null;
+      // Event Timing measures trusted input dispatch (see recordEventTiming).
+      const timing = eventTimingRecorder && dispatchEvent.isTrusted
+        ? eventTimingRecorder.begin(dispatchEvent) : null;
       let notCanceled;
       try { notCanceled = dispatchEventOnTarget(this, dispatchEvent, activationInfo); }
       catch (error) {
+        if (timing) eventTimingRecorder.end(timing, this);
         completeCheckableActivation(activationInfo?.checkable, true);
         throw error;
       }
+      if (timing) eventTimingRecorder.end(timing, this);
       completeCheckableActivation(activationInfo?.checkable, !notCanceled);
       // Run the event path's activation target after an uncanceled click. This
       // also covers a click on a descendant of a link or form control.
@@ -10342,6 +10354,12 @@ let omoikaneUserActivationState;
         .replace(/\/\*[\s\S]*?\*\//g, " ").trim();
       return validFontFeatureFamilyList(raw);
     }
+    if (/^@position-try(?=\s|\/\*|\{)/i.test(text)) {
+      const raw = text.slice(0, open).replace(/^@position-try/i, "")
+        .replace(/\/\*[\s\S]*?\*\//g, " ").trim();
+      const name = cssIdentifierValue(raw);
+      return name !== null && name.startsWith("--");
+    }
     return true;
   }
 
@@ -10350,19 +10368,25 @@ let omoikaneUserActivationState;
     catch (_) { return false; }
   }
 
-  function declarationView(block, onChange = null, validateProperties = true, elementContext = true) {
+  function declarationView(block, onChange = null, validateProperties = true, elementContext = true,
+                           allowedProperties = null) {
     let source = String(block || "");
     let cachedSource = null;
     let cachedDeclarations = [];
     const accepts = (name, value) =>
+      (!allowedProperties || allowedProperties.has(name)) &&
       (elementContext || JSON.parse(__omoikane_css_declarations(name + ": " + value, true)).length > 0) &&
       (!validateProperties || name.startsWith("--") ||
        nativeStyleSupports(name, value.replace(/\s*!\s*important\s*$/i, "")));
     const declarations = () => {
       if (cachedSource !== source) {
-        const parsed = JSON.parse(__omoikane_css_declarations(source)).map(
-          ([name, value]) => ({ name, value })
-        ).filter(declaration => accepts(declaration.name, declaration.value));
+        const parsed = JSON.parse(__omoikane_css_declarations(source)).map(([name, value]) => {
+          if (needsStyleValueNormalization(name, value)) {
+            const normalized = __omoikane_normalize_style_value(name, value);
+            if (normalized !== null) value = normalized;
+          }
+          return { name, value };
+        }).filter(declaration => accepts(declaration.name, declaration.value));
         cachedDeclarations = parsed;
         cachedSource = source;
       }
@@ -10397,7 +10421,7 @@ let omoikaneUserActivationState;
       }
       if (!accepts(key, value)) return;
       const longhands = styleShorthandLonghands[key];
-      if (longhands) {
+      if (longhands && !allowedProperties) {
         const expanded = JSON.parse(__omoikane_expand_style_shorthand(key, value));
         if (expanded.length === 0) return;
         const replaced = new Set([key, ...longhands]);
@@ -10452,11 +10476,17 @@ let omoikaneUserActivationState;
     return new Proxy(target, {
       get(object, prop) {
         if (typeof prop === "symbol" || prop in object) return object[prop];
+        if (allowedProperties && !allowedProperties.has(propertyName(prop))) return undefined;
         return object.getPropertyValue(prop);
       },
       set(object, prop, value) {
         if (typeof prop !== "string") return true;
         if (prop === "cssText") { object.cssText = value; return true; }
+        if (allowedProperties && allowedProperties.has(propertyName(prop))) {
+          if (value === null || value === undefined || value === "") removeValue(prop);
+          else setValue(prop, value);
+          return true;
+        }
         if (prop in object) return true;
         if (value === null || value === undefined || value === "") removeValue(prop);
         else setValue(prop, value);
@@ -10797,7 +10827,7 @@ let omoikaneUserActivationState;
 
   // Descriptor rules have no originating element for tree-dependent values.
   class CSSDescriptorRule {
-    constructor(text, sheet, index) {
+    constructor(text, sheet, index, allowedProperties = null) {
       this.__sheet = sheet;
       this.__index = index;
       const open = cssRuleBlockStart(text), close = text.lastIndexOf("}");
@@ -10805,11 +10835,14 @@ let omoikaneUserActivationState;
       this.__style = declarationView(text.slice(open + 1, close), () => {
         this.__text = this.cssText;
         if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
-      }, false, false);
+      }, false, false, allowedProperties);
       this.__text = text;
       if (sheet) sheet.__registerRuleView(this);
     }
-    get cssText() { return this.__prelude + " { " + this.__style.cssText + " }"; }
+    get cssText() {
+      const declarations = this.__style.cssText;
+      return this.__prelude + (declarations ? " { " + declarations + " }" : " { }");
+    }
     get parentRule() { return this.__sheet ? this.__sheet.__parentRule : null; }
     get parentStyleSheet() { return this.__sheet; }
   }
@@ -10831,6 +10864,53 @@ let omoikaneUserActivationState;
     get fontFamily() { return this.__style.getPropertyValue("font-family"); }
     get basePalette() { return this.__style.getPropertyValue("base-palette"); }
     get overrideColors() { return this.__style.getPropertyValue("override-colors"); }
+  }
+
+  const positionTryDescriptorProperties = new Set([
+    "margin", "margin-top", "margin-right", "margin-bottom", "margin-left",
+    "margin-block", "margin-block-start", "margin-block-end",
+    "margin-inline", "margin-inline-start", "margin-inline-end",
+    "inset", "top", "left", "right", "bottom", "inset-block",
+    "inset-block-start", "inset-block-end", "inset-inline",
+    "inset-inline-start", "inset-inline-end", "width", "height",
+    "min-width", "max-width", "min-height", "max-height", "block-size",
+    "min-block-size", "max-block-size", "inline-size", "min-inline-size",
+    "max-inline-size", "place-self", "align-self", "justify-self",
+    "position-anchor", "position-area"
+  ]);
+
+  class CSSPositionTryDescriptors {}
+  for (const property of positionTryDescriptorProperties) {
+    const camel = property.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+    for (const attribute of new Set([property, camel])) {
+      Object.defineProperty(CSSPositionTryDescriptors.prototype, attribute, {
+        configurable: true,
+        enumerable: true,
+        get() { return this.getPropertyValue(property); },
+        set(value) { this.setProperty(property, value); },
+      });
+    }
+  }
+
+  class CSSPositionTryRule extends CSSDescriptorRule {
+    constructor(text, sheet = null, index = -1) {
+      const source = cssRuleWithoutLeadingComments(text);
+      const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
+      const rawName = source.slice(0, open).replace(/^@position-try/i, "")
+        .replace(/\/\*[\s\S]*?\*\//g, " ").trim();
+      const name = cssIdentifierValue(rawName);
+      if (open < 0 || close <= open || name === null || !name.startsWith("--")) {
+        throw new DOMException("Invalid @position-try rule.", "SyntaxError");
+      }
+      super("@position-try " + cssIdentifierText(name) + " { " +
+        source.slice(open + 1, close) + " }", sheet, index, positionTryDescriptorProperties);
+      this.__name = name;
+      Object.setPrototypeOf(this.__style, CSSPositionTryDescriptors.prototype);
+      this.__prelude = "@position-try " + cssIdentifierText(name);
+    }
+    get type() { return 0; }
+    get name() { return cssIdentifierText(this.__name); }
+    get style() { return this.__style; }
   }
 
   function splitFontPaletteItems(value) {
@@ -11475,6 +11555,8 @@ let omoikaneUserActivationState;
       ? new CSSFontFeatureValuesRule(text, sheet, index)
       : /^@property(?=\s|\/\*|\{)/i.test(ruleSource)
       ? new CSSPropertyRule(text, sheet, index)
+      : /^@position-try(?=\s|\/\*|\{)/i.test(ruleSource)
+      ? new CSSPositionTryRule(text, sheet, index)
       : /^@import(?=\s|\/\*)/i.test(ruleSource)
       ? new CSSImportRule(text, sheet, index)
       : /^@layer(?=\s|\/\*|\{|;)/i.test(ruleSource)
@@ -11836,6 +11918,10 @@ let omoikaneUserActivationState;
       }
       let count;
       const fontFeatureRule = /^\s*@font-feature-values(?=\s|\/\*|;|\{)/i.test(text);
+      const positionTryRule = /^\s*@position-try(?=\s|\/\*|\{)/i.test(text);
+      if (positionTryRule && (blockStart < 0 || !fontAtRulePreludeValid(source))) {
+        throw new DOMException("Invalid @position-try rule.", "SyntaxError");
+      }
       if (fontFeatureRule) {
         if (blockStart < 0 || !fontAtRulePreludeValid(source))
           throw new DOMException("Invalid @font-feature-values rule.", "SyntaxError");
@@ -21917,6 +22003,8 @@ let omoikaneUserActivationState;
   globalThis.CSSRule = CSSRule;
   globalThis.CSSFontFeatureValuesMap = CSSFontFeatureValuesMap;
   globalThis.CSSPropertyRule = CSSPropertyRule;
+  globalThis.CSSPositionTryDescriptors = CSSPositionTryDescriptors;
+  globalThis.CSSPositionTryRule = CSSPositionTryRule;
   globalThis.CSSImportRule = CSSImportRule;
   globalThis.CSSLayerBlockRule = CSSLayerBlockRule;
   globalThis.CSSLayerStatementRule = CSSLayerStatementRule;
@@ -22592,7 +22680,13 @@ let omoikaneUserActivationState;
     return true;
   }
 
+  // Events the host creates from user input are trusted.
+  function trustedInputEvent(event) {
+    event.isTrusted = true;
+    return event;
+  }
   globalThis.__omoikane_dispatch_mouse_input = function(id, type, init, focusTarget) {
+    if (type === "mousedown" || type === "click") stopLargestContentfulPaint();
     const locked = nativePointerLockTarget() !== null;
     if (locked && ["mouseover", "mouseout", "mouseenter", "mouseleave"].includes(type)) return true;
     const hitTarget = wrapNode(id) || document;
@@ -22614,9 +22708,9 @@ let omoikaneUserActivationState;
     }
     const activationEvent = type === "mousedown" || type === "pointerdown" || type === "click";
     if (activationEvent) grantFullscreenTransientActivation();
-    const notCanceled = target.dispatchEvent(new MouseEvent(type, {
+    const notCanceled = target.dispatchEvent(trustedInputEvent(new MouseEvent(type, {
       ...init, bubbles: true, cancelable: true, composed: true,
-    }));
+    })));
     if (notCanceled && type === "click" && !locked) {
       const activePicker = wrapNode(browsingInput.activeSelectPickerId);
       if (activePicker && target !== activePicker && !activePicker.contains(target)) {
@@ -22782,12 +22876,13 @@ let omoikaneUserActivationState;
     if (internalNodeId(inputDocument) !== __omoikane_document_id) return false;
     // The default was already accepted and committed by the trusted host.
     // Cancellation remains observable, but cannot run a second default.
-    target.dispatchEvent(new WheelEvent("wheel", {
+    target.dispatchEvent(trustedInputEvent(new WheelEvent("wheel", {
       ...init, bubbles: true, cancelable: true, composed: true, deltaMode: 0,
-    }));
+    })));
     return true;
   }
   globalThis.__omoikane_dispatch_wheel_input = function(id, init) {
+    stopLargestContentfulPaint();
     const locked = wrapNode(nativePointerLockTarget());
     const target = locked || wrapNode(id) || document;
     const inputDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
@@ -22795,9 +22890,9 @@ let omoikaneUserActivationState;
     if (forwarded !== undefined) {
       return typeof forwarded === "number" ? forwarded : (forwarded ? 1 : 0);
     }
-    const notCanceled = target.dispatchEvent(new WheelEvent("wheel", {
+    const notCanceled = target.dispatchEvent(trustedInputEvent(new WheelEvent("wheel", {
       ...init, bubbles: true, cancelable: true, composed: true, deltaMode: 0,
-    }));
+    })));
     if (!notCanceled) return 0;
     if (locked) return 1;
     return 1 | performScrollBoundaryDefault(target, init.deltaX, init.deltaY);
@@ -22817,6 +22912,7 @@ let omoikaneUserActivationState;
     return horizontal ? allowX : allowY;
   }
   globalThis.__omoikane_dispatch_touch_input = function(id, type, init) {
+    if (type === "touchstart") stopLargestContentfulPaint();
     const target = wrapNode(id) || document;
     const inputDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
     const forwarded = nativeForwardInput(internalNodeId(inputDocument), "touch", [
@@ -22851,13 +22947,14 @@ let omoikaneUserActivationState;
       metaKey: !!init.metaKey,
       shiftKey: !!init.shiftKey,
     });
-    const notCanceled = target.dispatchEvent(event);
+    const notCanceled = target.dispatchEvent(trustedInputEvent(event));
     if (!notCanceled) return 0;
     if (type !== "touchmove" || init.defaultAllowed === false ||
         !touchActionAllowsDefault(target, init.deltaX, init.deltaY)) return 1;
     return 1 | performScrollBoundaryDefault(target, init.deltaX, init.deltaY);
   };
   globalThis.__omoikane_dispatch_keyboard_input = function(type, init) {
+    if (type === "keydown") stopLargestContentfulPaint();
     const focusedId = focusedDocumentId() ?? __omoikane_document_id;
     const forwarded = nativeForwardInput(focusedId, "keyboard", [type, init]);
     if (forwarded !== undefined) return forwarded;
@@ -22879,9 +22976,9 @@ let omoikaneUserActivationState;
       nativeExitPointerLock(null, false);
       if (locked) fullyExitFullscreenForUser(focusedDocument);
     }
-    const notCanceled = target.dispatchEvent(new KeyboardEvent(type, {
+    const notCanceled = target.dispatchEvent(trustedInputEvent(new KeyboardEvent(type, {
       ...init, bubbles: true, cancelable: true, composed: true,
-    }));
+    })));
     if (notCanceled && type === "keydown") {
       if (performSelectKeyDefault(target, init || {}) || performTemporalInputKeyDefault(target, init || {})) {
         // The component editor consumed this key before focus traversal.
@@ -25625,6 +25722,9 @@ let omoikaneUserActivationState;
   }
 
   const performanceEntries = [];
+  // Entry types that observers can buffer but the performance timeline does
+  // not expose through getEntries(), such as largest-contentful-paint.
+  const observerOnlyPerformanceEntries = [];
   let performanceEntrySequence = 0;
   const performanceObservers = [];
   let pendingPerformanceObservers = [];
@@ -25713,9 +25813,16 @@ let omoikaneUserActivationState;
       const type = String(options.type);
       if (!PerformanceObserver.supportedEntryTypes.includes(type)) return;
       this._mode = "single";
+      if (type === "event") {
+        // Event Timing: entries at least this long are observed (min 16ms).
+        const threshold = options.durationThreshold === undefined
+          ? 104 : Number(options.durationThreshold);
+        this._eventDurationThreshold = Math.max(16, Number.isFinite(threshold) ? threshold : 104);
+      }
       this._entryTypes.add(type);
       if (Boolean(options.buffered)) {
-        this._queue.push(...performanceEntries.filter(entry => entry.entryType === type));
+        this._queue.push(...performanceEntries.concat(observerOnlyPerformanceEntries)
+          .filter(entry => entry.entryType === type));
         if (this._queue.length) schedulePerformanceObserver(this);
       }
     }
@@ -25733,7 +25840,10 @@ let omoikaneUserActivationState;
     }
   }
   Object.defineProperty(PerformanceObserver, "supportedEntryTypes", {
-    get() { return Object.freeze(["navigation", "resource", "mark", "measure", "visibility-state"]); },
+    get() {
+      return Object.freeze(["navigation", "resource", "mark", "measure", "visibility-state",
+        "paint", "largest-contentful-paint", "longtask", "event", "first-input"]);
+    },
     enumerable: true,
   });
 
@@ -25782,6 +25892,303 @@ let omoikaneUserActivationState;
     }
     return entry;
   }
+
+  // Paint Timing: first-paint and first-contentful-paint.
+  // PaintTimingMixin: paintTime is the rendering update time. Presentation
+  // times are not available, so presentationTime is null.
+  const paintTimingTimes = new WeakMap();
+  function definePaintTimingMixin(prototype) {
+    for (const name of ["paintTime", "presentationTime"]) {
+      const get = function () {
+        const times = paintTimingTimes.get(this);
+        if (!times) throw new TypeError("Illegal invocation");
+        return times[name];
+      };
+      Object.defineProperty(get, "name", { value: "get " + name });
+      Object.defineProperty(prototype, name, { configurable: true, enumerable: true, get });
+    }
+  }
+  class PerformancePaintTiming extends PerformanceEntry {
+    constructor() {
+      const [token, name, startTime] = arguments;
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      super(performanceEntryToken, name, "paint", startTime, 0);
+      paintTimingTimes.set(this, { paintTime: startTime, presentationTime: null });
+    }
+    toJSON() {
+      return { ...super.toJSON(), paintTime: this.paintTime, presentationTime: this.presentationTime };
+    }
+  }
+  definePaintTimingMixin(PerformancePaintTiming.prototype);
+
+  // Largest Contentful Paint candidates.
+  const lcpState = new WeakMap();
+  class LargestContentfulPaint extends PerformanceEntry {
+    constructor() {
+      const [token, state] = arguments;
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      super(performanceEntryToken, "", "largest-contentful-paint",
+        state.renderTime || state.loadTime, 0);
+      lcpState.set(this, state);
+      paintTimingTimes.set(this, { paintTime: state.renderTime, presentationTime: null });
+    }
+    toJSON() {
+      return {
+        ...super.toJSON(), renderTime: this.renderTime, loadTime: this.loadTime,
+        size: this.size, id: this.id, url: this.url,
+        paintTime: this.paintTime, presentationTime: this.presentationTime,
+      };
+    }
+  }
+  definePaintTimingMixin(LargestContentfulPaint.prototype);
+  function lcpField(entry, name) {
+    const state = lcpState.get(entry);
+    if (!state) throw new TypeError("Illegal invocation");
+    return state[name];
+  }
+  for (const name of ["renderTime", "loadTime", "size", "id", "url"]) {
+    const get = function () { return lcpField(this, name); };
+    Object.defineProperty(get, "name", { value: "get " + name });
+    Object.defineProperty(LargestContentfulPaint.prototype, name, {
+      configurable: true, enumerable: true, get,
+    });
+  }
+  Object.defineProperty(LargestContentfulPaint.prototype, "element", {
+    configurable: true, enumerable: true,
+    get: Object.defineProperty(function () {
+      const element = lcpField(this, "element");
+      return element && element.isConnected ? element : null;
+    }, "name", { value: "get element" }),
+  });
+
+  function addObserverOnlyPerformanceEntry(entry) {
+    Object.defineProperty(entry, "__sequence", { value: performanceEntrySequence++ });
+    const isEvent = entry.entryType === "event";
+    // Only event entries of at least 104ms are buffered.
+    if (!isEvent || entry.duration >= 104) observerOnlyPerformanceEntries.push(entry);
+    for (const observer of performanceObservers) {
+      if (!observer._entryTypes.has(entry.entryType)) continue;
+      if (isEvent && entry.duration < (observer._eventDurationThreshold ?? 104)) continue;
+      observer._queue.push(entry);
+      schedulePerformanceObserver(observer);
+    }
+  }
+
+  const paintTimingState = {
+    firstPaint: false, firstContentfulPaint: false, lcpActive: true, largestSize: 0,
+  };
+  const nativePaintTimingFinished = globalThis.__omoikane_paint_timing_finished;
+  delete globalThis.__omoikane_paint_timing_finished;
+  // Input ends the search for the largest contentful paint.
+  function stopLargestContentfulPaint() {
+    paintTimingState.lcpActive = false;
+    finishPaintTimingIfDone();
+  }
+  function finishPaintTimingIfDone() {
+    if (paintTimingState.firstPaint && paintTimingState.firstContentfulPaint &&
+        !paintTimingState.lcpActive && typeof nativePaintTimingFinished === "function") {
+      nativePaintTimingFinished();
+    }
+  }
+  // The absolute URL of an image candidate: an image element's source, or
+  // the first url() of a background image. Text candidates have none.
+  function largestContentfulPaintUrl(element) {
+    const resolve = value => {
+      try { return new URL(value, document.baseURI).href; } catch (_) { return ""; }
+    };
+    if (element.localName === "img") {
+      const source = element.currentSrc || element.getAttribute("src") || "";
+      return source ? resolve(source) : "";
+    }
+    if (element.localName === "video") {
+      const poster = element.getAttribute("poster");
+      if (poster) return resolve(poster);
+    }
+    const background = getComputedStyle(element).backgroundImage || "";
+    const match = /url\((["']?)(.*?)\1\)/.exec(background);
+    return match ? resolve(match[2]) : "";
+  }
+
+  // Called by the host at the end of a rendering opportunity whose layout
+  // changed (paint_timing.rs).
+  globalThis.__omoikane_paint_timing_frame = function(painted, contentful, nodeId, size) {
+    const now = nativePerformanceNow();
+    if ((painted || contentful) && !paintTimingState.firstPaint) {
+      paintTimingState.firstPaint = true;
+      addPerformanceEntry(new PerformancePaintTiming(performanceEntryToken, "first-paint", now));
+    }
+    if (contentful && !paintTimingState.firstContentfulPaint) {
+      paintTimingState.firstContentfulPaint = true;
+      addPerformanceEntry(new PerformancePaintTiming(
+        performanceEntryToken, "first-contentful-paint", now));
+    }
+    if (paintTimingState.lcpActive && nodeId >= 0 && size > paintTimingState.largestSize) {
+      const element = wrapNode(nodeId);
+      if (element) {
+        paintTimingState.largestSize = size;
+        const url = largestContentfulPaintUrl(element);
+        addObserverOnlyPerformanceEntry(new LargestContentfulPaint(performanceEntryToken, {
+          renderTime: now, loadTime: url ? now : 0, size: Math.round(size),
+          id: element.id || "", url, element,
+        }));
+      }
+    }
+    finishPaintTimingIfDone();
+  };
+
+  // Long Tasks: one window attribution with unknown culprit.
+  class TaskAttributionTiming extends PerformanceEntry {
+    constructor() {
+      const [token] = arguments;
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      super(performanceEntryToken, "unknown", "taskattribution", 0, 0);
+    }
+    get containerType() { return "window"; }
+    get containerSrc() { return ""; }
+    get containerId() { return ""; }
+    get containerName() { return ""; }
+    toJSON() {
+      return { ...super.toJSON(), containerType: this.containerType,
+        containerSrc: this.containerSrc, containerId: this.containerId,
+        containerName: this.containerName };
+    }
+  }
+  const longTaskAttribution = new WeakMap();
+  class PerformanceLongTaskTiming extends PerformanceEntry {
+    constructor() {
+      const [token, startTime, duration] = arguments;
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      super(performanceEntryToken, "self", "longtask", startTime, duration);
+      longTaskAttribution.set(this,
+        Object.freeze([new TaskAttributionTiming(performanceEntryToken)]));
+    }
+    get attribution() {
+      const attribution = longTaskAttribution.get(this);
+      if (!attribution) throw new TypeError("Illegal invocation");
+      return attribution;
+    }
+    toJSON() { return { ...super.toJSON(), attribution: this.attribution }; }
+  }
+  for (const [prototype, names] of [
+    [TaskAttributionTiming.prototype, ["containerType", "containerSrc", "containerId", "containerName"]],
+    [PerformanceLongTaskTiming.prototype, ["attribution"]],
+  ]) {
+    for (const name of names) {
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+      Object.defineProperty(prototype, name, { ...descriptor, enumerable: true });
+    }
+  }
+  // ---- Event Timing ----
+  const eventTimingTypes = new Set([
+    "auxclick", "beforeinput", "click", "compositionend", "compositionstart",
+    "compositionupdate", "contextmenu", "dblclick", "dragend", "dragenter", "dragleave",
+    "dragover", "dragstart", "drop", "gotpointercapture", "input", "keydown", "keypress",
+    "keyup", "lostpointercapture", "mousedown", "mouseenter", "mouseleave", "mouseout",
+    "mouseover", "mouseup", "pointercancel", "pointerdown", "pointerenter", "pointerleave",
+    "pointerout", "pointerover", "pointerup", "touchcancel", "touchend", "touchstart",
+  ]);
+  const firstInputTypes = new Set(["keydown", "mousedown", "pointerdown", "click"]);
+  const eventTimingState = new WeakMap();
+  class PerformanceEventTiming extends PerformanceEntry {
+    constructor() {
+      const [token, state] = arguments;
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      super(performanceEntryToken, state.type, state.entryType, state.startTime, state.duration);
+      eventTimingState.set(this, state);
+    }
+    toJSON() {
+      return { ...super.toJSON(), processingStart: this.processingStart,
+        processingEnd: this.processingEnd, cancelable: this.cancelable,
+        interactionId: this.interactionId };
+    }
+  }
+  for (const name of ["processingStart", "processingEnd", "cancelable", "target", "interactionId"]) {
+    const get = function () {
+      const state = eventTimingState.get(this);
+      if (!state) throw new TypeError("Illegal invocation");
+      if (name === "target") return state.target && state.target.isConnected ? state.target : null;
+      return state[name];
+    };
+    Object.defineProperty(get, "name", { value: "get " + name });
+    Object.defineProperty(PerformanceEventTiming.prototype, name, {
+      configurable: true, enumerable: true, get,
+    });
+  }
+
+  // performance.eventCounts: a read-only maplike of dispatched event counts.
+  const eventCountsMap = new Map();
+  for (const type of eventTimingTypes) eventCountsMap.set(type, 0);
+  class EventCounts {
+    constructor() {
+      const [token] = arguments;
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+    }
+    get size() { return eventCountsMap.size; }
+    get(key) { return eventCountsMap.get(String(key)); }
+    has(key) { return eventCountsMap.has(String(key)); }
+    keys() { return eventCountsMap.keys(); }
+    values() { return eventCountsMap.values(); }
+    entries() { return eventCountsMap.entries(); }
+    forEach(callback, thisArg = undefined) {
+      eventCountsMap.forEach((value, key) => callback.call(thisArg, value, key, this));
+    }
+    [Symbol.iterator]() { return eventCountsMap.entries(); }
+  }
+  const eventCounts = new EventCounts(performanceEntryToken);
+
+  // Interactions group a key press or a pointer press with its follow-up
+  // events. Ids start at an arbitrary value and grow by 7, as in Chromium.
+  let interactionCount = 0;
+  let currentInteractionId = 0;
+  let nextInteractionId = 7 * 1000;
+  let firstInputReported = false;
+  function interactionIdFor(type) {
+    if (type === "keydown" || type === "pointerdown") {
+      interactionCount += 1;
+      currentInteractionId = nextInteractionId;
+      nextInteractionId += 7;
+      return currentInteractionId;
+    }
+    if (["keyup", "keypress", "pointerup", "click"].includes(type)) return currentInteractionId;
+    return 0;
+  }
+  // Durations are rounded to 8ms (Event Timing §3).
+  const roundEventDuration = duration => Math.max(0, Math.round(duration / 8) * 8);
+  const eventTimingRecorded = new WeakSet();
+  eventTimingRecorder = {
+    begin(event) {
+      // A redispatched event is measured once.
+      if (!eventTimingTypes.has(event.type) || eventTimingRecorded.has(event)) return null;
+      eventTimingRecorded.add(event);
+      eventCountsMap.set(event.type, eventCountsMap.get(event.type) + 1);
+      const processingStart = nativePerformanceNow();
+      const startTime = Math.min(Number(event.timeStamp) || processingStart, processingStart);
+      return { event, startTime, processingStart };
+    },
+    end(timing, target) {
+      const processingEnd = nativePerformanceNow();
+      const { event } = timing;
+      const state = {
+        type: event.type, entryType: "event", startTime: timing.startTime,
+        duration: roundEventDuration(processingEnd - timing.startTime),
+        processingStart: timing.processingStart, processingEnd,
+        cancelable: Boolean(event.cancelable), target: event.target || target,
+        interactionId: interactionIdFor(event.type),
+      };
+      addObserverOnlyPerformanceEntry(new PerformanceEventTiming(performanceEntryToken, state));
+      if (!firstInputReported && firstInputTypes.has(event.type)) {
+        firstInputReported = true;
+        addPerformanceEntry(new PerformanceEventTiming(performanceEntryToken,
+          { ...state, entryType: "first-input" }));
+      }
+    },
+  };
+
+  // Called by the host after a task turn longer than 50ms (long_tasks.rs).
+  globalThis.__omoikane_record_long_task = function(startTime, duration) {
+    addObserverOnlyPerformanceEntry(new PerformanceLongTaskTiming(
+      performanceEntryToken, Number(startTime), Number(duration)));
+  };
 
   function recordVisibilityStateEntry(visibilityState, startTime) {
     addPerformanceEntry(new VisibilityStateEntry(
@@ -26096,9 +26503,23 @@ let omoikaneUserActivationState;
   globalThis.PerformanceMark = PerformanceMark;
   globalThis.PerformanceMeasure = PerformanceMeasure;
   globalThis.PerformanceResourceTiming = PerformanceResourceTiming;
+  for (const [name, value] of [["PerformancePaintTiming", PerformancePaintTiming],
+    ["LargestContentfulPaint", LargestContentfulPaint],
+    ["PerformanceLongTaskTiming", PerformanceLongTaskTiming],
+    ["PerformanceEventTiming", PerformanceEventTiming],
+    ["EventCounts", EventCounts],
+    ["TaskAttributionTiming", TaskAttributionTiming]]) {
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  }
   globalThis.PerformanceNavigationTiming = PerformanceNavigationTiming;
   globalThis.PerformanceObserver = PerformanceObserver;
   globalThis.PerformanceObserverEntryList = PerformanceObserverEntryList;
+  Object.defineProperty(performance, "eventCounts", {
+    configurable: true, enumerable: true, get: () => eventCounts,
+  });
+  Object.defineProperty(performance, "interactionCount", {
+    configurable: true, enumerable: true, get: () => interactionCount,
+  });
   globalThis.performance = performance;
   recordVisibilityStateEntry(document.visibilityState, 0);
   globalThis.__omoikane_sync_initial_visibility_entry = function() {

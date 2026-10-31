@@ -101,7 +101,7 @@ fn property_support_agrees_with_css_supports_and_cascade() {
                 return element.style.getPropertyValue(name) === '10deg' &&
                     getComputedStyle(element).getPropertyValue(name) === '10deg';
             }
-            if (name === 'font-feature-settings' || name === 'font-variation-settings' || name === 'counter-set' ||
+            if (name === 'font-feature-settings' || name === 'font-variation-settings' || name === 'counter-set' || name === 'anchor-name' ||
                 name === 'hyphenate-character' || name === 'scrollbar-color') {
                 return CSS.supports(name, value) &&
                     element.style.getPropertyValue(name) === value &&
@@ -110,6 +110,81 @@ fn property_support_agrees_with_css_supports_and_cascade() {
             return !CSS.supports(name, value) && element.style.getPropertyValue(name) === '' && getComputedStyle(element).getPropertyValue(name) === '';
         });
     })()"#).unwrap().as_boolean(), Some(true));
+}
+
+#[test]
+fn anchor_position_properties_share_strict_cssom_and_supports_grammar() {
+    let mut runtime = JsRuntime::new().unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"(() => {
+        const element = document.body.appendChild(document.createElement('div'));
+        const valid = [
+            ['anchor-name', '--menu, --fallback'],
+            ['anchor-scope', 'all'],
+            ['position-anchor', '--menu'],
+            ['position-area', 'block-end span-inline-end'],
+            ['position-try-fallbacks', '--below flip-inline, top'],
+            ['position-try-order', 'most-block-size'],
+            ['position-visibility', 'no-overflow anchor-valid'],
+            ['justify-self', 'anchor-center'],
+            ['align-self', 'anchor-center'],
+            ['width', 'anchor-size(--menu width, anchor-size(--fallback block))'],
+            ['left', 'anchor-size(--menu inline, 10px)'],
+        ];
+        const invalid = [
+            ['anchor-name', 'menu'],
+            ['anchor-scope', '--'],
+            ['position-anchor', 'menu'],
+            ['position-area', 'top bottom left'],
+            ['position-try-fallbacks', 'unknown'],
+            ['position-try-order', 'largest'],
+            ['position-visibility', 'always no-overflow'],
+        ];
+        for (const [name, value] of valid) {
+            if (!CSS.supports(name, value)) return `unsupported:${name}:${value}`;
+            element.style.setProperty(name, value);
+            if (!element.style.getPropertyValue(name)) return `not-stored:${name}:${value}`;
+        }
+        for (const [name, value] of invalid) {
+            element.style.removeProperty(name);
+            element.style.setProperty(name, value);
+            if (CSS.supports(name, value)) return `accepted:${name}:${value}`;
+            if (element.style.getPropertyValue(name) !== '') return `stored:${name}:${value}`;
+        }
+        return 'ok';
+    })()"#
+            )
+            .unwrap()
+            .as_string()
+            .map(|value| value.to_std_string_escaped()),
+        Some("ok".to_string())
+    );
+}
+
+#[test]
+fn position_try_rule_exposes_name_and_live_descriptor_block() {
+    let mut runtime = JsRuntime::new().unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"(() => {
+            const sheet = new CSSStyleSheet();
+            sheet.replaceSync('@position-try --below { top: anchor(bottom); left: 10px; }');
+            const rule = sheet.cssRules[0];
+            if (!(rule instanceof CSSPositionTryRule) ||
+                !(rule.style instanceof CSSPositionTryDescriptors) ||
+                rule.name !== '--below' || rule.style.left !== '10px') return false;
+            rule.style.left = '20px';
+            return rule.cssText.includes('@position-try --below') &&
+                rule.cssText.includes('left: 20px;');
+        })()"#
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
 }
 
 #[test]
