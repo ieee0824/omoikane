@@ -79,6 +79,8 @@ collect_pattern \
   "/css/css-page/cssom/page-001.html" \
   "/css/css-page/cssom/margin-001.html" \
   "/css/css-view-transitions/navigation/at-rule-cssom.html"
+# CSS Typed OM (#1282).
+collect_pattern "/css/css-typed-om/"
 collect_pattern "/css/css-logical/"
 collect_pattern "/css/css-fonts/parsing/" "/css/css-fonts/font-variant-alternates-parsing.html" "/css/css-fonts/test_font_feature_values_parsing.html"
 collect_pattern "/reporting/" "/content-security-policy/securitypolicyviolation/constructor-required-fields.html"

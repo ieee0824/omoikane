@@ -28671,6 +28671,7 @@ let omoikaneUserActivationState;
     ["in", ["length", 96, "in"]], ["pt", ["length", 96 / 72, "pt"]],
     ["pc", ["length", 16, "pc"]], ["em", ["relative-length", 1, "em"]],
     ["ex", ["relative-length-ex", 1, "ex"]], ["ch", ["relative-length-ch", 1, "ch"]],
+    ["ic", ["relative-length-ic", 1, "ic"]],
     ["rem", ["relative-length-rem", 1, "rem"]], ["lh", ["relative-length-lh", 1, "lh"]],
     ["rlh", ["relative-length-rlh", 1, "rlh"]], ["vw", ["viewport-width", 1, "vw"]],
     ["vh", ["viewport-height", 1, "vh"]], ["vi", ["viewport-inline", 1, "vi"]],
@@ -28702,12 +28703,20 @@ let omoikaneUserActivationState;
     const source = String(value).trim();
     const match = source.match(/^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)\s*([a-z]+|%)?$/i);
     if (!match) throw new DOMException("The value is not a simple numeric value.", "SyntaxError");
-    return new CSSUnitValue(Number(match[1]), match[2] || "number");
+    try { return new CSSUnitValue(Number(match[1]), match[2] || "number"); }
+    catch (_) { throw new DOMException("The numeric unit is invalid.", "SyntaxError"); }
   }
 
+  const cssStyleValueConstruction = {};
   class CSSStyleValue {
-    constructor() {
-      if (new.target === CSSStyleValue) throw new TypeError("Illegal constructor");
+    constructor(token = null, property = null, cssText = "") {
+      if (new.target === CSSStyleValue && token !== cssStyleValueConstruction) {
+        throw new TypeError("Illegal constructor");
+      }
+      if (token === cssStyleValueConstruction) {
+        this.__associatedProperty = property;
+        this.__cssText = cssText;
+      }
     }
     static parse(property, cssText) {
       const name = String(property);
@@ -28719,6 +28728,7 @@ let omoikaneUserActivationState;
       return new CSSKeywordValue(value);
     }
     static parseAll(property, cssText) { return [this.parse(property, cssText)]; }
+    toString() { return this.__cssText || ""; }
   }
 
   class CSSNumericValue extends CSSStyleValue {
@@ -28726,7 +28736,26 @@ let omoikaneUserActivationState;
       super();
       if (new.target === CSSNumericValue) throw new TypeError("Illegal constructor");
     }
-    static parse(cssText) { return parseCssUnitValue(cssText); }
+    static parse(cssText) { return parseCssNumericValue(cssText); }
+    type() {
+      const result = {
+        length: null, angle: null, time: null, frequency: null,
+        resolution: null, flex: null, percent: null, percentHint: null,
+      };
+      if (this instanceof CSSUnitValue) {
+        const dimension = cssNumericUnits.get(this.unit)[0];
+        if (dimension.includes("length")) result.length = 1;
+        else if (dimension === "angle" || dimension === "time" || dimension === "frequency" ||
+                 dimension === "resolution" || dimension === "flex" || dimension === "percent") {
+          result[dimension] = 1;
+        }
+      } else if (this.value instanceof CSSNumericValue) {
+        return this.value.type();
+      } else if (this.values && this.values[0] instanceof CSSNumericValue) {
+        return this.values[0].type();
+      }
+      return result;
+    }
     add(...values) { return cssNumericAdd([this, ...values], 1); }
     sub(...values) { return cssNumericAdd([this, ...values], -1); }
     mul(...values) { return cssNumericMultiply([this, ...values]); }
@@ -28802,6 +28831,16 @@ let omoikaneUserActivationState;
     toString() { return "max(" + this.values.map(String).join(", ") + ")"; }
   }
 
+  class CSSMathClamp extends CSSMathValue {
+    constructor(lower, value, upper) {
+      super("clamp");
+      this.lower = cssNumericInput(lower);
+      this.value = cssNumericInput(value);
+      this.upper = cssNumericInput(upper);
+    }
+    toString() { return "clamp(" + this.lower + ", " + this.value + ", " + this.upper + ")"; }
+  }
+
   class CSSMathNegate extends CSSMathValue {
     constructor(value) { super("negate"); this.value = cssNumericInput(value); }
     toString() { return "calc(-1 * " + this.value + ")"; }
@@ -28820,6 +28859,73 @@ let omoikaneUserActivationState;
       this.value = keyword;
     }
     toString() { return this.value; }
+  }
+
+  function tokenizeCssNumericExpression(source) {
+    const tokens = [];
+    const pattern = /\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?(?:[a-z]+|%)?|[a-z]+|[()+*\/,\-])\s*/igy;
+    let offset = 0, match;
+    while (offset < source.length && (match = pattern.exec(source)) && match.index === offset) {
+      tokens.push(match[1]);
+      offset = pattern.lastIndex;
+    }
+    if (offset !== source.length) throw new DOMException("Invalid numeric expression", "SyntaxError");
+    return tokens;
+  }
+
+  function parseCssNumericValue(cssText) {
+    const source = String(cssText).trim();
+    if (!/^(?:calc|min|max|clamp)\(/i.test(source)) return parseCssUnitValue(source);
+    const tokens = tokenizeCssNumericExpression(source);
+    let position = 0;
+    const syntaxError = () => new DOMException("Invalid numeric expression", "SyntaxError");
+    const parsePrimary = () => {
+      const token = tokens[position++];
+      if (token === "(") {
+        const value = parseSum();
+        if (tokens[position++] !== ")") throw syntaxError();
+        return value;
+      }
+      if (/^(?:calc|min|max|clamp)$/i.test(token || "") && tokens[position++] === "(") {
+        const name = token.toLowerCase(), values = [parseSum()];
+        while (tokens[position] === ",") { position++; values.push(parseSum()); }
+        if (tokens[position++] !== ")") throw syntaxError();
+        if (name === "min") return new CSSMathMin(...values);
+        if (name === "max") return new CSSMathMax(...values);
+        if (name === "clamp" && values.length === 3) return new CSSMathClamp(...values);
+        if (name === "calc") {
+          return values[0] instanceof CSSMathValue ? values[0] : new CSSMathSum(values[0]);
+        }
+        throw syntaxError();
+      }
+      try { return parseCssUnitValue(token); } catch (_) { throw syntaxError(); }
+    };
+    const parseProduct = () => {
+      const values = [parsePrimary()];
+      while (tokens[position] === "*") { position++; values.push(parsePrimary()); }
+      if (tokens[position] === "/") throw syntaxError();
+      if (values.length === 1) return values[0];
+      const dimensional = values.filter(value =>
+        value instanceof CSSUnitValue && value.unit !== "number");
+      if (dimensional.length > 1) throw syntaxError();
+      return new CSSMathProduct(...values);
+    };
+    const parseSum = () => {
+      const values = [parseProduct()];
+      while (tokens[position] === "+" || tokens[position] === "-") {
+        const operator = tokens[position++], value = parseProduct();
+        values.push(operator === "-" ? new CSSMathNegate(value) : value);
+      }
+      if (values.length === 1) return values[0];
+      const simple = values.every(value => value instanceof CSSUnitValue);
+      if (simple) {
+        try { return cssNumericAdd(values, 1); } catch (_) {}
+      }
+      return new CSSMathSum(...values);
+    };
+    const result = parsePrimary();
+    if (position !== tokens.length) throw syntaxError();
+    return result;
   }
 
   class CSSVariableReferenceValue {
@@ -28854,7 +28960,22 @@ let omoikaneUserActivationState;
 
   function typedStylePropertyName(property) {
     const name = String(property);
-    return name.startsWith("--") ? name : __styleNameToCss(name).toLowerCase();
+    return name.startsWith("--") ? name : name.toLowerCase();
+  }
+
+  function splitTypedStyleValues(value) {
+    const values = [];
+    let depth = 0, start = 0;
+    for (let index = 0; index < value.length; index++) {
+      if (value[index] === "(") depth++;
+      else if (value[index] === ")") depth = Math.max(0, depth - 1);
+      else if (value[index] === "," && depth === 0) {
+        values.push(value.slice(start, index).trim());
+        start = index + 1;
+      }
+    }
+    values.push(value.slice(start).trim());
+    return values;
   }
 
   function reifyTypedStyleValue(property, cssText) {
@@ -28864,10 +28985,14 @@ let omoikaneUserActivationState;
     if (name.startsWith("--") && !registeredTypedProperties.has(name)) {
       return new CSSUnparsedValue([value]);
     }
+    const firstValue = splitTypedStyleValues(value)[0];
     const registration = registeredTypedProperties.get(name);
     if (registration && registration.syntax === "*") return new CSSUnparsedValue([value]);
-    try { return parseCssUnitValue(value); } catch (_) {}
-    return new CSSKeywordValue(value);
+    if (["margin", "padding", "border", "background", "font"].includes(name)) {
+      return new CSSStyleValue(cssStyleValueConstruction, name, value);
+    }
+    try { return parseCssUnitValue(firstValue); } catch (_) {}
+    return new CSSKeywordValue(firstValue);
   }
 
   const stylePropertyMapConstruction = {};
@@ -28878,11 +29003,14 @@ let omoikaneUserActivationState;
     }
     get(property) {
       return reifyTypedStyleValue(property,
-        this.__declaration.getPropertyValue(typedStylePropertyName(property)));
+        this.__declaration.getPropertyValue(typedStylePropertyName(property))) ?? undefined;
     }
     getAll(property) {
-      const value = this.get(property);
-      return value === null ? [] : [value];
+      const name = typedStylePropertyName(property);
+      const source = this.__declaration.getPropertyValue(name);
+      if (!source) return [];
+      if (name.startsWith("--")) return [reifyTypedStyleValue(name, source)];
+      return splitTypedStyleValues(source).map(value => reifyTypedStyleValue(name, value));
     }
     has(property) {
       return this.__declaration.getPropertyValue(typedStylePropertyName(property)) !== "";
@@ -28909,8 +29037,21 @@ let omoikaneUserActivationState;
   class StylePropertyMap extends StylePropertyMapReadOnly {
     set(property, ...values) {
       const name = typedStylePropertyName(property);
-      if (values.length !== 1) throw new TypeError("StylePropertyMap.set requires one value");
-      const value = serializeTypedStyleValue(values[0]);
+      const listValued = name === "transition-duration" || name === "transition-delay" ||
+        name === "animation-duration" || name === "animation-delay" ||
+        name === "animation-name" || name === "background-image";
+      if (values.length === 0 || (!listValued && values.length !== 1)) {
+        throw new TypeError("StylePropertyMap.set received the wrong number of values");
+      }
+      if (values.length > 1 && values.some(value =>
+        value instanceof CSSUnparsedValue || String(value).includes("var("))) {
+        throw new TypeError("Variable references cannot be mixed with list values");
+      }
+      if (values.some(value => value && value.constructor === CSSStyleValue &&
+          value.__associatedProperty !== name)) {
+        throw new TypeError("The CSSStyleValue is associated with a different property");
+      }
+      const value = values.map(serializeTypedStyleValue).join(", ");
       if (!name.startsWith("--") && !CSS.supports(name, value)) {
         throw new TypeError("The value is not valid for the property");
       }
@@ -29286,7 +29427,7 @@ let omoikaneUserActivationState;
   Object.assign(globalThis, {
     CSSStyleValue, CSSNumericValue, CSSUnitValue, CSSKeywordValue, CSSUnparsedValue,
     CSSVariableReferenceValue, StylePropertyMapReadOnly, StylePropertyMap,
-    CSSMathValue, CSSMathSum, CSSMathProduct, CSSMathMin, CSSMathMax,
+    CSSMathValue, CSSMathSum, CSSMathProduct, CSSMathMin, CSSMathMax, CSSMathClamp,
     CSSMathNegate, CSSMathInvert,
   });
   for (const unit of cssNumericUnits.keys()) {
