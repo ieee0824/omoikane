@@ -214,6 +214,22 @@ fn parse_modern_legacy_color(
     body: &str,
     context: Option<ColorContext>,
 ) -> Option<CssColor> {
+    let mut color = parse_modern_legacy_specified_space(name, body, context)?;
+    if color.channels.iter().all(Option::is_some)
+        && color.alpha.is_some()
+        && color.space == Space::Hsl
+    {
+        color.channels = hsl_to_rgb(color.channels.map(Option::unwrap)).map(Some);
+        color.space = Space::Srgb;
+    }
+    Some(color)
+}
+
+fn parse_modern_legacy_specified_space(
+    name: &str,
+    body: &str,
+    context: Option<ColorContext>,
+) -> Option<CssColor> {
     let tokens = math::tokens(body)?;
     let components = tokens.get(..3)?;
     let is_hsl = matches!(name, "hsl" | "hsla");
@@ -235,16 +251,6 @@ fn parse_modern_legacy_color(
         _ => return None,
     };
     let space = if is_hsl { Space::Hsl } else { Space::Srgb };
-    if channels.iter().all(Option::is_some) && alpha.is_some() && space == Space::Hsl {
-        channels = hsl_to_rgb(channels.map(Option::unwrap)).map(Some);
-        return Some(CssColor {
-            space: Space::Srgb,
-            channels,
-            alpha,
-            expressions: std::array::from_fn(|_| None),
-            specified: None,
-        });
-    }
     Some(CssColor {
         space,
         channels,
@@ -709,7 +715,9 @@ struct MixComponent {
     color: CssColor,
     percentage: Option<f64>,
     percentage_was_specified: bool,
+    specified_percentage: Option<String>,
     specified_color: String,
+    authored_polar: Option<(Space, [Option<f64>; 3])>,
 }
 
 fn parse_color_mix(text: &str, context: Option<ColorContext>) -> Option<CssColor> {
@@ -788,24 +796,56 @@ fn parse_mix_component(text: &str, context: Option<ColorContext>) -> Option<MixC
     if percentage_at_start.is_some() && percentage_at_end.is_some() {
         return None;
     }
-    let (color_words, percentage) = if let Some(value) = percentage_at_start {
-        (&words[1..], Some(value))
+    let (color_words, percentage, specified_percentage) = if let Some(value) = percentage_at_start {
+        (&words[1..], Some(value), Some(words[0].to_string()))
     } else if let Some(value) = percentage_at_end {
-        (&words[..words.len() - 1], Some(value))
+        (
+            &words[..words.len() - 1],
+            Some(value),
+            words.last().map(|word| (*word).to_string()),
+        )
     } else {
-        (&words[..], None)
+        (&words[..], None, None)
     };
     if color_words.len() != 1 {
         return None;
     }
     let color = parse_absolute_mix_color(color_words[0], context)?;
     let specified_color = specified_mix_color(color_words[0], &color);
+    let authored_polar = authored_polar(color_words[0], context, &color);
     Some(MixComponent {
         color,
         percentage,
         percentage_was_specified: percentage.is_some(),
+        specified_percentage,
         specified_color,
+        authored_polar,
     })
+}
+
+fn authored_polar(
+    text: &str,
+    context: Option<ColorContext>,
+    color: &CssColor,
+) -> Option<(Space, [Option<f64>; 3])> {
+    let (name, body) = text.split_once('(')?;
+    let body = body.strip_suffix(')')?;
+    if body.trim_start().starts_with("from ") {
+        return None;
+    }
+    let space = match name {
+        "hsl" | "hsla" => Space::Hsl,
+        "hwb" => Space::Hwb,
+        "lch" => Space::Lch,
+        "oklch" => Space::Oklch,
+        _ => return None,
+    };
+    let channels = if space == Space::Hsl {
+        parse_modern_legacy_specified_space(name, body, context)?.channels
+    } else {
+        color.channels
+    };
+    Some((space, channels))
 }
 
 fn specified_mix_color(input: &str, color: &CssColor) -> String {
@@ -815,6 +855,9 @@ fn specified_mix_color(input: &str, color: &CssColor) -> String {
             .split_once('(')
             .is_some_and(|(_, body)| body.trim_start().starts_with("from "))
     {
+        if color.channels.iter().any(Option::is_none) || color.alpha.is_none() {
+            return color.serialize_mode(false);
+        }
         let rgba = color.to_color();
         return if rgba.a == 255 {
             format!("rgb({}, {}, {})", rgba.r, rgba.g, rgba.b)
@@ -824,7 +867,7 @@ fn specified_mix_color(input: &str, color: &CssColor) -> String {
                 rgba.r,
                 rgba.g,
                 rgba.b,
-                css_number(f64::from(rgba.a) / 255.0)
+                css_number(color.alpha.unwrap_or(0.0))
             )
         };
     }
@@ -859,17 +902,28 @@ fn serialize_specified_mix(method_or_color: &str, components: &[MixComponent]) -
     let any_percentage = components
         .iter()
         .any(|component| component.percentage_was_specified);
+    let has_calc_percentage = components.iter().any(|component| {
+        component
+            .specified_percentage
+            .as_deref()
+            .is_some_and(|value| value.starts_with("calc("))
+    });
     let colors = components
         .iter()
         .map(|component| {
-            if omit_percentages || !any_percentage {
-                component.specified_color.clone()
+            let percentage = if components.len() == 1 && component.percentage == Some(100.0) {
+                None
+            } else if has_calc_percentage {
+                component.specified_percentage.clone()
+            } else if omit_percentages || !any_percentage {
+                None
             } else {
-                format!(
-                    "{} {}%",
-                    component.specified_color,
-                    css_number(component.percentage.unwrap())
-                )
+                Some(format!("{}%", css_number(component.percentage.unwrap())))
+            };
+            if let Some(percentage) = percentage {
+                format!("{} {percentage}", component.specified_color)
+            } else {
+                component.specified_color.clone()
             }
         })
         .collect::<Vec<_>>();
@@ -963,7 +1017,22 @@ fn mix_css_colors(
     let mut converted = components
         .iter()
         .map(|item| {
-            let channels = if is_hsl && item.color.space == Space::Hsl {
+            let source_missing = item.color.channels.map(|value| value.is_none());
+            let interpolation_space = if is_hsl { Space::Hsl } else { space };
+            let authored_channels = item
+                .authored_polar
+                .filter(|(authored_space, _)| *authored_space == interpolation_space)
+                .map(|(_, channels)| channels);
+            let preserves_authored_hue = if let Some(channels) = authored_channels {
+                channels[hue_index.unwrap_or(0)].is_some()
+            } else if is_hsl {
+                item.color.space == Space::Hsl
+            } else {
+                item.color.space == space
+            };
+            let mut channels = if let Some(channels) = authored_channels {
+                channels
+            } else if is_hsl && item.color.space == Space::Hsl {
                 item.color.channels
             } else if is_hsl {
                 let rgb = convert::between(
@@ -982,6 +1051,19 @@ fn mix_css_colors(
                 )
                 .map(Some)
             };
+            if let Some(index) = hue_index
+                && !preserves_authored_hue
+                && powerless_hue(space, is_hsl, &channels.map(|value| value.unwrap_or(0.0)))
+            {
+                channels[index] = None;
+            }
+            propagate_converted_missing(
+                item.color.space,
+                space,
+                is_hsl,
+                source_missing,
+                &mut channels,
+            );
             (channels, item.color.alpha, item.percentage.unwrap())
         })
         .collect::<Vec<_>>();
@@ -1009,9 +1091,7 @@ fn mix_css_colors(
     let reference_hue = hue_index.and_then(|index| {
         converted
             .iter()
-            .map(|(channels, _, _)| channels.map(|value| value.unwrap_or(0.0)))
-            .find(|channels| !powerless_hue(space, is_hsl, channels))
-            .map(|channels| channels[index])
+            .find_map(|(channels, _, _)| channels[index])
     });
     let mut premultiplied = [0.0; 3];
     let mut alpha = 0.0;
@@ -1021,14 +1101,12 @@ fn mix_css_colors(
         let mut channels = channels.map(|value| value.unwrap_or(0.0));
         let source_alpha = source_alpha.unwrap_or(1.0);
         let normalized = if sum == 0.0 {
-            1.0 / components.len() as f64
+            zero_sum_mix_weight(component_index, components.len())
         } else {
             percentage / sum
         };
         if let (Some(index), Some(reference)) = (hue_index, reference_hue) {
-            channels[index] = if powerless_hue(space, is_hsl, &channels) {
-                reference
-            } else if component_index == 0 {
+            channels[index] = if component_index == 0 {
                 reference
             } else {
                 adjusted_hue(reference, channels[index], hue_method)?
@@ -1057,14 +1135,14 @@ fn mix_css_colors(
     }
     let channels =
         std::array::from_fn(|index| (!missing_channels[index]).then_some(channels[index]));
-    let (space, channels) = if is_hsl && channels.iter().all(Option::is_some) {
+    let (space, channels) = if is_hsl && channels.iter().all(Option::is_some) && !missing_alpha {
         (
             Space::Srgb,
             hsl_to_rgb(channels.map(Option::unwrap)).map(Some),
         )
     } else if is_hsl {
         (Space::Hsl, channels)
-    } else if space == Space::Hwb && channels.iter().all(Option::is_some) {
+    } else if space == Space::Hwb && channels.iter().all(Option::is_some) && !missing_alpha {
         (
             Space::Srgb,
             convert::between(Space::Hwb, channels.map(Option::unwrap), Space::Srgb).map(Some),
@@ -1079,6 +1157,60 @@ fn mix_css_colors(
         expressions: std::array::from_fn(|_| None),
         specified: None,
     })
+}
+
+fn zero_sum_mix_weight(index: usize, count: usize) -> f64 {
+    if count <= 1 {
+        return 1.0;
+    }
+    let halvings = if index < 2 { count - 1 } else { count - index };
+    0.5_f64.powi(halvings as i32)
+}
+
+fn propagate_converted_missing(
+    source: Space,
+    target: Space,
+    target_is_hsl: bool,
+    missing: [bool; 3],
+    channels: &mut [Option<f64>; 3],
+) {
+    if missing.into_iter().all(|missing| missing) {
+        *channels = [None; 3];
+        return;
+    }
+    let source_is_polar = matches!(source, Space::Hsl | Space::Hwb | Space::Lch | Space::Oklch);
+    let target_is_polar = target_is_hsl || matches!(target, Space::Hwb | Space::Lch | Space::Oklch);
+    if source_is_polar && target_is_polar {
+        let source_hue = if matches!(source, Space::Lch | Space::Oklch) {
+            2
+        } else {
+            0
+        };
+        let target_hue = if matches!(target, Space::Lch | Space::Oklch) {
+            2
+        } else {
+            0
+        };
+        if missing[source_hue] {
+            channels[target_hue] = None;
+        }
+    }
+    if matches!(source, Space::Lab | Space::Oklab)
+        && matches!(target, Space::Lch | Space::Oklch)
+        && missing[1]
+        && missing[2]
+    {
+        channels[1] = None;
+        channels[2] = None;
+    }
+    if matches!(source, Space::Lch | Space::Oklch)
+        && matches!(target, Space::Lab | Space::Oklab)
+        && missing[1]
+        && missing[2]
+    {
+        channels[1] = None;
+        channels[2] = None;
+    }
 }
 
 /// Mixes concrete CPAL colors in the CSS `palette-mix()` interpolation space.
@@ -1203,7 +1335,8 @@ fn powerless_hue(space: Space, is_hsl: bool, channels: &[f64; 3]) -> bool {
     } else {
         match space {
             Space::Hwb => channels[1] + channels[2] >= 1.0 - 1e-12,
-            Space::Lch | Space::Oklch => channels[1].abs() <= 1e-12,
+            Space::Lch => channels[1].abs() <= 0.02,
+            Space::Oklch => channels[1].abs() <= 4e-6,
             _ => false,
         }
     }
@@ -1214,7 +1347,7 @@ fn rgb_to_hsl(rgb: [f64; 3]) -> [f64; 3] {
     let min = rgb.into_iter().fold(f64::INFINITY, f64::min);
     let lightness = (max + min) / 2.0;
     let delta = max - min;
-    if delta == 0.0 {
+    if delta.abs() <= 1e-6 {
         return [0.0, 0.0, lightness];
     }
     let saturation = delta / (1.0 - (2.0 * lightness - 1.0).abs());
@@ -1449,6 +1582,16 @@ mod tests {
                 "color-mix(in srgb, color(srgb none .2 .6), color(srgb .4 .2 .6))",
                 "color(srgb 0.4 0.2 0.6)",
                 Color::rgb(102, 51, 153),
+            ),
+            (
+                "color-mix(in hsl, hsl(0 100% 100%), blue)",
+                "color(srgb 1 0.5 1)",
+                Color::rgb(255, 128, 255),
+            ),
+            (
+                "color-mix(in srgb, red 0%, green 0%, blue 0%)",
+                "color(srgb 0.25 0.12549 0.5 / 0)",
+                Color::rgba(64, 32, 128, 0),
             ),
         ] {
             let color = CssColor::parse(input).unwrap();

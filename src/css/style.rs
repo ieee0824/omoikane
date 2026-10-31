@@ -6445,6 +6445,25 @@ pub(crate) fn normalize_tree_counting_numeric(property: &str, text: &str) -> Opt
 
 /// Folds context-free number math for specified-value CSSOM serialization.
 pub(crate) fn normalize_numeric_math_specified(property: &str, text: &str) -> Option<String> {
+    let deferred_color_mix = is_color_property(property)
+        && text
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("color-mix(")
+        && crate::paint::color4::CssColor::parse(text).is_none()
+        && crate::paint::color4::CssColor::parse_with_context(
+            text,
+            Some(crate::paint::color4::ColorContext {
+                font: 16.0,
+                root_font: 16.0,
+                viewport: [800.0, 600.0],
+                container: [800.0, 600.0],
+            }),
+        )
+        .is_some();
+    if deferred_color_mix {
+        return Some(text.trim().to_ascii_lowercase());
+    }
     if !supports_declaration(property, text) {
         return None;
     }
@@ -6465,6 +6484,14 @@ pub(crate) fn normalize_numeric_math_specified(property: &str, text: &str) -> Op
         && let Some(color) = crate::paint::color4::CssColor::parse(text)
     {
         return Some(color.serialize());
+    }
+    if is_color_property(property)
+        && text
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("color-mix(")
+    {
+        return Some(text.trim().to_ascii_lowercase());
     }
     let value = super::parse_style_attribute(&format!("{property}: {text}"))
         .into_iter()
