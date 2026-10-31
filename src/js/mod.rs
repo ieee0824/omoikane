@@ -80,6 +80,7 @@ mod main_shadow_mask_cache_tests;
 mod media_environment;
 pub mod native_scroll;
 mod navigation_transport;
+mod paint_timing;
 mod retained_scroll;
 mod tree_style_invalidation;
 mod view_transition;
@@ -2397,6 +2398,8 @@ struct HostState {
     idle_period_hooks: HashMap<usize, JsValue>,
     /// Documents whose idle callbacks wait for the next idle period.
     idle_period_requests: BTreeSet<usize>,
+    /// Paint Timing and Largest Contentful Paint scan state.
+    paint_timing: paint_timing::State,
     auxiliary_opener_updaters: HashMap<usize, JsValue>,
     websocket_clients: HashMap<u64, WebSocketConnection>,
     next_websocket_id: u64,
@@ -3370,6 +3373,7 @@ impl HostState {
             cookie_change_callbacks: HashMap::new(),
             idle_period_hooks: HashMap::new(),
             idle_period_requests: BTreeSet::new(),
+            paint_timing: paint_timing::State::default(),
             auxiliary_opener_updaters: HashMap::new(),
             websocket_clients: HashMap::new(),
             next_websocket_id: 1,
@@ -13033,6 +13037,8 @@ impl JsRuntime {
         // callbacks and their microtask checkpoint. This also queues transition
         // events without requiring script to force a computed-style read.
         self.update_css_transitions()?;
+        // The last step of updating the rendering marks paint timing.
+        self.mark_paint_timing()?;
         // Hosts with a bounded task pump need to regain control after this
         // rendering opportunity. Tasks queued by callbacks remain available
         // for the next frame instead of consuming a second task budget here.
@@ -13178,6 +13184,8 @@ impl JsRuntime {
         }
         jobs_result?;
         self.update_css_transitions()?;
+        // The last step of updating the rendering marks paint timing.
+        self.mark_paint_timing()?;
         self.run_until_idle_async().await?;
         Ok(callbacks_run)
     }
@@ -16601,6 +16609,7 @@ fn register_host_bindings(
     window_members::register(context, &mut bindings)?;
     highlight::register(context, &mut bindings)?;
     idle_period::register(context, &mut bindings)?;
+    paint_timing::register(context, &mut bindings)?;
     register_private_callable(
         context,
         &mut bindings,
