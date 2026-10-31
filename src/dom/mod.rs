@@ -43,6 +43,9 @@ mod slot_cache_tests;
 mod live_collection_epoch_tests;
 
 #[cfg(test)]
+mod disabled_tests;
+
+#[cfg(test)]
 thread_local! {
     static SLOT_ASSIGNMENT_WORK: std::cell::Cell<(usize, usize, usize)> = const {
         std::cell::Cell::new((0, 0, 0))
@@ -190,6 +193,7 @@ pub(crate) fn attribute_utf16_copy_work() -> usize {
 #[cfg(test)]
 thread_local! {
     static SIBLING_POSITION_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static PARENT_NODE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -235,33 +239,26 @@ pub(crate) fn is_actually_disabled(node: &NodeHandle) -> bool {
         return true;
     }
 
-    let mut ancestor = node.parent_node();
-    while let Some(current) = ancestor {
+    // Keep the direct child on the path to the control while ascending. Each
+    // fieldset's legend exception can then be checked without restarting at
+    // the control and walking the same ancestors again.
+    let mut descendant = node.clone();
+    while let Some(current) = descendant.parent_node() {
         if form_controls::html_local_name(&current).as_deref() == Some("fieldset")
             && current.attribute_value_ns(None, "disabled").is_some()
         {
-            let first_legend = current
-                .child_nodes()
-                .into_iter()
-                .find(|child| form_controls::html_local_name(child).as_deref() == Some("legend"));
-            let inside_first_legend = first_legend.is_some_and(|legend| {
-                let mut descendant = Some(node.clone());
-                while let Some(candidate) = descendant {
-                    if candidate == legend {
-                        return true;
-                    }
-                    if candidate == current {
-                        break;
-                    }
-                    descendant = candidate.parent_node();
-                }
-                false
-            });
+            let inside_first_legend = current
+                .0
+                .borrow()
+                .children
+                .iter()
+                .find(|child| form_controls::html_local_name(child).as_deref() == Some("legend"))
+                .is_some_and(|legend| legend == &descendant);
             if !inside_first_legend {
                 return true;
             }
         }
-        ancestor = current.parent_node();
+        descendant = current;
     }
     false
 }
@@ -3348,6 +3345,8 @@ impl Node for NodeHandle {
     }
 
     fn parent_node(&self) -> Option<NodeHandle> {
+        #[cfg(test)]
+        PARENT_NODE_READS.with(|count| count.set(count.get() + 1));
         self.0
             .borrow()
             .parent
