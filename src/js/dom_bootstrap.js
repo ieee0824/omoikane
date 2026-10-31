@@ -33987,6 +33987,7 @@ let omoikaneUserActivationState;
     globalThis.self = globalThis;
     globalThis.WorkerGlobalScope = Object;
     globalThis.DedicatedWorkerGlobalScope = Object;
+    globalThis.FileReaderSync = FileReaderSync;
     const WorkerDOMException = DOMException;
     globalThis.importScripts = function(...urls) {
       // Both Array.prototype.map and @@iterator are writable by worker code.
@@ -35069,6 +35070,21 @@ let omoikaneUserActivationState;
   FileReader.prototype.EMPTY = FILE_READER_EMPTY;
   FileReader.prototype.LOADING = FILE_READER_LOADING;
   FileReader.prototype.DONE = FILE_READER_DONE;
+
+  const fileReaderSyncInstances = new WeakSet();
+  class FileReaderSync {
+    constructor() { safeWeakSetAdd(fileReaderSyncInstances, this); }
+    __read(blob, kind, encoding = undefined) {
+      if (!safeWeakSetHas(fileReaderSyncInstances, this)) throw new TypeError("Invalid FileReaderSync receiver");
+      if (!(blob instanceof Blob)) throw new TypeError("FileReaderSync requires a Blob");
+      return fileReaderResult(blob, kind, encoding);
+    }
+    readAsArrayBuffer(blob) { return this.__read(blob, "arraybuffer"); }
+    readAsBinaryString(blob) { return this.__read(blob, "binarystring"); }
+    readAsText(blob, encoding = undefined) { return this.__read(blob, "text", encoding); }
+    readAsDataURL(blob) { return this.__read(blob, "dataurl"); }
+    get [Symbol.toStringTag]() { return "FileReaderSync"; }
+  }
 
   // Object URLs are minted here and mirrored into the host store. The map keeps
   // the `Blob` itself so `fetch()` and `XMLHttpRequest` read the original bytes;
