@@ -11681,6 +11681,110 @@ let omoikaneUserActivationState;
     }
   }
 
+  class CSSMarginRule {
+    constructor(text, sheet = null, index = -1) {
+      this.__sheet = sheet;
+      this.__index = index;
+      const source = cssRuleWithoutLeadingComments(text);
+      const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
+      this.__name = source.slice(1, open).trim().toLowerCase();
+      this.__style = declarationView(source.slice(open + 1, close), () => {
+        if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.cssText);
+      }, false, false);
+      if (sheet) sheet.__registerRuleView(this);
+    }
+    get type() { return 9; }
+    get name() { return this.__name; }
+    get style() { return this.__style; }
+    set style(value) { this.__style.cssText = value; }
+    get cssText() { return "@" + this.name + " { " + this.style.cssText + " }"; }
+  }
+
+  class CSSPageRule extends CSSGroupingRule {
+    constructor(text, sheet = null, index = -1) {
+      super();
+      this.__sheet = sheet;
+      this.__index = index;
+      const source = cssRuleWithoutLeadingComments(text);
+      const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
+      this.__selectorText = source.slice("@page".length, open).trim();
+      const contents = splitNestedStyleBody(source.slice(open + 1, close));
+      this.__style = declarationView(contents.leading, () => this.__syncFromInner(), false, false);
+      this.__innerSheet = new CSSStyleSheet(null, { rules: contents.rules });
+      this.__innerSheet.__parentRule = this;
+      if (sheet) sheet.__registerRuleView(this);
+    }
+    get type() { return 6; }
+    get selectorText() { return this.__selectorText; }
+    set selectorText(value) { this.__selectorText = String(value).trim(); this.__syncFromInner(); }
+    get style() { return this.__style; }
+    set style(value) { this.__style.cssText = value; }
+    get cssRules() { return this.__innerSheet.cssRules; }
+    __syncFromInner() {
+      if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.cssText);
+    }
+    get cssText() {
+      const prelude = "@page" + (this.selectorText ? " " + this.selectorText : "");
+      const parts = [];
+      if (this.style.cssText) parts.push("  " + this.style.cssText);
+      for (const rule of this.cssRules) parts.push("  " + rule.cssText);
+      return prelude + " {" + (parts.length ? "\n" + parts.join("\n") + "\n" : " ") + "}";
+    }
+  }
+
+  class CSSNamespaceRule {
+    constructor(text, sheet = null, index = -1) {
+      this.__sheet = sheet;
+      this.__index = index;
+      const source = cssRuleWithoutLeadingComments(text).replace(/;\s*$/, "");
+      const body = source.replace(/^@namespace\s+/i, "").trim();
+      const match = /^(?:(\S+)\s+)?(?:url\(\s*([^)]+?)\s*\)|(["'])(.*?)\3)$/i.exec(body);
+      this.__prefix = match && match[1] ? cssIdentifierValue(match[1]) : null;
+      const uri = match ? (match[2] === undefined ? match[4] : match[2]) : "";
+      this.__namespaceURI = String(uri).trim().replace(/^(?:["'])(.*)(?:["'])$/, "$1");
+      if (sheet) sheet.__registerRuleView(this);
+    }
+    get type() { return 10; }
+    get prefix() { return this.__prefix; }
+    get namespaceURI() { return this.__namespaceURI; }
+    get cssText() {
+      return "@namespace " + (this.prefix === null ? "" : cssIdentifierText(this.prefix) + " ") +
+        'url("' + this.namespaceURI.replace(/(["\\])/g, "\\$1") + '");';
+    }
+  }
+
+  class CSSStartingStyleRule extends CSSGroupingRule {
+    constructor(text, sheet = null, index = -1) {
+      super();
+      this.__sheet = sheet;
+      this.__index = index;
+      const source = cssRuleWithoutLeadingComments(text);
+      const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
+      this.__innerSheet = childGroupingSheet(source.slice(open + 1, close), sheet, this);
+      if (sheet) sheet.__registerRuleView(this);
+    }
+    get type() { return 0; }
+    get cssRules() { return this.__innerSheet.cssRules; }
+    __serializeCssText() {
+      const children = serializeChildRules(this.cssRules);
+      return "@starting-style {" + (children ? "\n" + children + "\n" : " ") + "}";
+    }
+    get cssText() { return this.__serializeCssText(); }
+  }
+
+  const viewTransitionDescriptors = new Set(["navigation", "types"]);
+  class CSSViewTransitionRule extends CSSDescriptorRule {
+    constructor(text, sheet = null, index = -1) {
+      super(text, sheet, index, viewTransitionDescriptors);
+      this.__prelude = "@view-transition";
+    }
+    get type() { return 0; }
+    get navigation() { return this.__style.getPropertyValue("navigation"); }
+    set navigation(value) { this.__style.setProperty("navigation", value); }
+    get types() { return this.__style.getPropertyValue("types"); }
+    set types(value) { this.__style.setProperty("types", value); }
+  }
+
   function createCssRule(text, sheet = null, index = -1) {
     const ruleSource = cssRuleWithoutLeadingComments(text);
     return /^@-omoikane-nested-declarations(?=\s|\{)/i.test(ruleSource)
@@ -11713,6 +11817,16 @@ let omoikaneUserActivationState;
       ? new CSSSupportsRule(text, sheet, index)
       : /^@(?:-webkit-)?keyframes(?=\s|\/\*|\{)/i.test(ruleSource)
       ? new CSSKeyframesRule(text, sheet, index)
+      : /^@page(?=\s|\/\*|\{)/i.test(ruleSource)
+      ? new CSSPageRule(text, sheet, index)
+      : /^@(?:top|right|bottom|left)-|^@(?:top|bottom)-(?:left|center|right)-corner(?=\s|\{)/i.test(ruleSource)
+      ? new CSSMarginRule(text, sheet, index)
+      : /^@namespace(?=\s|\/\*|;)/i.test(ruleSource)
+      ? new CSSNamespaceRule(text, sheet, index)
+      : /^@starting-style(?=\s|\/\*|\{)/i.test(ruleSource)
+      ? new CSSStartingStyleRule(text, sheet, index)
+      : /^@view-transition(?=\s|\/\*|\{)/i.test(ruleSource)
+      ? new CSSViewTransitionRule(text, sheet, index)
       : new CSSStyleRule(text, sheet, index);
   }
 
@@ -11749,6 +11863,8 @@ let omoikaneUserActivationState;
     CSSImportRule,
     CSSKeyframesRule,
     CSSKeyframeRule,
+    CSSMarginRule,
+    CSSNamespaceRule,
   ]) {
     Object.setPrototypeOf(constructor.prototype, CSSRule.prototype);
     Object.setPrototypeOf(constructor, CSSRule);
@@ -21603,6 +21719,11 @@ let omoikaneUserActivationState;
   globalThis.CSSScopeRule = CSSScopeRule;
   globalThis.CSSKeyframesRule = CSSKeyframesRule;
   globalThis.CSSKeyframeRule = CSSKeyframeRule;
+  globalThis.CSSPageRule = CSSPageRule;
+  globalThis.CSSMarginRule = CSSMarginRule;
+  globalThis.CSSNamespaceRule = CSSNamespaceRule;
+  globalThis.CSSStartingStyleRule = CSSStartingStyleRule;
+  globalThis.CSSViewTransitionRule = CSSViewTransitionRule;
   globalThis.NodeFilter = NodeFilter;
   globalThis.NodeIterator = NodeIterator;
   globalThis.TreeWalker = TreeWalker;

@@ -58,6 +58,62 @@ fn keyframes_rules_are_live_and_mutate_the_owning_stylesheet() {
 }
 
 #[test]
+fn page_namespace_and_modern_rules_use_dedicated_interfaces() {
+    let mut runtime = runtime();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "(() => { const sheet = new CSSStyleSheet();
+              sheet.replaceSync('@namespace svg url(https://example.test/svg);\\n' +
+                '@page report:left { margin: 1cm; @top-center { content: \"title\" } }\\n' +
+                '@starting-style { a { opacity: 0 } }\\n' +
+                '@view-transition { navigation: auto; types: slide }');
+              const [namespace, page, starting, transition] = sheet.cssRules;
+              const margin = page.cssRules[0];
+              return JSON.stringify([
+                namespace instanceof CSSNamespaceRule, namespace.prefix, namespace.namespaceURI,
+                page instanceof CSSPageRule, page.selectorText, page.style.margin,
+                margin instanceof CSSMarginRule, margin.name, margin.parentRule === page,
+                starting instanceof CSSStartingStyleRule,
+                starting instanceof CSSGroupingRule, starting.cssRules[0] instanceof CSSStyleRule,
+                transition instanceof CSSViewTransitionRule,
+                transition.navigation, transition.types
+              ]); })()",
+        ),
+        "[true,\"svg\",\"https://example.test/svg\",true,\"report:left\",\"1cm\",true,\"top-center\",true,true,true,true,true,\"auto\",\"slide\"]"
+    );
+}
+
+#[test]
+fn dedicated_rule_mutations_update_the_owning_stylesheet() {
+    let mut runtime = runtime();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "(() => { const sheet = new CSSStyleSheet();
+              sheet.replaceSync('@page { margin: 1cm; @top-center { content: \"old\" } }\\n' +
+                '@starting-style { a { opacity: 0 } }\\n' +
+                '@view-transition { navigation: auto; types: old }');
+              const [page, starting, transition] = sheet.cssRules;
+              const margin = page.cssRules[0];
+              page.style.margin = '2cm'; margin.style.content = '\"new\"';
+              starting.insertRule('b { opacity: 1 }', 1);
+              transition.navigation = 'none'; transition.types = 'new';
+              return JSON.stringify([
+                sheet.cssRules[0] === page, page.cssRules[0] === margin,
+                page.style.margin, margin.style.content,
+                starting.cssRules.length, starting.cssRules[1].selectorText,
+                transition.navigation, transition.types,
+                page.cssText.includes('margin: 2cm'), page.cssText.includes('content: \"new\"'),
+                starting.cssText.includes('b { opacity: 1; }'),
+                transition.cssText.includes('navigation: none')
+              ]); })()",
+        ),
+        "[true,true,\"2cm\",\"\\\"new\\\"\",2,\"b\",\"none\",\"new\",true,true,true,true]"
+    );
+}
+
+#[test]
 fn unknown_at_rules_are_discarded_without_hiding_following_rules() {
     let mut runtime = runtime();
     assert_eq!(
