@@ -127,6 +127,8 @@ fn anchor_position_properties_share_strict_cssom_and_supports_grammar() {
             ['position-area', 'block-end span-inline-end'],
             ['position-try-fallbacks', '--below flip-inline, top'],
             ['position-try-order', 'most-block-size'],
+            ['width', 'anchor-size(--menu width, anchor-size(--fallback block))'],
+            ['left', 'anchor-size(--menu inline, 10px)'],
         ];
         const invalid = [
             ['anchor-name', 'menu'],

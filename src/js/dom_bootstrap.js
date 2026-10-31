@@ -1144,6 +1144,8 @@ let omoikaneUserActivationState;
     name === "hyphenate-character" ||
     name === "initial-letter" || name === "text-box-edge" ||
     logicalBoxStyleProperties.has(name) ||
+    name === "position-area" || name === "position-try-fallbacks" ||
+    (!name.startsWith("--") && /anchor-size\s*\(/i.test(value)) ||
     validatesSpecialStyleProperties.has(name) ||
     (!name.startsWith("--") && numericMathFunctionPattern.test(value)) ||
     (!name.startsWith("--") && /sibling-(?:index|count)\s*\(/i.test(value));
@@ -10334,6 +10336,12 @@ let omoikaneUserActivationState;
         .replace(/\/\*[\s\S]*?\*\//g, " ").trim();
       return validFontFeatureFamilyList(raw);
     }
+    if (/^@position-try(?=\s|\/\*|\{)/i.test(text)) {
+      const raw = text.slice(0, open).replace(/^@position-try/i, "")
+        .replace(/\/\*[\s\S]*?\*\//g, " ").trim();
+      const name = cssIdentifierValue(raw);
+      return name !== null && name.startsWith("--");
+    }
     return true;
   }
 
@@ -10342,19 +10350,25 @@ let omoikaneUserActivationState;
     catch (_) { return false; }
   }
 
-  function declarationView(block, onChange = null, validateProperties = true, elementContext = true) {
+  function declarationView(block, onChange = null, validateProperties = true, elementContext = true,
+                           allowedProperties = null) {
     let source = String(block || "");
     let cachedSource = null;
     let cachedDeclarations = [];
     const accepts = (name, value) =>
+      (!allowedProperties || allowedProperties.has(name)) &&
       (elementContext || JSON.parse(__omoikane_css_declarations(name + ": " + value, true)).length > 0) &&
       (!validateProperties || name.startsWith("--") ||
        nativeStyleSupports(name, value.replace(/\s*!\s*important\s*$/i, "")));
     const declarations = () => {
       if (cachedSource !== source) {
-        const parsed = JSON.parse(__omoikane_css_declarations(source)).map(
-          ([name, value]) => ({ name, value })
-        ).filter(declaration => accepts(declaration.name, declaration.value));
+        const parsed = JSON.parse(__omoikane_css_declarations(source)).map(([name, value]) => {
+          if (needsStyleValueNormalization(name, value)) {
+            const normalized = __omoikane_normalize_style_value(name, value);
+            if (normalized !== null) value = normalized;
+          }
+          return { name, value };
+        }).filter(declaration => accepts(declaration.name, declaration.value));
         cachedDeclarations = parsed;
         cachedSource = source;
       }
@@ -10389,7 +10403,7 @@ let omoikaneUserActivationState;
       }
       if (!accepts(key, value)) return;
       const longhands = styleShorthandLonghands[key];
-      if (longhands) {
+      if (longhands && !allowedProperties) {
         const expanded = JSON.parse(__omoikane_expand_style_shorthand(key, value));
         if (expanded.length === 0) return;
         const replaced = new Set([key, ...longhands]);
@@ -10444,11 +10458,17 @@ let omoikaneUserActivationState;
     return new Proxy(target, {
       get(object, prop) {
         if (typeof prop === "symbol" || prop in object) return object[prop];
+        if (allowedProperties && !allowedProperties.has(propertyName(prop))) return undefined;
         return object.getPropertyValue(prop);
       },
       set(object, prop, value) {
         if (typeof prop !== "string") return true;
         if (prop === "cssText") { object.cssText = value; return true; }
+        if (allowedProperties && allowedProperties.has(propertyName(prop))) {
+          if (value === null || value === undefined || value === "") removeValue(prop);
+          else setValue(prop, value);
+          return true;
+        }
         if (prop in object) return true;
         if (value === null || value === undefined || value === "") removeValue(prop);
         else setValue(prop, value);
@@ -10789,7 +10809,7 @@ let omoikaneUserActivationState;
 
   // Descriptor rules have no originating element for tree-dependent values.
   class CSSDescriptorRule {
-    constructor(text, sheet, index) {
+    constructor(text, sheet, index, allowedProperties = null) {
       this.__sheet = sheet;
       this.__index = index;
       const open = cssRuleBlockStart(text), close = text.lastIndexOf("}");
@@ -10797,11 +10817,14 @@ let omoikaneUserActivationState;
       this.__style = declarationView(text.slice(open + 1, close), () => {
         this.__text = this.cssText;
         if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
-      }, false, false);
+      }, false, false, allowedProperties);
       this.__text = text;
       if (sheet) sheet.__registerRuleView(this);
     }
-    get cssText() { return this.__prelude + " { " + this.__style.cssText + " }"; }
+    get cssText() {
+      const declarations = this.__style.cssText;
+      return this.__prelude + (declarations ? " { " + declarations + " }" : " { }");
+    }
     get parentRule() { return this.__sheet ? this.__sheet.__parentRule : null; }
     get parentStyleSheet() { return this.__sheet; }
   }
@@ -10825,7 +10848,31 @@ let omoikaneUserActivationState;
     get overrideColors() { return this.__style.getPropertyValue("override-colors"); }
   }
 
+  const positionTryDescriptorProperties = new Set([
+    "margin", "margin-top", "margin-right", "margin-bottom", "margin-left",
+    "margin-block", "margin-block-start", "margin-block-end",
+    "margin-inline", "margin-inline-start", "margin-inline-end",
+    "inset", "top", "left", "right", "bottom", "inset-block",
+    "inset-block-start", "inset-block-end", "inset-inline",
+    "inset-inline-start", "inset-inline-end", "width", "height",
+    "min-width", "max-width", "min-height", "max-height", "block-size",
+    "min-block-size", "max-block-size", "inline-size", "min-inline-size",
+    "max-inline-size", "place-self", "align-self", "justify-self",
+    "position-anchor", "position-area"
+  ]);
+
   class CSSPositionTryDescriptors {}
+  for (const property of positionTryDescriptorProperties) {
+    const camel = property.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+    for (const attribute of new Set([property, camel])) {
+      Object.defineProperty(CSSPositionTryDescriptors.prototype, attribute, {
+        configurable: true,
+        enumerable: true,
+        get() { return this.getPropertyValue(property); },
+        set(value) { this.setProperty(property, value); },
+      });
+    }
+  }
 
   class CSSPositionTryRule extends CSSDescriptorRule {
     constructor(text, sheet = null, index = -1) {
@@ -10838,7 +10885,7 @@ let omoikaneUserActivationState;
         throw new DOMException("Invalid @position-try rule.", "SyntaxError");
       }
       super("@position-try " + cssIdentifierText(name) + " { " +
-        source.slice(open + 1, close) + " }", sheet, index);
+        source.slice(open + 1, close) + " }", sheet, index, positionTryDescriptorProperties);
       this.__name = name;
       Object.setPrototypeOf(this.__style, CSSPositionTryDescriptors.prototype);
       this.__prelude = "@position-try " + cssIdentifierText(name);
@@ -11853,6 +11900,10 @@ let omoikaneUserActivationState;
       }
       let count;
       const fontFeatureRule = /^\s*@font-feature-values(?=\s|\/\*|;|\{)/i.test(text);
+      const positionTryRule = /^\s*@position-try(?=\s|\/\*|\{)/i.test(text);
+      if (positionTryRule && (blockStart < 0 || !fontAtRulePreludeValid(source))) {
+        throw new DOMException("Invalid @position-try rule.", "SyntaxError");
+      }
       if (fontFeatureRule) {
         if (blockStart < 0 || !fontAtRulePreludeValid(source))
           throw new DOMException("Invalid @font-feature-values rule.", "SyntaxError");
