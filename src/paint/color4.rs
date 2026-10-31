@@ -1274,6 +1274,23 @@ mod tests {
     }
 
     #[test]
+    fn relative_colors_evaluate_trigonometric_and_power_math() {
+        for input in [
+            "hsl(from hsl(50 50 50) h s calc((sin(l) + 1) * 50))",
+            "hsl(from hsl(50 50 50) h s calc((sin(asin(sin(l))) + 1) * 50))",
+            "oklch(from green pow(l, 1) c h)",
+        ] {
+            assert!(CssColor::parse(input).is_some(), "{input}");
+        }
+        assert_eq!(
+            CssColor::parse("hsl(from rebeccapurple h s l / none)")
+                .unwrap()
+                .serialize_computed(),
+            "hsl(270 50% 40% / none)"
+        );
+    }
+
+    #[test]
     fn font_palette_colors_mix_in_the_requested_space_and_premultiplied_alpha() {
         assert_eq!(
             mix_palette_colors(
