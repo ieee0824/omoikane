@@ -21992,6 +21992,7 @@ let omoikaneUserActivationState;
   }
 
   globalThis.__omoikane_dispatch_mouse_input = function(id, type, init, focusTarget) {
+    if (type === "mousedown" || type === "click") stopLargestContentfulPaint();
     const locked = nativePointerLockTarget() !== null;
     if (locked && ["mouseover", "mouseout", "mouseenter", "mouseleave"].includes(type)) return true;
     const hitTarget = wrapNode(id) || document;
@@ -22187,6 +22188,7 @@ let omoikaneUserActivationState;
     return true;
   }
   globalThis.__omoikane_dispatch_wheel_input = function(id, init) {
+    stopLargestContentfulPaint();
     const locked = wrapNode(nativePointerLockTarget());
     const target = locked || wrapNode(id) || document;
     const inputDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
@@ -22216,6 +22218,7 @@ let omoikaneUserActivationState;
     return horizontal ? allowX : allowY;
   }
   globalThis.__omoikane_dispatch_touch_input = function(id, type, init) {
+    if (type === "touchstart") stopLargestContentfulPaint();
     const target = wrapNode(id) || document;
     const inputDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
     const forwarded = nativeForwardInput(internalNodeId(inputDocument), "touch", [
@@ -22257,6 +22260,7 @@ let omoikaneUserActivationState;
     return 1 | performScrollBoundaryDefault(target, init.deltaX, init.deltaY);
   };
   globalThis.__omoikane_dispatch_keyboard_input = function(type, init) {
+    if (type === "keydown") stopLargestContentfulPaint();
     const focusedId = focusedDocumentId() ?? __omoikane_document_id;
     const forwarded = nativeForwardInput(focusedId, "keyboard", [type, init]);
     if (forwarded !== undefined) return forwarded;
@@ -25024,6 +25028,9 @@ let omoikaneUserActivationState;
   }
 
   const performanceEntries = [];
+  // Entry types that observers can buffer but the performance timeline does
+  // not expose through getEntries(), such as largest-contentful-paint.
+  const observerOnlyPerformanceEntries = [];
   let performanceEntrySequence = 0;
   const performanceObservers = [];
   let pendingPerformanceObservers = [];
@@ -25114,7 +25121,8 @@ let omoikaneUserActivationState;
       this._mode = "single";
       this._entryTypes.add(type);
       if (Boolean(options.buffered)) {
-        this._queue.push(...performanceEntries.filter(entry => entry.entryType === type));
+        this._queue.push(...performanceEntries.concat(observerOnlyPerformanceEntries)
+          .filter(entry => entry.entryType === type));
         if (this._queue.length) schedulePerformanceObserver(this);
       }
     }
@@ -25132,7 +25140,10 @@ let omoikaneUserActivationState;
     }
   }
   Object.defineProperty(PerformanceObserver, "supportedEntryTypes", {
-    get() { return Object.freeze(["navigation", "resource", "mark", "measure", "visibility-state"]); },
+    get() {
+      return Object.freeze(["navigation", "resource", "mark", "measure", "visibility-state",
+        "paint", "largest-contentful-paint"]);
+    },
     enumerable: true,
   });
 
@@ -25181,6 +25192,146 @@ let omoikaneUserActivationState;
     }
     return entry;
   }
+
+  // Paint Timing: first-paint and first-contentful-paint.
+  // PaintTimingMixin: paintTime is the rendering update time. Presentation
+  // times are not available, so presentationTime is null.
+  const paintTimingTimes = new WeakMap();
+  function definePaintTimingMixin(prototype) {
+    for (const name of ["paintTime", "presentationTime"]) {
+      const get = function () {
+        const times = paintTimingTimes.get(this);
+        if (!times) throw new TypeError("Illegal invocation");
+        return times[name];
+      };
+      Object.defineProperty(get, "name", { value: "get " + name });
+      Object.defineProperty(prototype, name, { configurable: true, enumerable: true, get });
+    }
+  }
+  class PerformancePaintTiming extends PerformanceEntry {
+    constructor() {
+      const [token, name, startTime] = arguments;
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      super(performanceEntryToken, name, "paint", startTime, 0);
+      paintTimingTimes.set(this, { paintTime: startTime, presentationTime: null });
+    }
+    toJSON() {
+      return { ...super.toJSON(), paintTime: this.paintTime, presentationTime: this.presentationTime };
+    }
+  }
+  definePaintTimingMixin(PerformancePaintTiming.prototype);
+
+  // Largest Contentful Paint candidates.
+  const lcpState = new WeakMap();
+  class LargestContentfulPaint extends PerformanceEntry {
+    constructor() {
+      const [token, state] = arguments;
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      super(performanceEntryToken, "", "largest-contentful-paint",
+        state.renderTime || state.loadTime, 0);
+      lcpState.set(this, state);
+      paintTimingTimes.set(this, { paintTime: state.renderTime, presentationTime: null });
+    }
+    toJSON() {
+      return {
+        ...super.toJSON(), renderTime: this.renderTime, loadTime: this.loadTime,
+        size: this.size, id: this.id, url: this.url,
+        paintTime: this.paintTime, presentationTime: this.presentationTime,
+      };
+    }
+  }
+  definePaintTimingMixin(LargestContentfulPaint.prototype);
+  function lcpField(entry, name) {
+    const state = lcpState.get(entry);
+    if (!state) throw new TypeError("Illegal invocation");
+    return state[name];
+  }
+  for (const name of ["renderTime", "loadTime", "size", "id", "url"]) {
+    const get = function () { return lcpField(this, name); };
+    Object.defineProperty(get, "name", { value: "get " + name });
+    Object.defineProperty(LargestContentfulPaint.prototype, name, {
+      configurable: true, enumerable: true, get,
+    });
+  }
+  Object.defineProperty(LargestContentfulPaint.prototype, "element", {
+    configurable: true, enumerable: true,
+    get: Object.defineProperty(function () {
+      const element = lcpField(this, "element");
+      return element && element.isConnected ? element : null;
+    }, "name", { value: "get element" }),
+  });
+
+  function addObserverOnlyPerformanceEntry(entry) {
+    Object.defineProperty(entry, "__sequence", { value: performanceEntrySequence++ });
+    observerOnlyPerformanceEntries.push(entry);
+    for (const observer of performanceObservers) {
+      if (!observer._entryTypes.has(entry.entryType)) continue;
+      observer._queue.push(entry);
+      schedulePerformanceObserver(observer);
+    }
+  }
+
+  const paintTimingState = {
+    firstPaint: false, firstContentfulPaint: false, lcpActive: true, largestSize: 0,
+  };
+  const nativePaintTimingFinished = globalThis.__omoikane_paint_timing_finished;
+  delete globalThis.__omoikane_paint_timing_finished;
+  // Input ends the search for the largest contentful paint.
+  function stopLargestContentfulPaint() {
+    paintTimingState.lcpActive = false;
+    finishPaintTimingIfDone();
+  }
+  function finishPaintTimingIfDone() {
+    if (paintTimingState.firstPaint && paintTimingState.firstContentfulPaint &&
+        !paintTimingState.lcpActive && typeof nativePaintTimingFinished === "function") {
+      nativePaintTimingFinished();
+    }
+  }
+  // The absolute URL of an image candidate: an image element's source, or
+  // the first url() of a background image. Text candidates have none.
+  function largestContentfulPaintUrl(element) {
+    const resolve = value => {
+      try { return new URL(value, document.baseURI).href; } catch (_) { return ""; }
+    };
+    if (element.localName === "img") {
+      const source = element.currentSrc || element.getAttribute("src") || "";
+      return source ? resolve(source) : "";
+    }
+    if (element.localName === "video") {
+      const poster = element.getAttribute("poster");
+      if (poster) return resolve(poster);
+    }
+    const background = getComputedStyle(element).backgroundImage || "";
+    const match = /url\((["']?)(.*?)\1\)/.exec(background);
+    return match ? resolve(match[2]) : "";
+  }
+
+  // Called by the host at the end of a rendering opportunity whose layout
+  // changed (paint_timing.rs).
+  globalThis.__omoikane_paint_timing_frame = function(painted, contentful, nodeId, size) {
+    const now = nativePerformanceNow();
+    if ((painted || contentful) && !paintTimingState.firstPaint) {
+      paintTimingState.firstPaint = true;
+      addPerformanceEntry(new PerformancePaintTiming(performanceEntryToken, "first-paint", now));
+    }
+    if (contentful && !paintTimingState.firstContentfulPaint) {
+      paintTimingState.firstContentfulPaint = true;
+      addPerformanceEntry(new PerformancePaintTiming(
+        performanceEntryToken, "first-contentful-paint", now));
+    }
+    if (paintTimingState.lcpActive && nodeId >= 0 && size > paintTimingState.largestSize) {
+      const element = wrapNode(nodeId);
+      if (element) {
+        paintTimingState.largestSize = size;
+        const url = largestContentfulPaintUrl(element);
+        addObserverOnlyPerformanceEntry(new LargestContentfulPaint(performanceEntryToken, {
+          renderTime: now, loadTime: url ? now : 0, size: Math.round(size),
+          id: element.id || "", url, element,
+        }));
+      }
+    }
+    finishPaintTimingIfDone();
+  };
 
   function recordVisibilityStateEntry(visibilityState, startTime) {
     addPerformanceEntry(new VisibilityStateEntry(
@@ -25495,6 +25646,10 @@ let omoikaneUserActivationState;
   globalThis.PerformanceMark = PerformanceMark;
   globalThis.PerformanceMeasure = PerformanceMeasure;
   globalThis.PerformanceResourceTiming = PerformanceResourceTiming;
+  for (const [name, value] of [["PerformancePaintTiming", PerformancePaintTiming],
+    ["LargestContentfulPaint", LargestContentfulPaint]]) {
+    Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  }
   globalThis.PerformanceNavigationTiming = PerformanceNavigationTiming;
   globalThis.PerformanceObserver = PerformanceObserver;
   globalThis.PerformanceObserverEntryList = PerformanceObserverEntryList;
