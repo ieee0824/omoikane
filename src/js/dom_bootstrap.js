@@ -10311,11 +10311,18 @@ let omoikaneUserActivationState;
     return text;
   }
 
+  function cssomRuleIsRecognized(source) {
+    const text = cssRuleWithoutLeadingComments(source);
+    if (!text.startsWith("@")) return true;
+    return /^@(?:font-face|font-palette-values|counter-style|font-feature-values|property|position-try|import|layer|container|media|scope|supports|(?:-webkit-)?keyframes|page|namespace|starting-style|view-transition)(?=\s|\/\*|\(|\{|;)/i.test(text);
+  }
+
   function splitCssRules(source) {
     const css = String(source || "");
     try {
       return JSON.parse(__omoikane_css_rule_sources(css)).filter(rule =>
-        ((!/^@property(?=\s|\/\*|\{)/i.test(cssRuleWithoutLeadingComments(rule)) ||
+        (cssomRuleIsRecognized(rule) &&
+          (!/^@property(?=\s|\/\*|\{)/i.test(cssRuleWithoutLeadingComments(rule)) ||
           __omoikane_css_property_rule(rule) !== null) && fontAtRulePreludeValid(rule))
       );
     } catch (error) {
@@ -11552,6 +11559,128 @@ let omoikaneUserActivationState;
     get cssText() { return this.__serializeCssText(); }
   }
 
+  function splitKeyframeRules(body) {
+    const rules = [];
+    const text = String(body);
+    let start = 0, depth = 0, quote = "", comment = false, escaped = false;
+    for (let index = 0; index < text.length; index++) {
+      const ch = text[index], next = text[index + 1];
+      if (comment) {
+        if (ch === "*" && next === "/") { comment = false; index++; }
+        continue;
+      }
+      if (escaped) { escaped = false; continue; }
+      if (ch === "\\") { escaped = true; continue; }
+      if (quote) { if (ch === quote) quote = ""; continue; }
+      if (ch === "/" && next === "*") { comment = true; index++; continue; }
+      if (ch === "'" || ch === '"') { quote = ch; continue; }
+      if (ch === "{") depth++;
+      else if (ch === "}" && depth > 0 && --depth === 0) {
+        const rule = text.slice(start, index + 1).trim();
+        if (rule) rules.push(rule);
+        start = index + 1;
+      }
+    }
+    return rules;
+  }
+
+  function normalizeKeyframeSelector(input) {
+    const selectors = String(input).split(",").map(selector => {
+      const value = selector.trim().toLowerCase();
+      if (value === "from") return "0%";
+      if (value === "to") return "100%";
+      const match = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))%$/.exec(value);
+      if (!match) return null;
+      const percentage = Number(match[1]);
+      if (!Number.isFinite(percentage) || percentage < 0 || percentage > 100) return null;
+      return String(percentage).replace(/\.0+$/, "") + "%";
+    });
+    return selectors.length && selectors.every(selector => selector !== null)
+      ? selectors.join(", ") : null;
+  }
+
+  class CSSKeyframeRule {
+    constructor(text, owner) {
+      this.__owner = owner;
+      const open = cssRuleBlockStart(text), close = text.lastIndexOf("}");
+      this.__keyText = normalizeKeyframeSelector(text.slice(0, open)) || "";
+      this.__style = declarationView(text.slice(open + 1, close), () => owner.__sync());
+    }
+    get type() { return 8; }
+    get parentRule() { return this.__owner; }
+    get parentStyleSheet() { return this.__owner.parentStyleSheet; }
+    get keyText() { return this.__keyText; }
+    set keyText(value) {
+      const normalized = normalizeKeyframeSelector(value);
+      if (normalized === null) return;
+      this.__keyText = normalized;
+      this.__owner.__sync();
+    }
+    get style() { return this.__style; }
+    set style(value) { this.__style.cssText = value; }
+    get cssText() { return this.keyText + " { " + this.style.cssText + " }"; }
+  }
+
+  function keyframeRuleList(owner) {
+    const list = {
+      item(index) { return owner.__rules[Number(index) >>> 0] || null; },
+      get length() { return owner.__rules.length; },
+      [Symbol.iterator]() { return owner.__rules[Symbol.iterator](); },
+    };
+    return new Proxy(list, {
+      get(target, property, receiver) {
+        if (typeof property === "string" && /^(?:0|[1-9]\d*)$/.test(property))
+          return owner.__rules[Number(property)];
+        return Reflect.get(target, property, receiver);
+      },
+    });
+  }
+
+  class CSSKeyframesRule {
+    constructor(text, sheet = null, index = -1) {
+      this.__sheet = sheet;
+      this.__index = index;
+      const source = cssRuleWithoutLeadingComments(text);
+      const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
+      let name = source.slice(0, open).replace(/^@(?:-webkit-)?keyframes\s+/i, "").trim();
+      if ((name[0] === '"' || name[0] === "'") && name.at(-1) === name[0]) name = name.slice(1, -1);
+      this.__name = name;
+      this.__rules = splitKeyframeRules(source.slice(open + 1, close))
+        .map(rule => new CSSKeyframeRule(rule, this));
+      this.__cssRules = keyframeRuleList(this);
+      if (sheet) sheet.__registerRuleView(this);
+    }
+    get type() { return 7; }
+    get name() { return this.__name; }
+    set name(value) { this.__name = String(value); this.__sync(); }
+    get cssRules() { return this.__cssRules; }
+    appendRule(rule) {
+      const source = String(rule).trim();
+      const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
+      if (open < 0 || close <= open || normalizeKeyframeSelector(source.slice(0, open)) === null) return;
+      this.__rules.push(new CSSKeyframeRule(source, this));
+      this.__sync();
+    }
+    findRule(selector) {
+      const key = normalizeKeyframeSelector(selector);
+      if (key === null) return null;
+      return this.__rules.findLast(rule => rule.keyText === key) || null;
+    }
+    deleteRule(selector) {
+      const rule = this.findRule(selector);
+      if (!rule) return;
+      this.__rules.splice(this.__rules.lastIndexOf(rule), 1);
+      this.__sync();
+    }
+    __sync() {
+      if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.cssText);
+    }
+    get cssText() {
+      const children = this.__rules.map(rule => "  " + rule.cssText).join("\n");
+      return "@keyframes " + this.name + " {" + (children ? "\n" + children + "\n" : " ") + "}";
+    }
+  }
+
   function createCssRule(text, sheet = null, index = -1) {
     const ruleSource = cssRuleWithoutLeadingComments(text);
     return /^@-omoikane-nested-declarations(?=\s|\{)/i.test(ruleSource)
@@ -11582,10 +11711,48 @@ let omoikaneUserActivationState;
       ? new CSSScopeRule(text, sheet, index)
       : /^@supports(?=\s|\/\*|\()/i.test(ruleSource)
       ? new CSSSupportsRule(text, sheet, index)
+      : /^@(?:-webkit-)?keyframes(?=\s|\/\*|\{)/i.test(ruleSource)
+      ? new CSSKeyframesRule(text, sheet, index)
       : new CSSStyleRule(text, sheet, index);
   }
 
-  class CSSRule {}
+  class CSSRule {
+    get parentRule() { return this.__sheet ? this.__sheet.__parentRule : null; }
+    get parentStyleSheet() { return this.__sheet || null; }
+  }
+  for (const [name, value] of Object.entries({
+    STYLE_RULE: 1,
+    CHARSET_RULE: 2,
+    IMPORT_RULE: 3,
+    MEDIA_RULE: 4,
+    FONT_FACE_RULE: 5,
+    PAGE_RULE: 6,
+    KEYFRAMES_RULE: 7,
+    KEYFRAME_RULE: 8,
+    MARGIN_RULE: 9,
+    NAMESPACE_RULE: 10,
+    COUNTER_STYLE_RULE: 11,
+    SUPPORTS_RULE: 12,
+    FONT_FEATURE_VALUES_RULE: 14,
+  })) {
+    Object.defineProperty(CSSRule, name, { value, enumerable: true });
+    Object.defineProperty(CSSRule.prototype, name, { value, enumerable: true });
+  }
+  for (const constructor of [
+    CSSGroupingRule,
+    CSSNestedDeclarations,
+    CSSFontFaceRule,
+    CSSDescriptorRule,
+    CSSFontFeatureValuesRule,
+    CSSPropertyRule,
+    CSSLayerStatementRule,
+    CSSImportRule,
+    CSSKeyframesRule,
+    CSSKeyframeRule,
+  ]) {
+    Object.setPrototypeOf(constructor.prototype, CSSRule.prototype);
+    Object.setPrototypeOf(constructor, CSSRule);
+  }
 
   class CSSRuleList {
     constructor(sheet) { this.__sheet = sheet; }
@@ -21434,6 +21601,8 @@ let omoikaneUserActivationState;
   globalThis.CSSGroupingRule = CSSGroupingRule;
   globalThis.CSSConditionRule = CSSConditionRule;
   globalThis.CSSScopeRule = CSSScopeRule;
+  globalThis.CSSKeyframesRule = CSSKeyframesRule;
+  globalThis.CSSKeyframeRule = CSSKeyframeRule;
   globalThis.NodeFilter = NodeFilter;
   globalThis.NodeIterator = NodeIterator;
   globalThis.TreeWalker = TreeWalker;
