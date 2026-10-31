@@ -3317,7 +3317,7 @@ impl StyleResolver {
                 dependency
             };
         stylesheet_dependency
-            || parsed_inline_style(node.get_attribute("style").as_deref())
+            || parsed_inline_style(node.inline_style_source().as_deref())
                 .iter()
                 .any(|declaration| value_reads_data_attribute(&declaration.value, &attribute_name))
     }
@@ -4458,7 +4458,7 @@ impl StyleResolver {
         if pseudo.is_none()
             && node.node_type() == NodeType::Element
             && !self.blocked_inline_style_nodes.contains(&node.identity())
-            && let Some(inline_style) = node.get_attribute("style")
+            && let Some(inline_style) = node.inline_style_source()
         {
             let layer_context = LayerContextKey {
                 origin: Origin::Author,
@@ -6447,6 +6447,19 @@ pub(crate) fn normalize_tree_counting_numeric(property: &str, text: &str) -> Opt
 pub(crate) fn normalize_numeric_math_specified(property: &str, text: &str) -> Option<String> {
     if !supports_declaration(property, text) {
         return None;
+    }
+    if is_color_property(property) && text.to_ascii_lowercase().contains("currentcolor") {
+        let mut canonical = text.trim().to_ascii_lowercase();
+        for (alias, name) in [("rgba(from ", "rgb(from "), ("hsla(from ", "hsl(from ")] {
+            if canonical.starts_with(alias) {
+                canonical.replace_range(..alias.len(), name);
+                break;
+            }
+        }
+        if canonical.starts_with("color(from ") {
+            canonical = canonical.replacen(" xyz ", " xyz-d65 ", 1);
+        }
+        return Some(canonical);
     }
     if is_color_property(property)
         && let Some(color) = crate::paint::color4::CssColor::parse(text)

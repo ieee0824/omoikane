@@ -146,6 +146,29 @@ fn relative_color_resolves_current_color_at_the_owning_element() {
 }
 
 #[test]
+fn relative_hwb_cssom_keeps_non_quantized_computation_channels() {
+    let document = TreeBuilder::parse("<div id='target'></div>").document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let actual = runtime
+        .eval(
+            "(() => { const e=document.getElementById('target');\
+             e.style.color='hwb(from hwb(120deg 20% 50% / .5) h w b / none)';\
+             return JSON.stringify([e.style.color,e.getAttribute('style'),\
+             getComputedStyle(e).color]); })()",
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        actual,
+        "[\"hwb(from rgba(51, 128, 51, 0.5) h w b / none)\",\
+         \"color: hwb(from rgba(51, 128, 51, 0.5) h w b / none);\",\
+         \"hwb(120 20% 50% / none)\"]"
+    );
+}
+
+#[test]
 fn relative_hsl_preserves_a_missing_alpha_in_computed_style() {
     let document = TreeBuilder::parse(
         "<div id='target' style='color:hsl(from rebeccapurple h s l / none)'></div>",

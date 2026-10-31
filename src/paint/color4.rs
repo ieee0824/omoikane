@@ -328,8 +328,236 @@ fn parse_relative_color(name: &str, body: &str, context: Option<ColorContext>) -
         channels,
         alpha,
         expressions: std::array::from_fn(|_| None),
-        specified: Some(format!("{name}({body})")),
+        specified: Some(serialize_specified_relative(
+            name,
+            body,
+            origin_text,
+            &origin,
+            target,
+        )),
     })
+}
+
+fn serialize_specified_relative(
+    name: &str,
+    body: &str,
+    origin_text: &str,
+    origin: &CssColor,
+    target: Space,
+) -> String {
+    let canonical_name = match name {
+        "rgba" => "rgb",
+        "hsla" => "hsl",
+        _ => name,
+    };
+    let origin_name = origin_text.split_once('(').map(|(name, _)| name);
+    let is_absolute_legacy = matches!(origin_name, Some("rgb" | "rgba" | "hsl" | "hsla"))
+        && !origin_text
+            .split_once('(')
+            .is_some_and(|(_, body)| body.trim_start().starts_with("from "));
+    let canonical_origin = if is_absolute_legacy
+        && origin.channels.iter().all(Option::is_some)
+        && origin.alpha.is_some()
+    {
+        let rgba = origin.to_color();
+        let alpha = legacy_comma_alpha(origin_text).unwrap_or_else(|| origin.alpha.unwrap_or(0.0));
+        if rgba.a == 255 {
+            format!("rgb({}, {}, {})", rgba.r, rgba.g, rgba.b)
+        } else {
+            format!(
+                "rgba({}, {}, {}, {})",
+                rgba.r,
+                rgba.g,
+                rgba.b,
+                css_number(alpha)
+            )
+        }
+    } else if origin_name == Some("hwb")
+        && !origin_text
+            .split_once('(')
+            .is_some_and(|(_, body)| body.trim_start().starts_with("from "))
+    {
+        origin.serialize_mode(false)
+    } else if is_absolute_legacy
+        || matches!(
+            origin_name,
+            Some("lab" | "lch" | "oklab" | "oklch" | "color" | "color-mix")
+        )
+    {
+        origin.serialize()
+    } else {
+        origin_text.to_string()
+    };
+    let mut suffix = body["from ".len() + origin_text.len()..].to_string();
+    if canonical_name == "color" && target == Space::XyzD65 {
+        let trimmed = suffix.trim_start();
+        if trimmed == "xyz" || trimmed.starts_with("xyz ") {
+            let start = suffix.len() - trimmed.len();
+            suffix.replace_range(start..start + "xyz".len(), "xyz-d65");
+        }
+    }
+    suffix = canonicalize_relative_math(&suffix);
+    format!("{canonical_name}(from {canonical_origin}{suffix})")
+}
+
+fn canonicalize_relative_math(text: &str) -> String {
+    let mut output = String::new();
+    let mut offset = 0;
+    while let Some(relative) = text[offset..].find("calc(") {
+        let start = offset + relative;
+        output.push_str(&text[offset..start]);
+        let content = start + "calc(".len();
+        let mut depth = 1_u32;
+        let mut end = content;
+        for (index, byte) in text.as_bytes()[content..].iter().enumerate() {
+            match byte {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = content + index;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if depth != 0 {
+            output.push_str(&text[start..]);
+            return output;
+        }
+        output.push_str("calc(");
+        output.push_str(&canonicalize_relative_sum(&text[content..end]));
+        output.push(')');
+        offset = end + 1;
+    }
+    output.push_str(&text[offset..]);
+    output
+}
+
+fn canonicalize_relative_sum(text: &str) -> String {
+    if is_wrapped_relative_expression(text) {
+        return text.to_string();
+    }
+    for operator in [" + ", " - "] {
+        if let Some((left, right)) = split_relative_top_level(text, operator) {
+            let left = canonicalize_relative_product(left.trim());
+            let right = canonicalize_relative_product(right.trim());
+            if operator == " + " && left.parse::<f64>().is_ok() && is_relative_identifier(&right) {
+                return format!("{} + {right}", canonical_relative_number(&left));
+            }
+            if operator == " - " && is_relative_identifier(&left) {
+                return format!("-{} + {left}", canonical_relative_number(&right));
+            }
+            return format!(
+                "{}{operator}{}",
+                wrap_relative_term(&left),
+                wrap_relative_term(&right)
+            );
+        }
+    }
+    canonicalize_relative_product(text.trim())
+}
+
+fn wrap_relative_term(text: &str) -> String {
+    if is_wrapped_relative_expression(text) {
+        text.to_string()
+    } else {
+        format!("({text})")
+    }
+}
+
+fn is_wrapped_relative_expression(text: &str) -> bool {
+    if !text.starts_with('(') || !text.ends_with(')') {
+        return false;
+    }
+    let mut depth = 0_u32;
+    for (index, byte) in text.bytes().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                let Some(next) = depth.checked_sub(1) else {
+                    return false;
+                };
+                depth = next;
+                if depth == 0 && index + 1 != text.len() {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+fn canonicalize_relative_product(text: &str) -> String {
+    if let Some((left, right)) = split_relative_top_level(text, " * ") {
+        let left = left.trim();
+        let right = right.trim();
+        if is_relative_identifier(left) {
+            return format!("{} * {left}", canonical_relative_number(right));
+        }
+    }
+    if let Some((left, right)) = split_relative_top_level(text, " / ") {
+        let left = left.trim();
+        if is_relative_identifier(left)
+            && let Ok(divisor) = right.trim().parse::<f64>()
+        {
+            return format!("{} * {left}", css_number(divisor.recip()));
+        }
+    }
+    text.to_string()
+}
+
+fn split_relative_top_level<'a>(text: &'a str, operator: &str) -> Option<(&'a str, &'a str)> {
+    let bytes = text.as_bytes();
+    let operator_bytes = operator.as_bytes();
+    let mut depth = 0_u32;
+    let mut offset = 0;
+    while offset + operator_bytes.len() <= bytes.len() {
+        match bytes[offset] {
+            b'(' => depth += 1,
+            b')' => depth = depth.checked_sub(1)?,
+            _ if depth == 0 && bytes[offset..].starts_with(operator_bytes) => {
+                return Some((&text[..offset], &text[offset + operator_bytes.len()..]));
+            }
+            _ => {}
+        }
+        offset += 1;
+    }
+    None
+}
+
+fn canonical_relative_number(text: &str) -> String {
+    text.parse::<f64>()
+        .map_or_else(|_| text.to_string(), css_number)
+}
+
+fn is_relative_identifier(text: &str) -> bool {
+    !text.is_empty()
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        && text
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic())
+}
+
+fn legacy_comma_alpha(text: &str) -> Option<f64> {
+    let (_, body) = text.split_once('(')?;
+    let body = body.strip_suffix(')')?;
+    let parts = crate::css::split_top_level_commas(body);
+    let alpha = parts.get(3)?.trim();
+    if let Some(percentage) = alpha.strip_suffix('%') {
+        percentage
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(|value| value / 100.0)
+    } else {
+        alpha.parse::<f64>().ok()
+    }
 }
 
 fn relative_target(name: &str, tokens: &[&str]) -> Option<(Space, bool, bool, usize)> {
@@ -1329,6 +1557,42 @@ mod tests {
             .serialize_computed(),
             "color(xyz-d50 0.99 0.88 0.77)"
         );
+    }
+
+    #[test]
+    fn relative_specified_values_canonicalize_only_the_origin_color() {
+        for (input, expected) in [
+            (
+                "rgba(from rgb(20%, 40%, 60%, 80%) r g b / alpha)",
+                "rgb(from rgba(51, 102, 153, 0.8) r g b / alpha)",
+            ),
+            (
+                "rgb(from hsl(120deg 20% 50% / .5) r g b / alpha)",
+                "rgb(from rgba(102, 153, 102, 0.5) r g b / alpha)",
+            ),
+            (
+                "rgb(from rgb(from rebeccapurple r g b) r g b)",
+                "rgb(from rgb(from rebeccapurple r g b) r g b)",
+            ),
+            (
+                "rgb(from rebeccapurple r calc(g * .5 + g * .5) 10)",
+                "rgb(from rebeccapurple r calc((0.5 * g) + (0.5 * g)) 10)",
+            ),
+            (
+                "color(from color(xyz 7 -20.5 100) xyz x y z)",
+                "color(from color(xyz-d65 7 -20.5 100) xyz-d65 x y z)",
+            ),
+        ] {
+            assert_eq!(
+                CssColor::parse(input).unwrap().serialize(),
+                expected,
+                "{input}"
+            );
+        }
+        let canonical = "rgb(from rebeccapurple r calc((0.5 * g) + (0.5 * g)) 10)";
+        assert_eq!(CssColor::parse(canonical).unwrap().serialize(), canonical);
+        let canonical = "lab(from lab(50 -30 40) calc(-20 + l) a b)";
+        assert_eq!(CssColor::parse(canonical).unwrap().serialize(), canonical);
     }
 
     #[test]
