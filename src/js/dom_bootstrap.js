@@ -28692,6 +28692,11 @@ let omoikaneUserActivationState;
     return key;
   }
 
+  function cssNumericDimension(unit) {
+    const dimension = cssNumericUnits.get(unit)[0];
+    return dimension.includes("length") || dimension.startsWith("viewport-") ? "length" : dimension;
+  }
+
   function cssNumericInput(value) {
     if (value instanceof CSSNumericValue) return value;
     const number = Number(value);
@@ -28756,10 +28761,11 @@ let omoikaneUserActivationState;
       }
       return result;
     }
-    add(...values) { return cssNumericAdd([this, ...values], 1); }
-    sub(...values) { return cssNumericAdd([this, ...values], -1); }
-    mul(...values) { return cssNumericMultiply([this, ...values]); }
+    add(...values) { return values.length === 0 ? this : cssNumericAdd([this, ...values], 1); }
+    sub(...values) { return values.length === 0 ? this : cssNumericAdd([this, ...values], -1); }
+    mul(...values) { return values.length === 0 ? this : cssNumericMultiply([this, ...values]); }
     div(...values) {
+      if (values.length === 0) return this;
       return cssNumericMultiply([this, ...values.map(value => {
         const numeric = cssNumericInput(value);
         if (numeric instanceof CSSUnitValue && numeric.unit === "number") {
@@ -28769,16 +28775,29 @@ let omoikaneUserActivationState;
         return new CSSMathInvert(numeric);
       })]);
     }
-    min(...values) { return new CSSMathMin(this, ...values.map(cssNumericInput)); }
-    max(...values) { return new CSSMathMax(this, ...values.map(cssNumericInput)); }
+    min(...values) { return values.length === 0 ? this : cssNumericExtremum("min", [this, ...values]); }
+    max(...values) { return values.length === 0 ? this : cssNumericExtremum("max", [this, ...values]); }
     equals(...values) { return values.every(value => this.toString() === cssNumericInput(value).toString()); }
     to(unit) {
-      if (!(this instanceof CSSUnitValue)) throw new TypeError("A compound value cannot be directly converted");
-      return this.__convert(unit);
+      let target;
+      try { target = normalizeCssNumericUnit(unit); }
+      catch (_) { throw new DOMException("The numeric unit is invalid.", "SyntaxError"); }
+      return cssNumericToUnit(this, target);
     }
     toSum(...units) {
-      const value = units.length ? this.to(units[0]) : this;
-      return value instanceof CSSMathSum ? value : new CSSMathSum(value);
+      if (units.length === 0) return this instanceof CSSMathSum ? this : new CSSMathSum(this);
+      const normalized = units.map(unit => {
+        try { return normalizeCssNumericUnit(unit); }
+        catch (_) { throw new DOMException("The numeric unit is invalid.", "SyntaxError"); }
+      });
+      const first = this.to(normalized[0]);
+      for (const unit of normalized.slice(1)) {
+        const firstDimension = cssNumericDimension(normalized[0]);
+        if (cssNumericDimension(unit) !== firstDimension) {
+          throw new TypeError("Incompatible CSS numeric units");
+        }
+      }
+      return new CSSMathSum(first, ...normalized.slice(1).map(unit => new CSSUnitValue(0, unit)));
     }
   }
 
@@ -29140,6 +29159,69 @@ let omoikaneUserActivationState;
     get() { return mutableStyleMapFor(this, this.style); }, enumerable: true, configurable: true,
   });
 
+  function cssNumericToUnit(value, unit) {
+    if (value instanceof CSSUnitValue) return value.__convert(unit);
+    if (value instanceof CSSMathSum) {
+      return new CSSUnitValue(value.values.reduce((sum, item) =>
+        sum + cssNumericToUnit(item, unit).value, 0), unit);
+    }
+    if (value instanceof CSSMathProduct) {
+      let dimensional = null, scalar = 1;
+      for (const item of value.values) {
+        try {
+          const converted = cssNumericToUnit(item, unit);
+          if (dimensional !== null) throw new TypeError("Compound numeric unit");
+          dimensional = converted.value;
+        } catch (error) {
+          const number = cssNumericToUnit(item, "number");
+          scalar *= number.value;
+        }
+      }
+      if (dimensional === null) throw new TypeError("Incompatible CSS numeric units");
+      return new CSSUnitValue(dimensional * scalar, unit);
+    }
+    if (value instanceof CSSMathMin || value instanceof CSSMathMax) {
+      const converted = value.values.map(item => cssNumericToUnit(item, unit).value);
+      return new CSSUnitValue((value instanceof CSSMathMin ? Math.min : Math.max)(...converted), unit);
+    }
+    if (value instanceof CSSMathClamp) {
+      const lower = cssNumericToUnit(value.lower, unit).value;
+      const middle = cssNumericToUnit(value.value, unit).value;
+      const upper = cssNumericToUnit(value.upper, unit).value;
+      return new CSSUnitValue(Math.max(lower, Math.min(middle, upper)), unit);
+    }
+    if (value instanceof CSSMathNegate) {
+      const converted = cssNumericToUnit(value.value, unit);
+      return new CSSUnitValue(-converted.value, unit);
+    }
+    if (value instanceof CSSMathInvert && unit === "number") {
+      const converted = cssNumericToUnit(value.value, "number");
+      if (converted.value === 0) throw new RangeError("Division by zero");
+      return new CSSUnitValue(1 / converted.value, "number");
+    }
+    throw new TypeError("Incompatible CSS numeric units");
+  }
+
+  function cssNumericExtremum(operator, inputs) {
+    const values = inputs.map(cssNumericInput);
+    const dimensions = new Set(values.map(value => {
+      if (value instanceof CSSUnitValue) return cssNumericDimension(value.unit);
+      const type = value.type();
+      return Object.keys(type).find(key => type[key] !== null) || "number";
+    }));
+    if (dimensions.size > 1 && !dimensions.has("percent")) {
+      throw new TypeError("Incompatible CSS numeric units");
+    }
+    if (values.every(value => value instanceof CSSUnitValue)) {
+      try {
+        const first = values[0];
+        const converted = values.map(value => value.__convert(first.unit).value);
+        return new CSSUnitValue((operator === "min" ? Math.min : Math.max)(...converted), first.unit);
+      } catch (_) {}
+    }
+    return operator === "min" ? new CSSMathMin(...values) : new CSSMathMax(...values);
+  }
+
   function cssNumericAdd(inputs, direction) {
     const values = inputs.map(cssNumericInput);
     const first = values[0];
@@ -29148,7 +29230,12 @@ let omoikaneUserActivationState;
         const total = values.slice(1).reduce((sum, value) =>
           sum + direction * value.__convert(first.unit).value, first.value);
         return new CSSUnitValue(total, first.unit);
-      } catch (_) {}
+      } catch (_) {
+        const dimensions = new Set(values.map(value => cssNumericUnits.get(value.unit)[0]));
+        if (!dimensions.has("percent") || dimensions.size > 2) {
+          throw new TypeError("Incompatible CSS numeric units");
+        }
+      }
     }
     const terms = direction === 1 ? values : [values[0], ...values.slice(1).map(value => new CSSMathNegate(value))];
     return new CSSMathSum(...terms);

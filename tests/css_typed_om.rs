@@ -62,6 +62,40 @@ fn numeric_arithmetic_returns_units_or_math_values_without_mutating_inputs() {
 }
 
 #[test]
+fn numeric_math_values_simplify_validate_and_convert() {
+    let mut runtime = runtime();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            r#"(() => {
+              const base = CSS.px(1);
+              const sum = new CSSMathSum(CSS.px(10), CSS.cm(2.54));
+              const product = new CSSMathProduct(CSS.px(4), CSS.number(3));
+              const clamp = new CSSMathClamp(CSS.px(1), CSS.cm(1), CSS.px(20));
+              const errors = [];
+              for (const operation of [
+                () => CSS.px(1).add(CSS.s(1)),
+                () => CSS.px(1).to('lemon'),
+                () => CSS.px(1).toSum('px', 's'),
+              ]) {
+                try { operation(); errors.push('none'); }
+                catch (error) { errors.push(error.name); }
+              }
+              return JSON.stringify([
+                base.add() === base, base.mul() === base,
+                base.add().toString(),
+                sum.to('px').toString(), product.to('px').toString(),
+                clamp.to('px').toString(), new CSSMathNegate(CSS.px(2)).to('px').toString(),
+                errors,
+                CSS.px(1).toSum('cm', 'px').values.map(String)
+              ]);
+            })()"#,
+        ),
+        "[true,true,\"1px\",\"106px\",\"12px\",\"20px\",\"-2px\",[\"TypeError\",\"SyntaxError\",\"TypeError\"],[\"0.026458333333333337cm\",\"0px\"]]"
+    );
+}
+
+#[test]
 fn numeric_factories_cover_typed_om_units_and_reject_unknown_units() {
     let mut runtime = runtime();
     assert_eq!(
