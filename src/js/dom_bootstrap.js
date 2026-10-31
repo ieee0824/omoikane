@@ -25206,7 +25206,7 @@ let omoikaneUserActivationState;
   Object.defineProperty(PerformanceObserver, "supportedEntryTypes", {
     get() {
       return Object.freeze(["navigation", "resource", "mark", "measure", "visibility-state",
-        "paint", "largest-contentful-paint", "longtask", "event", "first-input"]);
+        "paint", "largest-contentful-paint", "longtask", "event", "first-input", "layout-shift"]);
     },
     enumerable: true,
   });
@@ -25524,6 +25524,7 @@ let omoikaneUserActivationState;
       // A redispatched event is measured once.
       if (!eventTimingTypes.has(event.type) || eventTimingRecorded.has(event)) return null;
       eventTimingRecorded.add(event);
+      if (layoutShiftInputTypes.has(event.type)) lastLayoutShiftInputTime = nativePerformanceNow();
       eventCountsMap.set(event.type, eventCountsMap.get(event.type) + 1);
       const processingStart = nativePerformanceNow();
       const startTime = Math.min(Number(event.timeStamp) || processingStart, processingStart);
@@ -25546,6 +25547,66 @@ let omoikaneUserActivationState;
           { ...state, entryType: "first-input" }));
       }
     },
+  };
+
+  // ---- Layout Instability ----
+  // Discrete input that excludes the following 500ms of shifts from CLS.
+  const layoutShiftInputTypes = new Set(["mousedown", "keydown", "pointerdown", "touchstart"]);
+  let lastLayoutShiftInputTime = 0;
+  const layoutShiftState = new WeakMap();
+  class LayoutShiftAttribution {
+    constructor() {
+      const [token, state] = arguments;
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      layoutShiftState.set(this, state);
+    }
+    toJSON() {
+      return { previousRect: this.previousRect, currentRect: this.currentRect };
+    }
+  }
+  class LayoutShift extends PerformanceEntry {
+    constructor() {
+      const [token, state] = arguments;
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      super(performanceEntryToken, "", "layout-shift", state.startTime, 0);
+      layoutShiftState.set(this, state);
+    }
+    toJSON() {
+      return { ...super.toJSON(), value: this.value, hadRecentInput: this.hadRecentInput,
+        lastInputTime: this.lastInputTime, sources: this.sources };
+    }
+  }
+  for (const [prototype, names] of [
+    [LayoutShiftAttribution.prototype, ["node", "previousRect", "currentRect"]],
+    [LayoutShift.prototype, ["value", "hadRecentInput", "lastInputTime", "sources"]],
+  ]) {
+    for (const name of names) {
+      const get = function () {
+        const state = layoutShiftState.get(this);
+        if (!state) throw new TypeError("Illegal invocation");
+        return state[name];
+      };
+      Object.defineProperty(get, "name", { value: "get " + name });
+      Object.defineProperty(prototype, name, { configurable: true, enumerable: true, get });
+    }
+    Object.defineProperty(prototype, "toJSON", { enumerable: true });
+  }
+  // Called by the host after a rendering whose layout moved visible boxes
+  // (layout_shift.rs).
+  globalThis.__omoikane_layout_shift_frame = function(report) {
+    const startTime = nativePerformanceNow();
+    const rect = ([x, y, width, height]) => new DOMRectReadOnly(x, y, width, height);
+    const sources = Object.freeze(report.sources.map(source =>
+      new LayoutShiftAttribution(performanceEntryToken, {
+        node: wrapNode(source.node),
+        previousRect: rect(source.previousRect),
+        currentRect: rect(source.currentRect),
+      })));
+    addObserverOnlyPerformanceEntry(new LayoutShift(performanceEntryToken, {
+      startTime, value: Number(report.score), sources,
+      hadRecentInput: lastLayoutShiftInputTime > 0 && startTime - lastLayoutShiftInputTime <= 500,
+      lastInputTime: lastLayoutShiftInputTime,
+    }));
   };
 
   // Called by the host after a task turn longer than 50ms (long_tasks.rs).
@@ -25877,7 +25938,9 @@ let omoikaneUserActivationState;
     ["PerformanceLongTaskTiming", PerformanceLongTaskTiming],
     ["PerformanceEventTiming", PerformanceEventTiming],
     ["EventCounts", EventCounts],
-    ["TaskAttributionTiming", TaskAttributionTiming]]) {
+    ["TaskAttributionTiming", TaskAttributionTiming],
+    ["LayoutShift", LayoutShift],
+    ["LayoutShiftAttribution", LayoutShiftAttribution]]) {
     Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
   }
   globalThis.PerformanceNavigationTiming = PerformanceNavigationTiming;

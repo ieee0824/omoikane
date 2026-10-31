@@ -73,6 +73,7 @@ mod frame_diagnostics;
 mod highlight;
 mod idle_period;
 mod language;
+mod layout_shift;
 mod layout_structure;
 mod long_tasks;
 mod main_shadow_mask_cache;
@@ -2402,6 +2403,8 @@ struct HostState {
     idle_period_requests: BTreeSet<usize>,
     /// Paint Timing and Largest Contentful Paint scan state.
     paint_timing: paint_timing::State,
+    /// The previous rendering's box positions for Layout Instability.
+    layout_shift: layout_shift::State,
     auxiliary_opener_updaters: HashMap<usize, JsValue>,
     websocket_clients: HashMap<u64, WebSocketConnection>,
     next_websocket_id: u64,
@@ -3376,6 +3379,7 @@ impl HostState {
             idle_period_hooks: HashMap::new(),
             idle_period_requests: BTreeSet::new(),
             paint_timing: paint_timing::State::default(),
+            layout_shift: layout_shift::State::default(),
             auxiliary_opener_updaters: HashMap::new(),
             websocket_clients: HashMap::new(),
             next_websocket_id: 1,
@@ -13053,6 +13057,7 @@ impl JsRuntime {
         self.update_css_transitions()?;
         // The last step of updating the rendering marks paint timing.
         self.mark_paint_timing()?;
+        self.mark_layout_shift()?;
         // Hosts with a bounded task pump need to regain control after this
         // rendering opportunity. Tasks queued by callbacks remain available
         // for the next frame instead of consuming a second task budget here.
@@ -13202,6 +13207,7 @@ impl JsRuntime {
         self.update_css_transitions()?;
         // The last step of updating the rendering marks paint timing.
         self.mark_paint_timing()?;
+        self.mark_layout_shift()?;
         self.run_until_idle_async().await?;
         Ok(callbacks_run)
     }

@@ -17090,7 +17090,7 @@ fn performance_observer_validates_options_and_survives_callback_errors() {
                     throwsTypeError(() => observer.observe({ type: "mark", entryTypes: ["mark"] })) &&
                     throwsTypeError(() => observer.observe({ entryTypes: [] })) && modeError &&
                     Object.isFrozen(PerformanceObserver.supportedEntryTypes) &&
-                    PerformanceObserver.supportedEntryTypes.join(",") === "navigation,resource,mark,measure,visibility-state,paint,largest-contentful-paint,longtask,event,first-input";
+                    PerformanceObserver.supportedEntryTypes.join(",") === "navigation,resource,mark,measure,visibility-state,paint,largest-contentful-paint,longtask,event,first-input,layout-shift";
                 })()"#,
         )
         .unwrap()
