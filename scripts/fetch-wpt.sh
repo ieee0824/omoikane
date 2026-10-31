@@ -653,9 +653,21 @@ collect_pattern \
   "/css/css-view-transitions/active-view-transition-on-non-root.html" \
   "/css/css-view-transitions/active-view-transition-pseudo-class-match.html" \
   "/css/css-view-transitions/document-active-view-transition.html" \
+  "/css/css-view-transitions/duplicate-tag-rejects-capture.html" \
+  "/css/css-view-transitions/pseudo-computed-style-stays-in-sync-with-new-element.html" \
   "/css/css-view-transitions/view-transition-types-one-green-square-ref.html" \
   "/common/reftest-wait.js" \
   "/css/css-view-transitions/support/"
+# Navigation API and View Transitions (#1283).
+collect_pattern \
+  "/navigation-api/navigation-history-entry/current-basic.html" \
+  "/navigation-api/navigation-history-entry/resources/is_uuid.js" \
+  "/navigation-api/currententrychange-event/constructor.html" \
+  "/navigation-api/currententrychange-event/history-pushState.html" \
+  "/navigation-api/currententrychange-event/history-replaceState.html" \
+  "/navigation-api/currententrychange-event/navigation-updateCurrentEntry.html" \
+  "/navigation-api/navigate-event/event-constructor.html" \
+  "/navigation-api/navigation-methods/navigate-info-and-state.html"
 # Canvas 2D drawing (#1292).
 collect_pattern "/html/canvas/element/" "/html/canvas/resources/" "/images/"
 # A pinned revision alone does not prove that newly requested WPT paths exist.

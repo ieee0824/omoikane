@@ -1,0 +1,11 @@
+{
+  "tests": [
+    { "path": "navigation-api/navigation-history-entry/current-basic.html" },
+    { "path": "navigation-api/currententrychange-event/constructor.html" },
+    { "path": "navigation-api/currententrychange-event/history-pushState.html" },
+    { "path": "navigation-api/currententrychange-event/history-replaceState.html" },
+    { "path": "navigation-api/currententrychange-event/navigation-updateCurrentEntry.html" },
+    { "path": "navigation-api/navigate-event/event-constructor.html" },
+    { "path": "navigation-api/navigation-methods/navigate-info-and-state.html" }
+  ]
+}

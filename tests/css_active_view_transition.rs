@@ -96,3 +96,43 @@ fn view_transition_promises_and_skip_preserve_callback_completion() {
         "[\"update\",\"AbortError\",\"update-done\",\"finished\"]"
     );
 }
+
+#[test]
+fn view_transition_builds_old_new_pseudos_and_animation_effects() {
+    let document = TreeBuilder::parse(
+        "<div id='card' style='view-transition-name: card; mix-blend-mode: multiply; opacity: 0.25'></div>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(document).expect("runtime");
+    runtime
+        .eval(
+            "globalThis.snapshot = null;\
+             globalThis.transition = document.startViewTransition(() => {\
+               document.getElementById('card').style.opacity = '0.75';\
+             });\
+             transition.ready.then(() => {\
+               const root = document.documentElement;\
+               const animations = root.getAnimations();\
+               snapshot = [\
+                 getComputedStyle(root, '::view-transition').position,\
+                 getComputedStyle(root, '::view-transition-group(card)').position,\
+                 getComputedStyle(root, '::view-transition-old(card)').position,\
+                 getComputedStyle(root, '::view-transition-new(card)').position,\
+                 animations.some(a => a.effect.pseudoElement === '::view-transition-old(card)'),\
+                 animations.some(a => a.effect.pseudoElement === '::view-transition-new(card)'),\
+                 animations.every(a => a instanceof CSSAnimation)\
+               ];\
+             });",
+        )
+        .expect("start transition");
+    runtime.run_jobs().expect("transition jobs");
+    assert_eq!(
+        runtime
+            .eval("JSON.stringify(snapshot)")
+            .expect("snapshot")
+            .as_string()
+            .expect("json")
+            .to_std_string_escaped(),
+        "[\"absolute\",\"absolute\",\"absolute\",\"absolute\",true,true,true]"
+    );
+}

@@ -1,0 +1,6 @@
+{
+  "tests": [
+    { "path": "css/css-view-transitions/document-active-view-transition.html" },
+    { "path": "css/css-view-transitions/navigation/at-rule-cssom.html" }
+  ]
+}

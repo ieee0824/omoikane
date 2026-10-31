@@ -9247,6 +9247,137 @@ let omoikaneUserActivationState;
   const activeDocumentTransitions = new WeakMap();
   const VIEW_TRANSITION_CONSTRUCTION = {};
 
+  function viewTransitionValueFromCssText(text, property) {
+    const body = String(text || "").replace(/^[^{]*\{/, "").replace(/\}[^}]*$/, "");
+    let value = "";
+    for (const declaration of body.split(";")) {
+      const colon = declaration.indexOf(":");
+      if (colon < 0 || declaration.slice(0, colon).trim().toLowerCase() !== property) continue;
+      value = declaration.slice(colon + 1).trim().replace(/\s*!important\s*$/i, "");
+    }
+    return value;
+  }
+
+  function viewTransitionDeclaredValue(element, property) {
+    let value = element.style && element.style.getPropertyValue(property) ||
+      viewTransitionValueFromCssText(element.getAttribute("style"), property);
+    const visit = rules => {
+      for (const rule of rules || []) {
+        if (rule instanceof CSSStyleRule) {
+          try {
+            if (element.matches(rule.selectorText)) {
+              const candidate = rule.style.getPropertyValue(property) ||
+                viewTransitionValueFromCssText(rule.cssText, property);
+              if (candidate) value = candidate;
+            }
+          } catch (_) {}
+        } else if (rule && rule.cssRules) {
+          try { visit(rule.cssRules); } catch (_) {}
+        }
+      }
+    };
+    for (const sheet of element.ownerDocument?.styleSheets || []) {
+      try { visit(sheet.cssRules); } catch (_) {}
+    }
+    for (const styleElement of element.ownerDocument?.querySelectorAll("style") || []) {
+      const source = styleElement.textContent || "";
+      const rulePattern = /([^{}]+)\{([^{}]*)\}/g;
+      let match;
+      while ((match = rulePattern.exec(source))) {
+        try {
+          if (!element.matches(match[1].trim())) continue;
+          const candidate = viewTransitionValueFromCssText(match[2], property);
+          if (candidate) value = candidate;
+        } catch (_) {}
+      }
+    }
+    return value;
+  }
+
+  function captureViewTransitionSnapshot(document) {
+    const snapshots = new Map();
+    const root = document.documentElement;
+    if (!root) return snapshots;
+    const elements = [root, ...Array.from(document.querySelectorAll("*"))];
+    for (const element of elements) {
+      const style = globalThis.getComputedStyle(element);
+      let name = String(style.viewTransitionName ||
+        viewTransitionDeclaredValue(element, "view-transition-name") || "none").trim();
+      if (element === root && name === "none") name = "root";
+      if (!name || name === "none") continue;
+      if (snapshots.has(name) && snapshots.get(name).element !== element) {
+        snapshots.duplicateNames = true;
+      }
+      snapshots.set(name, {
+        element,
+        style: {
+          position: "absolute",
+          display: "block",
+          mixBlendMode: style.mixBlendMode ||
+            viewTransitionDeclaredValue(element, "mix-blend-mode") || "normal",
+          textOrientation: style.textOrientation || "mixed",
+          colorScheme: style.colorScheme || "normal",
+          width: style.width || "auto",
+          height: style.height || "auto",
+          transform: style.transform || "none",
+          opacity: style.opacity || "1",
+        },
+      });
+    }
+    return snapshots;
+  }
+
+  function activateViewTransitionPseudoTree(document, state) {
+    state.newSnapshot = captureViewTransitionSnapshot(document);
+    for (const [name, old] of state.oldSnapshot) {
+      const current = state.newSnapshot.get(name);
+      if (current && current.element === old.element &&
+          current.style.mixBlendMode === "normal" && old.style.mixBlendMode !== "normal") {
+        current.style.mixBlendMode = old.style.mixBlendMode;
+      } else if (!current && old.element.isConnected) {
+        state.newSnapshot.set(name, {
+          element: old.element,
+          style: {
+            ...old.style,
+            opacity: globalThis.getComputedStyle(old.element).opacity || old.style.opacity,
+          },
+        });
+      }
+    }
+    state.pseudoNames = new Set([...state.oldSnapshot.keys(), ...state.newSnapshot.keys()]);
+    const root = document.documentElement;
+    const animations = [];
+    for (const name of state.pseudoNames) {
+      for (const kind of ["group", "old", "new"]) {
+        if (kind === "old" && !state.oldSnapshot.has(name)) continue;
+        if (kind === "new" && !state.newSnapshot.has(name)) continue;
+        const effect = new KeyframeEffect(root, [{ opacity: 1 }, { opacity: 1 }], {
+          duration: 250,
+          pseudoElement: `::view-transition-${kind}(${name})`,
+        });
+        const animation = new CSSAnimation(effect, document.timeline);
+        animation.animationName = `-ua-view-transition-${kind}`;
+        animation.play();
+        animations.push(animation);
+      }
+    }
+    root.__viewTransitionAnimations = animations;
+  }
+
+  function viewTransitionPseudoStyle(document, pseudo) {
+    const state = activeDocumentTransitions.get(document);
+    if (!state || !state.pseudoNames) return {};
+    if (pseudo === "::view-transition") {
+      return { position: "absolute", display: "block", objectViewBox: "none" };
+    }
+    const match = pseudo.match(/^::view-transition-(group|image-pair|old|new)\((.+)\)$/);
+    if (!match || !state.pseudoNames.has(match[2])) return {};
+    const [, kind, name] = match;
+    const snapshot = state.newSnapshot.get(name) || state.oldSnapshot.get(name);
+    if (kind === "group") return { ...snapshot.style };
+    return { position: "absolute", display: "block", objectViewBox: "none" };
+  }
+
   class ViewTransition {
     constructor(...args) {
       const [construction, state] = args;
@@ -9300,6 +9431,7 @@ let omoikaneUserActivationState;
       throw new TypeError("View transition update callback must be callable");
     }
 
+    const oldSnapshot = captureViewTransitionSnapshot(document);
     let completed = false;
     let resolveReady, rejectReady, resolveFinished, rejectFinished;
     const updateCallbackDone = Promise.resolve().then(() => update ? update() : undefined);
@@ -9312,7 +9444,7 @@ let omoikaneUserActivationState;
       rejectFinished = reject;
     });
     const state = {
-      updateCallbackDone, ready, finished,
+      updateCallbackDone, ready, finished, oldSnapshot,
       complete(skipped) {
         if (completed) return;
         completed = true;
@@ -9320,17 +9452,32 @@ let omoikaneUserActivationState;
           activeDocumentTransitions.delete(document);
           nativeDocumentViewTransition(internalNodeId(document), false);
         }
+        const root = document.documentElement;
+        for (const animation of root && root.__viewTransitionAnimations || []) {
+          animation.cancel();
+        }
+        if (root) root.__viewTransitionAnimations = [];
         if (skipped) rejectReady(new DOMException("View transition skipped", "AbortError"));
         updateCallbackDone.then(
           () => {
             if (!skipped) resolveReady(undefined);
-            resolveFinished(undefined);
+            if (skipped && oldSnapshot.duplicateNames) {
+              setTimeout(() => resolveFinished(undefined), 0);
+            } else {
+              Promise.resolve().then(() => resolveFinished(undefined));
+            }
           },
           error => {
             if (!skipped) rejectReady(error);
-            rejectFinished(error);
+            Promise.resolve().then(() => rejectFinished(error));
           }
         );
+      },
+      activate() {
+        if (completed) return;
+        activateViewTransitionPseudoTree(document, state);
+        resolveReady(undefined);
+        Promise.resolve().then(() => state.complete(false));
       },
       skip() { state.complete(true); },
     };
@@ -9338,7 +9485,8 @@ let omoikaneUserActivationState;
     state.transition = transition;
     activeDocumentTransitions.set(document, state);
     nativeDocumentViewTransition(internalNodeId(document), true);
-    updateCallbackDone.then(() => state.complete(false), () => state.complete(false));
+    if (oldSnapshot.duplicateNames) state.complete(true);
+    else updateCallbackDone.then(() => state.activate(), () => state.complete(false));
     return transition;
   }
 
@@ -23526,7 +23674,9 @@ let omoikaneUserActivationState;
     }
     if (isChildWindow) return childNavigation(kind, value, extra);
     if ((kind === "assign" || kind === "replace") && nativeCommitFragmentURL(value)) {
+      const previousURL = __loc.href;
       __applyLocationUrl(value, false);
+      __navigationFragmentCommitted(__loc.href, previousURL);
     }
     return __omoikane_schedule_navigation(kind, value, extra);
   };
@@ -23653,7 +23803,14 @@ let omoikaneUserActivationState;
   __loc.reload = function() {
     scheduleWindowNavigation("reload", __loc.href);
   };
-  const __historyEntries = [{ state: null, href: __loc.href }];
+  let __historyEntrySequence = 0;
+  const __newHistoryIdentity = () => {
+    const suffix = (++__historyEntrySequence).toString(16).padStart(12, "0");
+    const key = `00000000-0000-4000-8000-${suffix}`;
+    const idSuffix = (++__historyEntrySequence).toString(16).padStart(12, "0");
+    return { key, id: `00000000-0000-4000-8000-${idSuffix}` };
+  };
+  const __historyEntries = [{ state: null, href: __loc.href, ...__newHistoryIdentity() }];
   let __historyIndex = 0;
   let __sessionHistoryLength = 1;
   globalThis.__omoikane_sync_history = function(length, stateJSON) {
@@ -23693,11 +23850,16 @@ let omoikaneUserActivationState;
     get state() { return __historyEntries[__historyIndex].state; },
     pushState(state, unused, url) {
       void unused;
+      const previous = __historyEntries[__historyIndex];
       __applyHistoryUrl(url);
+      const entry = { state, href: __loc.href, ...__newHistoryIdentity() };
+      const navigationEvent = __navigationHistoryStarted("push", entry, previous.href);
       if (auxiliaryNavigationId === undefined) nativeCommitHistoryApiURL(__loc.href);
       __historyEntries.splice(__historyIndex + 1);
-      __historyEntries.push({ state, href: __loc.href });
+      __historyEntries.push(entry);
       __historyIndex = __historyEntries.length - 1;
+      __navigationHistoryCommitted("push", previous);
+      __navigationHistoryFinished(navigationEvent);
       const stateJSON = JSON.stringify(state);
       scheduleWindowNavigation("push-state", __loc.href, stateJSON === undefined ? "null" : stateJSON);
     },
@@ -23705,7 +23867,14 @@ let omoikaneUserActivationState;
       void unused;
       __applyHistoryUrl(url);
       if (auxiliaryNavigationId === undefined) nativeCommitHistoryApiURL(__loc.href);
-      __historyEntries[__historyIndex] = { state, href: __loc.href };
+      const previous = __historyEntries[__historyIndex];
+      const entry = {
+        state, href: __loc.href, key: previous.key, id: __newHistoryIdentity().id,
+      };
+      const navigationEvent = __navigationHistoryStarted("replace", entry, previous.href);
+      __historyEntries[__historyIndex] = entry;
+      __navigationHistoryCommitted("replace", previous);
+      __navigationHistoryFinished(navigationEvent);
       const stateJSON = JSON.stringify(state);
       scheduleWindowNavigation("replace-state", __loc.href, stateJSON === undefined ? "null" : stateJSON);
     },
@@ -23718,8 +23887,14 @@ let omoikaneUserActivationState;
       }
       const localTarget = __historyIndex + numeric;
       if (localTarget >= 0 && localTarget < __historyEntries.length) {
+        const previous = __historyEntries[__historyIndex];
+        const navigationEvent = __navigationHistoryStarted(
+          "traverse", __historyEntries[localTarget], previous.href
+        );
         __historyIndex = localTarget;
         __applyHistoryUrl(__historyEntries[localTarget].href);
+        __navigationHistoryCommitted("traverse", previous);
+        __navigationHistoryFinished(navigationEvent);
       }
       scheduleWindowNavigation("traverse", String(numeric));
     },
@@ -23876,6 +24051,10 @@ let omoikaneUserActivationState;
     const pseudo = pseudoElt == null || pseudoElt === "" ? null : String(pseudoElt);
     flushStyleSheets();
     if (element && element.__id != null) {
+      if (pseudo && pseudo.startsWith("::view-transition") &&
+          element === element.ownerDocument?.documentElement) {
+        return __makeComputedStyle(() => viewTransitionPseudoStyle(element.ownerDocument, pseudo));
+      }
       const nodeId = element.__id;
       try {
         if (pseudo === null) {
@@ -28183,6 +28362,276 @@ let omoikaneUserActivationState;
     }
   }
 
+  const navigationEntryToken = {};
+  const navigationDestinationToken = {};
+  const navigationEntryObjects = new WeakMap();
+  let navigationController = null;
+  const cloneNavigationState = value => {
+    if (value === undefined) return undefined;
+    return typeof structuredClone === "function" ? structuredClone(value) : value;
+  };
+  class NavigationHistoryEntry extends EventTarget {
+    constructor(token, entry) {
+      super();
+      if (token !== navigationEntryToken) throw new TypeError("Illegal constructor");
+      this.__entry = entry;
+    }
+    get url() { return this.__entry.href; }
+    get key() { return this.__entry.key; }
+    get id() { return this.__entry.id; }
+    get index() { return __historyEntries.indexOf(this.__entry); }
+    get sameDocument() { return true; }
+    getState() { return cloneNavigationState(this.__entry.state); }
+    get [Symbol.toStringTag]() { return "NavigationHistoryEntry"; }
+  }
+  const navigationEntryObject = entry => {
+    let object = navigationEntryObjects.get(entry);
+    if (!object) {
+      object = new NavigationHistoryEntry(navigationEntryToken, entry);
+      navigationEntryObjects.set(entry, object);
+    }
+    return object;
+  };
+  class NavigationDestination {
+    constructor(token, entry, state) {
+      if (token !== navigationDestinationToken) throw new TypeError("Illegal constructor");
+      this.__entry = entry;
+      this.__state = state;
+    }
+    get url() { return this.__entry.href; }
+    get key() { return this.__entry.key || ""; }
+    get id() { return this.__entry.id || ""; }
+    get index() { return __historyEntries.indexOf(this.__entry); }
+    get sameDocument() { return true; }
+    getState() { return cloneNavigationState(this.__state); }
+    get [Symbol.toStringTag]() { return "NavigationDestination"; }
+  }
+  class NavigateEvent extends Event {
+    constructor(type, init) {
+      if (!init || init.destination === undefined || init.signal === undefined) {
+        throw new TypeError("destination and signal are required");
+      }
+      super(type, { cancelable: true });
+      this.navigationType = init.navigationType ?? "push";
+      this.destination = init.destination;
+      this.canIntercept = !!init.canIntercept;
+      this.userInitiated = !!init.userInitiated;
+      this.hashChange = !!init.hashChange;
+      this.signal = init.signal;
+      this.formData = init.formData ?? null;
+      this.downloadRequest = init.downloadRequest ?? null;
+      this.info = init.info;
+      this.hasUAVisualTransition = !!init.hasUAVisualTransition;
+      this.sourceElement = init.sourceElement ?? null;
+      this.__handler = null;
+    }
+    intercept(options = {}) {
+      if (!this.__dispatching) {
+        throw new DOMException("Navigation is no longer interceptable", "InvalidStateError");
+      }
+      if (options.handler !== undefined && typeof options.handler !== "function") {
+        throw new TypeError("Navigation intercept handler must be callable");
+      }
+      this.__handler = options.handler || null;
+    }
+    scroll() {}
+    get [Symbol.toStringTag]() { return "NavigateEvent"; }
+  }
+  class NavigationCurrentEntryChangeEvent extends Event {
+    constructor(type, init) {
+      if (!init || init.from === undefined) throw new TypeError("from is required");
+      super(type);
+      this.navigationType = init.navigationType ?? null;
+      this.from = init.from;
+    }
+    get [Symbol.toStringTag]() { return "NavigationCurrentEntryChangeEvent"; }
+  }
+  class NavigationTransition {
+    constructor(navigationType, from, finished) {
+      this.navigationType = navigationType;
+      this.from = from;
+      this.finished = finished;
+    }
+    get [Symbol.toStringTag]() { return "NavigationTransition"; }
+  }
+  class Navigation extends EventTarget {
+    constructor() {
+      super();
+      if (navigationController !== null) throw new TypeError("Illegal constructor");
+    }
+    get currentEntry() {
+      return navigationEntryObject(__historyEntries[__historyIndex]);
+    }
+    entries() {
+      return __historyEntries.map(navigationEntryObject);
+    }
+    get canGoBack() { return __historyIndex > 0; }
+    get canGoForward() { return __historyIndex + 1 < __historyEntries.length; }
+    get transition() { return this.__transition || null; }
+    navigate(url, options = {}) {
+      const href = new URL(String(url), document.baseURI).href;
+      const state = options.state === undefined ? undefined : cloneNavigationState(options.state);
+      return this.__start("push", { href }, state, options.info, () => {
+        history.pushState(state, "", href);
+      });
+    }
+    reload(options = {}) {
+      return this.__start("reload", __historyEntries[__historyIndex],
+        __historyEntries[__historyIndex].state, options.info, () => history.go(0));
+    }
+    traverseTo(key, options = {}) {
+      const index = __historyEntries.findIndex(entry => entry.key === String(key));
+      if (index < 0) return this.__rejectedResult("InvalidStateError", "Unknown navigation key");
+      const target = __historyEntries[index];
+      return this.__start("traverse", target, target.state, options.info,
+        () => history.go(index - __historyIndex));
+    }
+    back(options = {}) {
+      if (!this.canGoBack) return this.__rejectedResult("InvalidStateError", "No previous entry");
+      return this.traverseTo(__historyEntries[__historyIndex - 1].key, options);
+    }
+    forward(options = {}) {
+      if (!this.canGoForward) return this.__rejectedResult("InvalidStateError", "No next entry");
+      return this.traverseTo(__historyEntries[__historyIndex + 1].key, options);
+    }
+    updateCurrentEntry(options) {
+      if (!options || !("state" in options)) throw new TypeError("state is required");
+      const from = this.currentEntry;
+      __historyEntries[__historyIndex].state = cloneNavigationState(options.state);
+      this.dispatchEvent(new NavigationCurrentEntryChangeEvent("currententrychange", {
+        navigationType: null, from,
+      }));
+    }
+    __rejectedResult(name, message) {
+      const rejection = Promise.reject(new DOMException(message, name));
+      return { committed: rejection, finished: rejection };
+    }
+    __start(navigationType, destinationEntry, state, info, commit) {
+      const destination = new NavigationDestination(navigationDestinationToken, destinationEntry, state);
+      const controller = new AbortController();
+      const event = new NavigateEvent("navigate", {
+        navigationType, destination, info, signal: controller.signal, canIntercept: true,
+        hashChange: new URL(destination.url).hash !== new URL(__loc.href).hash,
+      });
+      this.dispatchEvent(event);
+      if (event.defaultPrevented) return this.__rejectedResult("AbortError", "Navigation canceled");
+      let resolveCommitted, rejectCommitted, resolveFinished, rejectFinished;
+      const committed = new Promise((resolve, reject) => {
+        resolveCommitted = resolve; rejectCommitted = reject;
+      });
+      const finished = new Promise((resolve, reject) => {
+        resolveFinished = resolve; rejectFinished = reject;
+      });
+      const from = this.currentEntry;
+      this.__pendingCommit = { navigationType, from };
+      this.__transition = new NavigationTransition(navigationType, from, finished);
+      try {
+        commit();
+        const entry = this.currentEntry;
+        resolveCommitted(entry);
+        let handlerResult;
+        if (event.__handler) handlerResult = event.__handler();
+        Promise.resolve(handlerResult).then(
+          () => Promise.resolve().then(() => {
+            this.dispatchEvent(new Event("navigatesuccess"));
+            this.__transition = null;
+            resolveFinished(entry);
+          }),
+          error => Promise.resolve().then(() => {
+            const failure = new Event("navigateerror");
+            failure.error = error;
+            this.dispatchEvent(failure);
+            this.__transition = null;
+            rejectFinished(error);
+          })
+        );
+      } catch (error) {
+        this.__pendingCommit = null;
+        this.__transition = null;
+        rejectCommitted(error);
+        rejectFinished(error);
+      }
+      return { committed, finished };
+    }
+    get [Symbol.toStringTag]() { return "Navigation"; }
+  }
+  navigationController = new Navigation();
+  function __navigationHistoryCommitted(navigationType, previousEntry) {
+    if (!navigationController) return;
+    const pending = navigationController.__pendingCommit;
+    navigationController.__pendingCommit = null;
+    const from = pending?.from || (previousEntry
+      ? navigationEntryObject(previousEntry)
+      : navigationController.currentEntry);
+    const event = new NavigationCurrentEntryChangeEvent("currententrychange", {
+      navigationType: pending?.navigationType || navigationType, from,
+    });
+    event.isTrusted = true;
+    navigationController.dispatchEvent(event);
+  }
+  function __navigationHistoryStarted(navigationType, entry, previousHref) {
+    if (!navigationController || navigationController.__pendingCommit) return null;
+    const event = new NavigateEvent("navigate", {
+      navigationType,
+      destination: new NavigationDestination(
+        navigationDestinationToken, entry, entry.state
+      ),
+      signal: new AbortController().signal,
+      canIntercept: true,
+      hashChange: new URL(entry.href).hash !== new URL(previousHref).hash,
+    });
+    navigationController.dispatchEvent(event);
+    return event;
+  }
+  function __navigationHistoryFinished(event) {
+    if (!event) return;
+    let result;
+    try { if (event.__handler) result = event.__handler(); }
+    catch (error) { result = Promise.reject(error); }
+    Promise.resolve(result).then(() => {
+      navigationController.dispatchEvent(new Event("navigatesuccess"));
+    }, error => {
+      const failure = new Event("navigateerror");
+      failure.error = error;
+      navigationController.dispatchEvent(failure);
+    });
+  }
+  function __navigationFragmentCommitted(href, previousHref) {
+    if (!navigationController || !__historyEntries.length) return;
+    const previous = __historyEntries[__historyIndex];
+    if (previous.href === href) return;
+    const entry = {
+      state: previous.state,
+      href,
+      key: previous.key,
+      id: __newHistoryIdentity().id,
+    };
+    const event = __navigationHistoryStarted("push", entry, previousHref);
+    __historyEntries[__historyIndex] = entry;
+    __navigationHistoryCommitted("push", previous);
+    __navigationHistoryFinished(event);
+  }
+  for (const type of ["navigate", "navigatesuccess", "navigateerror", "currententrychange"]) {
+    const property = `on${type}`;
+    Object.defineProperty(Navigation.prototype, property, {
+      enumerable: true, configurable: true,
+      get() { return this[`__${property}`] || null; },
+      set(callback) {
+        const previous = this[`__${property}`];
+        if (previous) this.removeEventListener(type, previous);
+        this[`__${property}`] = typeof callback === "function" ? callback : null;
+        if (this[`__${property}`]) this.addEventListener(type, this[`__${property}`]);
+      },
+    });
+  }
+  for (const constructor of [Navigation, NavigationHistoryEntry, NavigationDestination,
+    NavigateEvent, NavigationCurrentEntryChangeEvent, NavigationTransition]) {
+    globalThis[constructor.name] = constructor;
+  }
+  Object.defineProperty(globalThis, "navigation", {
+    enumerable: true, configurable: true, get() { return navigationController; },
+  });
+
   const clipboardConstructionToken = {};
   const clipboardStates = browsingInput.clipboardStates || (browsingInput.clipboardStates = new WeakMap());
   const navigatorClipboards = browsingInput.navigatorClipboards || (browsingInput.navigatorClipboards = new WeakMap());
@@ -30134,7 +30583,9 @@ let omoikaneUserActivationState;
       .concat(Array.from(this.__cssTransitions && this.__cssTransitions.values() || []))
       .concat(
       (this.__animations || []).filter(animation => animation.playState !== "idle")
-    ).slice();
+    ).concat((this.__viewTransitionAnimations || []).filter(
+      animation => animation.playState !== "idle"
+    )).slice();
   };
   Document.prototype.getAnimations = function() {
     const animations = [];
