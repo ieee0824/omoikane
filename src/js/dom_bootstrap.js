@@ -23254,6 +23254,7 @@ let omoikaneUserActivationState;
     for (const record of records) {
       const target = wrapNode(record.nodeId);
       if (!target) continue;
+      updateCssTransitionForEvent(target, record);
       target.dispatchEvent(new TransitionEvent(record.type, {
         bubbles: true,
         propertyName: record.propertyName,
@@ -28493,14 +28494,275 @@ let omoikaneUserActivationState;
     permissionStatusEntries.clear();
   };
 
-  class Animation extends EventTarget {
+  function animationTimingInput(options) {
+    if (typeof options === "number") return { duration: options };
+    if (options === null || options === undefined) return {};
+    if (typeof options !== "object" && typeof options !== "function") {
+      throw new TypeError("Animation timing must be a number or dictionary");
+    }
+    return options;
+  }
+
+  function ownedKeyframeSequence(input) {
+    if (input === null || input === undefined) return [];
+    let frames;
+    if (Array.isArray(input) || typeof input[Symbol.iterator] === "function") {
+      frames = Array.from(input);
+    } else {
+      const source = input;
+      const properties = Object.keys(source).filter(name =>
+        !["offset", "easing", "composite"].includes(name)
+      );
+      const lengths = properties.map(name => Array.isArray(source[name]) ? source[name].length : 1);
+      const count = Math.max(1, ...lengths);
+      frames = Array.from({ length: count }, (_, index) => {
+        const frame = {};
+        for (const name of properties) {
+          const values = Array.isArray(source[name]) ? source[name] : [source[name]];
+          if (index < values.length) frame[name] = values[index];
+        }
+        for (const name of ["offset", "easing", "composite"]) {
+          if (!(name in source)) continue;
+          const values = Array.isArray(source[name]) ? source[name] : [source[name]];
+          if (index < values.length) frame[name] = values[index];
+        }
+        return frame;
+      });
+    }
+    const owned = frames.map(frame => {
+      if (frame === null || (typeof frame !== "object" && typeof frame !== "function")) {
+        throw new TypeError("Each keyframe must be an object");
+      }
+      const copy = {};
+      for (const name of Object.keys(frame)) copy[name] = frame[name];
+      return copy;
+    });
+    let previousOffset = -Infinity;
+    for (const frame of owned) {
+      if (frame.offset === undefined || frame.offset === null) continue;
+      const offset = Number(frame.offset);
+      if (!Number.isFinite(offset) || offset < 0 || offset > 1 || offset < previousOffset) {
+        throw new TypeError("Keyframe offsets must be ordered numbers between 0 and 1");
+      }
+      frame.offset = offset;
+      previousOffset = offset;
+    }
+    const explicit = owned.map((frame, index) => frame.offset === undefined || frame.offset === null
+      ? null : { index, value: frame.offset });
+    if (owned.length && explicit.every(value => value === null)) {
+      owned.forEach((frame, index) => {
+        frame.computedOffset = owned.length === 1 ? 1 : index / (owned.length - 1);
+      });
+    } else {
+      const anchors = [{ index: 0, value: explicit[0]?.value ?? 0 }];
+      for (const value of explicit) if (value !== null && value.index !== 0) anchors.push(value);
+      if (anchors.at(-1).index !== owned.length - 1) {
+        anchors.push({ index: owned.length - 1, value: 1 });
+      }
+      for (let anchor = 0; anchor < anchors.length - 1; anchor++) {
+        const from = anchors[anchor], to = anchors[anchor + 1];
+        for (let index = from.index; index <= to.index; index++) {
+          const distance = to.index - from.index;
+          owned[index].computedOffset = distance === 0 ? to.value :
+            from.value + (to.value - from.value) * (index - from.index) / distance;
+        }
+      }
+    }
+    for (const frame of owned) {
+      frame.offset = frame.offset === undefined ? null : frame.offset;
+      frame.easing = frame.easing === undefined ? "linear" : String(frame.easing);
+      frame.composite = frame.composite === undefined ? "auto" : String(frame.composite);
+    }
+    return owned;
+  }
+
+  class AnimationEffect {
+    constructor() {
+      if (new.target === AnimationEffect) throw new TypeError("Illegal constructor");
+    }
+    getTiming() { return { ...this.__timing }; }
+    getComputedTiming() {
+      const duration = Number(this.__timing.duration) || 0;
+      const iterations = this.__timing.iterations === Infinity ? Infinity :
+        Math.max(0, Number(this.__timing.iterations) || 1);
+      return { ...this.getTiming(), activeDuration: duration * iterations,
+        endTime: (Number(this.__timing.delay) || 0) + duration * iterations,
+        localTime: null, progress: null, currentIteration: null };
+    }
+    updateTiming(options = {}) {
+      const timing = animationTimingInput(options);
+      for (const name of ["delay", "endDelay", "fill", "iterationStart", "iterations",
+        "duration", "direction", "easing"]) {
+        if (name in timing) this.__timing[name] = timing[name];
+      }
+    }
+  }
+
+  class KeyframeEffect extends AnimationEffect {
     constructor(target, keyframes, options = {}) {
       super();
-      const timing = typeof options === "number" ? { duration: options } : (options || {});
-      this.effect = { target, getKeyframes: () => this._keyframes.slice() };
-      this.timeline = globalThis.document && globalThis.document.timeline || null;
+      if (target instanceof KeyframeEffect && arguments.length === 1) {
+        this.__target = target.target;
+        this.__pseudoElement = target.pseudoElement;
+        this.__iterationComposite = target.iterationComposite;
+        this.__composite = target.composite;
+        this.__timing = target.getTiming();
+        this.__keyframes = target.getKeyframes();
+        return;
+      }
+      if (target !== null && target !== undefined && !(target instanceof Element)) {
+        throw new TypeError("KeyframeEffect target must be an Element or null");
+      }
+      const timing = animationTimingInput(options);
+      this.__target = target ?? null;
+      this.__pseudoElement = timing.pseudoElement === undefined ? null : String(timing.pseudoElement);
+      this.__iterationComposite = timing.iterationComposite === "accumulate" ? "accumulate" : "replace";
+      this.__composite = ["add", "accumulate"].includes(timing.composite) ? timing.composite : "replace";
+      this.__timing = {
+        delay: Number(timing.delay) || 0, endDelay: Number(timing.endDelay) || 0,
+        fill: timing.fill === undefined ? "auto" : String(timing.fill),
+        iterationStart: Number(timing.iterationStart) || 0,
+        iterations: timing.iterations === Infinity ? Infinity : Math.max(0, Number(timing.iterations) || 1),
+        duration: timing.duration === "auto" ? "auto" : Math.max(0, Number(timing.duration) || 0),
+        direction: timing.direction === undefined ? "normal" : String(timing.direction),
+        easing: timing.easing === undefined ? "linear" : String(timing.easing),
+      };
+      this.__keyframes = ownedKeyframeSequence(keyframes);
+    }
+    get target() { return this.__target; }
+    set target(value) {
+      if (value !== null && !(value instanceof Element)) throw new TypeError("Invalid target");
+      this.__target = value;
+    }
+    get pseudoElement() { return this.__pseudoElement; }
+    set pseudoElement(value) { this.__pseudoElement = value === null ? null : String(value); }
+    get iterationComposite() { return this.__iterationComposite; }
+    set iterationComposite(value) {
+      const normalized = String(value);
+      if (!["replace", "accumulate"].includes(normalized)) throw new TypeError("Invalid iterationComposite");
+      this.__iterationComposite = normalized;
+    }
+    get composite() { return this.__composite; }
+    set composite(value) {
+      const normalized = String(value);
+      if (!["replace", "add", "accumulate"].includes(normalized)) throw new TypeError("Invalid composite");
+      this.__composite = normalized;
+    }
+    getKeyframes() { return this.__keyframes.map(frame => ({ ...frame })); }
+    setKeyframes(keyframes) { this.__keyframes = ownedKeyframeSequence(keyframes); }
+  }
+
+  class AnimationTimeline {
+    get currentTime() { return null; }
+  }
+
+  class DocumentTimeline extends AnimationTimeline {
+    constructor(options = {}) { super(); this.originTime = Number(options && options.originTime) || 0; }
+    get currentTime() { return 0; }
+  }
+
+  class CSSUnitValue {
+    constructor(value, unit) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) throw new TypeError("CSSUnitValue requires a finite value");
+      this.value = number;
+      this.unit = String(unit);
+    }
+    toString() { return String(this.value) + (this.unit === "percent" ? "%" : this.unit); }
+  }
+
+  function timelineAxis(value) {
+    const axis = value === undefined ? "block" : String(value);
+    if (!["block", "inline", "x", "y"].includes(axis)) throw new TypeError("Invalid timeline axis");
+    return axis;
+  }
+
+  class ScrollTimeline extends AnimationTimeline {
+    constructor(options = {}) {
+      super();
+      if (options === null) options = {};
+      if (typeof options !== "object" && typeof options !== "function") {
+        throw new TypeError("ScrollTimeline options must be a dictionary");
+      }
+      const fallback = globalThis.document &&
+        (globalThis.document.scrollingElement || globalThis.document.documentElement);
+      const source = options.source === undefined ? fallback : options.source;
+      if (source !== null && !(source instanceof Element)) throw new TypeError("Invalid scroll source");
+      this.__source = source || null;
+      this.__axis = timelineAxis(options.axis);
+    }
+    get source() { return this.__source; }
+    get axis() { return this.__axis; }
+    get currentTime() {
+      const source = this.source;
+      if (!source) return null;
+      const horizontal = this.axis === "x" || this.axis === "inline";
+      const position = Number(horizontal ? source.scrollLeft : source.scrollTop) || 0;
+      const extent = Number(horizontal ? source.scrollWidth : source.scrollHeight) || 0;
+      const viewport = Number(horizontal ? source.clientWidth : source.clientHeight) || 0;
+      const range = extent - viewport;
+      return range > 0 ? new CSSUnitValue(position / range * 100, "percent") : null;
+    }
+  }
+
+  class ViewTimeline extends ScrollTimeline {
+    constructor(options) {
+      if (options === null || options === undefined ||
+          (typeof options !== "object" && typeof options !== "function")) {
+        throw new TypeError("ViewTimeline options must be a dictionary");
+      }
+      const subject = options.subject;
+      if (!(subject instanceof Element)) throw new TypeError("ViewTimeline requires a subject");
+      super({ source: options.source === undefined ? subject.parentElement : options.source,
+        axis: options.axis });
+      this.__subject = subject;
+    }
+    get subject() { return this.__subject; }
+    __geometry() {
+      const source = this.source, subject = this.subject;
+      if (!source || !subject || typeof subject.getBoundingClientRect !== "function") return null;
+      const rect = subject.getBoundingClientRect();
+      const sourceRect = source.getBoundingClientRect();
+      const horizontal = this.axis === "x" || this.axis === "inline";
+      const viewportStart = horizontal ? sourceRect.left : sourceRect.top;
+      const viewportSize = horizontal ? source.clientWidth : source.clientHeight;
+      const subjectStart = horizontal ? rect.left : rect.top;
+      const subjectSize = horizontal ? rect.width : rect.height;
+      return { viewportStart, viewportSize, subjectStart, subjectSize };
+    }
+    get startOffset() {
+      const geometry = this.__geometry();
+      return new CSSUnitValue(geometry ? geometry.subjectStart - geometry.viewportStart -
+        geometry.viewportSize : 0, "px");
+    }
+    get endOffset() {
+      const geometry = this.__geometry();
+      return new CSSUnitValue(geometry ? geometry.subjectStart - geometry.viewportStart +
+        geometry.subjectSize : 0, "px");
+    }
+    get currentTime() {
+      const geometry = this.__geometry();
+      if (!geometry || geometry.viewportSize <= 0 || geometry.subjectSize < 0) return null;
+      const progress = (geometry.viewportStart + geometry.viewportSize - geometry.subjectStart) /
+        (geometry.viewportSize + geometry.subjectSize);
+      return new CSSUnitValue(Math.min(1, Math.max(0, progress)) * 100, "percent");
+    }
+  }
+
+  class Animation extends EventTarget {
+    constructor(effect = null, timeline = undefined) {
+      super();
+      if (effect !== null && !(effect instanceof AnimationEffect)) {
+        throw new TypeError("Animation effect must be an AnimationEffect or null");
+      }
+      if (timeline !== undefined && timeline !== null && !(timeline instanceof AnimationTimeline)) {
+        throw new TypeError("Animation timeline must be an AnimationTimeline or null");
+      }
+      this.effect = effect;
+      this.timeline = timeline === undefined ? globalThis.document && globalThis.document.timeline || null : timeline;
+      const timing = effect ? effect.getTiming() : {};
       this.id = String(timing.id || "");
-      this.currentTime = 0;
+      this._currentTime = 0;
       this.startTime = null;
       this.playbackRate = 1;
       this.playState = "idle";
@@ -28508,8 +28770,8 @@ let omoikaneUserActivationState;
       this.pending = false;
       this.onfinish = null;
       this.oncancel = null;
-      this._target = target;
-      this._keyframes = Array.isArray(keyframes) ? keyframes.slice() : [keyframes || {}];
+      this._target = effect && effect.target;
+      this._keyframes = effect ? effect.getKeyframes() : [];
       this._duration = Math.max(0, Number(timing.duration) || 0);
       this._delay = Math.max(0, Number(timing.delay) || 0);
       this._iterations = timing.iterations === Infinity ? Infinity : Math.max(0, Number(timing.iterations) || 1);
@@ -28517,8 +28779,14 @@ let omoikaneUserActivationState;
       this._finishedResolve = null;
       this.finished = new Promise(resolve => { this._finishedResolve = resolve; });
       this.ready = Promise.resolve(this);
-      this.play();
     }
+    get currentTime() {
+      if (this.timeline && this.timeline.currentTime instanceof CSSUnitValue) {
+        return this.timeline.currentTime;
+      }
+      return this._currentTime;
+    }
+    set currentTime(value) { this._currentTime = value; }
     _applyFinalKeyframe() {
       const frame = this._keyframes[this._keyframes.length - 1];
       if (!frame || !this._target || !this._target.style) return;
@@ -28542,7 +28810,7 @@ let omoikaneUserActivationState;
       if (this._timer !== null) clearTimeout(this._timer);
       this.playState = "running";
       this.pending = false;
-      if (this._iterations !== Infinity) {
+      if (!(this.timeline && this.timeline.currentTime instanceof CSSUnitValue) && this._iterations !== Infinity) {
         const total = this._delay + this._duration * this._iterations;
         this._timer = setTimeout(() => this._complete(), total);
       }
@@ -28568,14 +28836,124 @@ let omoikaneUserActivationState;
     commitStyles() { this._applyFinalKeyframe(); }
   }
 
+  class CSSAnimation extends Animation {
+    constructor(effect = null, timeline = undefined) { super(effect, timeline); this.animationName = ""; }
+  }
+
+  class CSSTransition extends Animation {
+    constructor(effect = null, timeline = undefined) { super(effect, timeline); this.transitionProperty = ""; }
+  }
+
+  function cssAnimationMilliseconds(value) {
+    const text = String(value || "0s").trim().toLowerCase();
+    const number = Number.parseFloat(text);
+    if (!Number.isFinite(number)) return 0;
+    return text.endsWith("ms") ? number : number * 1000;
+  }
+
+  function cssKeyframePropertyName(name) {
+    return String(name).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+  }
+
+  function cssKeyframesForName(name) {
+    let found = null;
+    const visit = rules => {
+      for (const rule of rules || []) {
+        if (rule instanceof CSSKeyframesRule && rule.name === name) found = rule;
+        else if (rule && rule.cssRules) visit(rule.cssRules);
+      }
+    };
+    for (const sheet of globalThis.document && globalThis.document.styleSheets || []) {
+      try { visit(sheet.cssRules); } catch (_) {}
+    }
+    if (!found) return [];
+    const frames = [];
+    for (const rule of found.cssRules) {
+      const declarations = JSON.parse(__omoikane_css_declarations(rule.style.cssText));
+      for (const key of rule.keyText.split(",")) {
+        const frame = { offset: Number.parseFloat(key) / 100 };
+        for (const [property, value] of declarations) {
+          if (property === "animation-timing-function") frame.easing = value;
+          else if (property === "animation-composition") frame.composite = value;
+          else frame[cssKeyframePropertyName(property)] = value;
+        }
+        frames.push(frame);
+      }
+    }
+    return frames.sort((left, right) => left.offset - right.offset);
+  }
+
+  function cssAnimationsForElement(element, pseudoElement = null) {
+    let style;
+    try { style = getComputedStyle(element, pseudoElement); } catch (_) { return []; }
+    const names = String(style.animationName || "none").split(",").map(value => value.trim());
+    const durations = String(style.animationDuration || "0s").split(",").map(value => value.trim());
+    const delays = String(style.animationDelay || "0s").split(",").map(value => value.trim());
+    const easings = String(style.animationTimingFunction || "ease").split(",").map(value => value.trim());
+    const compositions = String(style.animationComposition || "replace").split(",").map(value => value.trim());
+    const active = names.filter(name => name && name.toLowerCase() !== "none");
+    const storageKey = pseudoElement || "";
+    if (!element.__cssAnimations) element.__cssAnimations = new Map();
+    if (!active.length) {
+      element.__cssAnimations.delete(storageKey);
+      return [];
+    }
+    const existing = element.__cssAnimations.get(storageKey) || [];
+    const animations = active.map((name, index) => {
+      let animation = existing[index];
+      const frames = cssKeyframesForName(name);
+      if (!(animation instanceof CSSAnimation) || animation.animationName !== name) {
+        const effect = new KeyframeEffect(element, frames, {
+          duration: cssAnimationMilliseconds(durations[index % durations.length]),
+          delay: cssAnimationMilliseconds(delays[index % delays.length]),
+          easing: easings[index % easings.length] || "ease",
+          composite: compositions[index % compositions.length] || "replace",
+          pseudoElement,
+        });
+        animation = new CSSAnimation(effect, element.ownerDocument && element.ownerDocument.timeline);
+        animation.animationName = name;
+        animation.play();
+      } else {
+        animation.effect.setKeyframes(frames);
+      }
+      return animation;
+    });
+    element.__cssAnimations.set(storageKey, animations);
+    return animations;
+  }
+
+  function updateCssTransitionForEvent(element, record) {
+    if (!element.__cssTransitions) element.__cssTransitions = new Map();
+    const property = String(record.propertyName || "");
+    if (record.type === "transitionrun") {
+      const effect = new KeyframeEffect(element, [], { pseudoElement: record.pseudoElement || null });
+      const transition = new CSSTransition(effect, element.ownerDocument && element.ownerDocument.timeline);
+      transition.transitionProperty = property;
+      transition.playState = "running";
+      element.__cssTransitions.set(property, transition);
+    } else if (record.type === "transitionend" || record.type === "transitioncancel") {
+      const transition = element.__cssTransitions.get(property);
+      if (transition) transition.playState = record.type === "transitionend" ? "finished" : "idle";
+      element.__cssTransitions.delete(property);
+    }
+  }
+
   Element.prototype.animate = function(keyframes, options) {
-    const animation = new Animation(this, keyframes, options);
+    const effect = new KeyframeEffect(this, keyframes, options);
+    const animation = new Animation(effect, this.ownerDocument && this.ownerDocument.timeline);
+    animation.play();
     if (!this.__animations) this.__animations = [];
     this.__animations.push(animation);
     return animation;
   };
   Element.prototype.getAnimations = function() {
-    return (this.__animations || []).filter(animation => animation.playState !== "idle").slice();
+    return cssAnimationsForElement(this)
+      .concat(cssAnimationsForElement(this, "::before"))
+      .concat(cssAnimationsForElement(this, "::after"))
+      .concat(Array.from(this.__cssTransitions && this.__cssTransitions.values() || []))
+      .concat(
+      (this.__animations || []).filter(animation => animation.playState !== "idle")
+    ).slice();
   };
   Document.prototype.getAnimations = function() {
     const animations = [];
@@ -28587,9 +28965,18 @@ let omoikaneUserActivationState;
     return animations;
   };
   if (!globalThis.document.timeline) {
-    globalThis.document.timeline = { currentTime: 0 };
+    globalThis.document.timeline = new DocumentTimeline();
   }
+  globalThis.AnimationEffect = AnimationEffect;
+  globalThis.KeyframeEffect = KeyframeEffect;
+  globalThis.AnimationTimeline = AnimationTimeline;
+  globalThis.DocumentTimeline = DocumentTimeline;
+  if (globalThis.CSSUnitValue === undefined) globalThis.CSSUnitValue = CSSUnitValue;
+  globalThis.ScrollTimeline = ScrollTimeline;
+  globalThis.ViewTimeline = ViewTimeline;
   globalThis.Animation = Animation;
+  globalThis.CSSAnimation = CSSAnimation;
+  globalThis.CSSTransition = CSSTransition;
 
   class AbortSignal extends EventTarget {
     constructor() {

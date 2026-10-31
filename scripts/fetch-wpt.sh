@@ -516,6 +516,16 @@ collect_pattern \
   "/css/css-transitions/support/helper.js" \
   "/css/css-transitions/events-001.html" \
   "/css/css-transitions/events-002.html"
+collect_pattern \
+  "/css/css-animations/KeyframeEffect-getKeyframes.tentative.html" \
+  "/css/css-animations/KeyframeEffect-setKeyframes.tentative.html" \
+  "/css/css-animations/KeyframeEffect-target.tentative.html" \
+  "/css/css-animations/support/testcommon.js" \
+  "/css/css-animations/parsing/animation-composition-valid.tentative.html" \
+  "/css/css-animations/parsing/animation-composition-invalid.tentative.html" \
+  "/css/css-transitions/parsing/transition-behavior.html" \
+  "/scroll-animations/scroll-timelines/constructor.html" \
+  "/scroll-animations/scroll-timelines/testcommon.js"
 collect_pattern "/custom-elements/form-associated/" "/html/semantics/forms/form-submission-0/resources/targetted-form.js"
 collect_pattern "/common/blank.html" "/FileAPI/file/resources/echo-content-escaped.py"
 collect_pattern \

@@ -736,6 +736,7 @@ impl Parser {
                         || name.eq_ignore_ascii_case("layer")
                         || name.eq_ignore_ascii_case("scope")
                         || name.eq_ignore_ascii_case("container")
+                        || name.eq_ignore_ascii_case("starting-style")
                     {
                         if name.eq_ignore_ascii_case("scope") {
                             self.scope_depth += 1;
@@ -1725,6 +1726,7 @@ impl Parser {
                     | "rotate"
                     | "scale"
                     | "will-change"
+                    | "animation-composition"
                     | "transition-duration"
                     | "transition-delay"
                     | "anchor-name"

@@ -1863,6 +1863,7 @@ fn identifies_supported_property_names() {
         "transform-origin",
         "animation",
         "animation-delay",
+        "animation-composition",
         "animation-direction",
         "animation-duration",
         "animation-iteration-count",
@@ -1891,6 +1892,7 @@ fn identifies_supported_property_names() {
         "animation",
         "animation-name",
         "animation-fill-mode",
+        "animation-composition",
         "animation-duration",
         "animation-play-state",
     ] {
@@ -2969,6 +2971,10 @@ fn transition_shorthand_expands_lists_and_computes_initial_values() {
         Some(&ComputedValue::Keyword("0.05s, 0s".to_string()))
     );
     assert_eq!(
+        style.get("transition-behavior"),
+        Some(&ComputedValue::Keyword("normal, normal".to_string()))
+    );
+    assert_eq!(
         style.get("transition"),
         Some(&ComputedValue::Keyword(
             "opacity 0.2s linear 0.05s, transform 1s ease-in".to_string()
@@ -2994,9 +3000,42 @@ fn transition_shorthand_expands_lists_and_computes_initial_values() {
         Some(&ComputedValue::Keyword("0s".to_string()))
     );
     assert_eq!(
+        initial.get("transition-behavior"),
+        Some(&ComputedValue::Keyword("normal".to_string()))
+    );
+    assert_eq!(
         initial.get("transition"),
         Some(&ComputedValue::Keyword("all".to_string()))
     );
+}
+
+#[test]
+fn starting_style_seeds_the_first_transition_timeline_sample() {
+    let element = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@starting-style { div { opacity: 0; } } \
+             div { opacity: 1; transition: opacity 1s linear; }",
+        )
+        .unwrap(),
+    );
+
+    let initial = resolver.computed_style(&element);
+    assert_eq!(initial.get("opacity"), Some(&ComputedValue::Number(0.0)));
+    assert_eq!(
+        resolver
+            .take_transition_events()
+            .iter()
+            .map(|event| event.event_type)
+            .collect::<Vec<_>>(),
+        ["transitionrun", "transitionstart"]
+    );
+
+    resolver.set_transition_time_ms(500.0);
+    let halfway = resolver.computed_style(&element);
+    assert_eq!(halfway.get("opacity"), Some(&ComputedValue::Number(0.5)));
 }
 
 #[test]
@@ -9153,12 +9192,16 @@ fn animation_shorthand_forwards_applies_final_state() {
         Origin::Author,
         parse_stylesheet(
             "@keyframes fadein { from { opacity: 0; } to { opacity: 1; } } \
-             .fade { opacity: 0; animation: fadein 1s forwards; }",
+             .fade { opacity: 0; animation: fadein 1s forwards add; }",
         )
         .unwrap(),
     );
     let style = resolver.computed_style(&div);
     let opacity = style.get("opacity");
+    assert_eq!(
+        style.get("animation-composition"),
+        Some(&ComputedValue::Keyword("add".to_string()))
+    );
     assert!(
         matches!(opacity, Some(ComputedValue::Number(v)) if (*v - 1.0).abs() < 0.01),
         "animation shorthand with forwards should apply final opacity: 1.0, got {opacity:?}"

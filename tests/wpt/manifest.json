@@ -1176,6 +1176,9 @@
     {"path": "longtask-timing/supported-longtask-types.window.js"},
     {"path": "server-timing/navigation_timing_idl.https.html"},
     {"path": "server-timing/resource_timing_idl.https.html"},
-    {"path": "server-timing/service_worker_idl.https.html"}
+    {"path": "server-timing/service_worker_idl.https.html"},
+    {"path": "css/css-animations/parsing/animation-composition-invalid.tentative.html"},
+    {"path": "css/css-transitions/parsing/transition-behavior.html"},
+    {"path": "scroll-animations/scroll-timelines/constructor.html"}
   ]
 }

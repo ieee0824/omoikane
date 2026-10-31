@@ -53,6 +53,23 @@ enum AnimationFill {
     Both,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnimationComposition {
+    Replace,
+    Add,
+    Accumulate,
+}
+
+impl AnimationComposition {
+    fn from_keyword(value: &str) -> Self {
+        match value {
+            "add" => Self::Add,
+            "accumulate" => Self::Accumulate,
+            _ => Self::Replace,
+        }
+    }
+}
+
 impl AnimationFill {
     fn from_keyword(value: &str) -> Self {
         match value {
@@ -74,6 +91,7 @@ struct AnimationSpec {
     direction: AnimationDirection,
     fill: AnimationFill,
     timing: String,
+    composition: AnimationComposition,
     requires_layout: bool,
     refreshes_visibility: bool,
     opacity_only: bool,
@@ -106,6 +124,10 @@ impl AnimationSpec {
             )),
             fill: AnimationFill::from_keyword(&keyword(PropertyId::AnimationFillMode, "none")),
             timing: keyword(PropertyId::AnimationTimingFunction, "ease"),
+            composition: AnimationComposition::from_keyword(&keyword(
+                PropertyId::AnimationComposition,
+                "replace",
+            )),
             requires_layout: true,
             refreshes_visibility: false,
             opacity_only: false,
@@ -401,6 +423,7 @@ impl StyleResolver {
             [None, None],
             properties,
             important,
+            AnimationComposition::Replace,
         );
     }
 
@@ -810,6 +833,7 @@ impl StyleResolver {
                 self.container_size(node),
                 properties,
                 important,
+                spec.composition,
             );
             return sample_untyped_custom_values(
                 &steps,
@@ -831,6 +855,7 @@ impl StyleResolver {
         container_size: [Option<f32>; 2],
         properties: &mut PropertyMap,
         important: &HashSet<String>,
+        composition: AnimationComposition,
     ) {
         let font_size = match properties.get(&PropertyId::FontSize) {
             Some(ComputedValue::Px(px)) => *px,
@@ -913,11 +938,46 @@ impl StyleResolver {
                 } else {
                     value
                 };
+                let value = composite_value(current.as_ref(), value, composition);
                 let flow = logical_flow_from_properties(properties);
                 insert_computed_property(properties, name, value, flow);
             }
         }
     }
+}
+
+fn composite_value(
+    underlying: Option<&ComputedValue>,
+    effect: ComputedValue,
+    composition: AnimationComposition,
+) -> ComputedValue {
+    if composition == AnimationComposition::Replace {
+        return effect;
+    }
+    match (underlying, effect) {
+        (Some(ComputedValue::Number(base)), ComputedValue::Number(value)) => {
+            ComputedValue::Number(base + value)
+        }
+        (Some(ComputedValue::Px(base)), ComputedValue::Px(value)) => {
+            ComputedValue::Px(base + value)
+        }
+        (Some(ComputedValue::Percentage(base)), ComputedValue::Percentage(value)) => {
+            ComputedValue::Percentage(base + value)
+        }
+        (_, effect) => effect,
+    }
+}
+
+pub(super) fn composite_snapshot_value(
+    underlying: Option<&ComputedValue>,
+    effect: ComputedValue,
+    composition: &str,
+) -> ComputedValue {
+    composite_value(
+        underlying,
+        effect,
+        AnimationComposition::from_keyword(composition),
+    )
 }
 
 fn declaration_in<'a>(step: &'a KeyframeStep, name: &str) -> Option<(f32, &'a Value)> {
@@ -1100,6 +1160,25 @@ mod property_name_diagnostic_tests {
                 .2,
             1
         );
+    }
+
+    #[test]
+    fn additive_composition_combines_with_the_underlying_number() {
+        let node = NodeHandle::element("div");
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            crate::css::parse_stylesheet(
+                "@keyframes fade {from{opacity:0}to{opacity:.4}} \
+                 div{opacity:.2;animation:fade 1s linear;animation-composition:add}",
+            )
+            .unwrap(),
+        );
+        resolver.set_animation_time_ms(0.0);
+        resolver.computed_style(&node);
+        resolver.set_animation_time_ms(500.0);
+        let style = resolver.computed_style(&node);
+        assert_eq!(style.get("opacity"), Some(&ComputedValue::Number(0.4)));
     }
 
     #[test]
