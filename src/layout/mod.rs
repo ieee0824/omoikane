@@ -6804,7 +6804,9 @@ fn layout_positioned_child_mode(
     let (left, right, top, bottom) = positioned_insets(style, origin, anchors);
     let stretch = positioned_auto_stretch(child, style, position, origin, left, right, top, bottom);
     let static_outer = containing_block;
-    let specified_width = resolved_length(style, "width", origin.width);
+    let anchor_width = resolved_anchor_size(style, "width", anchors);
+    let anchor_height = resolved_anchor_size(style, "height", anchors);
+    let specified_width = anchor_width.or_else(|| resolved_length(style, "width", origin.width));
     let child_width = stretch.available_width.unwrap_or_else(|| {
         if specified_width.is_none() {
             shrink_to_fit_layout_width(child, resolver, origin.width)
@@ -6845,6 +6847,12 @@ fn layout_positioned_child_mode(
         origin.width,
         width_percentage_basis,
     )?;
+    if let Some(width) = anchor_width {
+        layout_child.dimensions.content.width = width;
+    }
+    if let Some(height) = anchor_height {
+        layout_child.dimensions.content.height = height;
+    }
     if specified_width.is_none() && stretch.available_width.is_none() {
         let auto_width =
             positioned_auto_content_width(child, resolver, style, &layout_child, origin.width);
@@ -6947,6 +6955,40 @@ fn layout_positioned_child_mode(
     translate_layout_box_to_outer(&mut layout_child, outer_x, outer_y, resolver);
     layout_child.z_index = z_index(style);
     Some(layout_child)
+}
+
+fn resolved_anchor_size(
+    style: &ComputedStyle,
+    property: &str,
+    anchors: &[AnchorGeometry],
+) -> Option<f32> {
+    let ComputedValue::Keyword(value) = style.get(property)? else {
+        return None;
+    };
+    let arguments = value
+        .trim()
+        .strip_prefix("anchor-size(")?
+        .strip_suffix(')')?;
+    let parts = arguments.split_ascii_whitespace().collect::<Vec<_>>();
+    let (name, dimension) = match parts.as_slice() {
+        [name, dimension] if name.starts_with("--") => (*name, *dimension),
+        [dimension] => {
+            let ComputedValue::Keyword(name) = style.get_by_id(PropertyId::PositionAnchor)? else {
+                return None;
+            };
+            (name.as_str(), *dimension)
+        }
+        _ => return None,
+    };
+    let anchor = anchors
+        .iter()
+        .rev()
+        .find(|anchor| anchor.names.iter().any(|candidate| candidate == name))?;
+    match dimension.to_ascii_lowercase().as_str() {
+        "width" | "inline" | "self-inline" => Some(anchor.rect.width),
+        "height" | "block" | "self-block" => Some(anchor.rect.height),
+        _ => None,
+    }
 }
 
 fn position_area_origin(

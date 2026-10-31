@@ -14163,6 +14163,44 @@ fn position_try_flip_block_uses_the_first_non_overflowing_option() {
 }
 
 #[test]
+fn anchor_size_sets_the_positioned_box_used_dimensions() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let anchor = NodeHandle::element("section");
+    let positioned = NodeHandle::element("aside");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(anchor);
+    container.append_child(positioned.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0 } div { position: relative; width: 200px; height: 100px } \
+             section { anchor-name: --trigger; width: 35px; height: 24px } \
+             aside { position: absolute; position-anchor: --trigger; left: 0; top: 30px; \
+                     width: anchor-size(width); height: anchor-size(height) }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        },
+    )
+    .unwrap();
+    let positioned = find_layout_box(&layout, &positioned).unwrap();
+    assert_eq!(positioned.dimensions.content.width, 35.0);
+    assert_eq!(positioned.dimensions.content.height, 24.0);
+}
+
+#[test]
 fn flex_wrap_child_calc_width_resolves_correctly() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

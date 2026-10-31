@@ -9664,6 +9664,9 @@ fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
             || (name.starts_with("max-") && keyword == "none")
     };
     match value {
+        Value::Function { .. } if valid_anchor_size_function(value) => {
+            DeclarationValidation::Unvalidated
+        }
         Value::Keyword(keyword) if valid_keyword(keyword) => DeclarationValidation::Unvalidated,
         Value::Length(number, unit)
             if *number >= 0.0
@@ -9683,6 +9686,33 @@ fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
             }
         }
         _ => DeclarationValidation::Invalid,
+    }
+}
+
+fn valid_anchor_size_function(value: &Value) -> bool {
+    let Value::Function { name, arguments } = value else {
+        return false;
+    };
+    if !name.eq_ignore_ascii_case("anchor-size") || arguments.is_empty() {
+        return false;
+    }
+    let components = arguments
+        .iter()
+        .flat_map(|argument| match argument {
+            Value::List(values) => values.iter().collect::<Vec<_>>(),
+            value => vec![value],
+        })
+        .collect::<Vec<_>>();
+    match components.as_slice() {
+        [Value::Keyword(size)] => matches!(
+            size.to_ascii_lowercase().as_str(),
+            "width" | "height" | "block" | "inline" | "self-block" | "self-inline"
+        ),
+        [name, Value::Keyword(size)] if is_dashed_ident(name) => matches!(
+            size.to_ascii_lowercase().as_str(),
+            "width" | "height" | "block" | "inline" | "self-block" | "self-inline"
+        ),
+        _ => false,
     }
 }
 
