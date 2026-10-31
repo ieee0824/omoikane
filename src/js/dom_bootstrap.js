@@ -28951,7 +28951,25 @@ let omoikaneUserActivationState;
         return String(member);
       });
       this.__values = values;
-      for (let index = 0; index < values.length; index++) this[index] = values[index];
+      return new Proxy(this, {
+        get(target, property) {
+          if (typeof property === "string" && /^(0|[1-9][0-9]*)$/.test(property)) {
+            return target.__values[Number(property)];
+          }
+          return target[property];
+        },
+        set(target, property, value) {
+          if (typeof property !== "string" || !/^(0|[1-9][0-9]*)$/.test(property)) {
+            target[property] = value;
+            return true;
+          }
+          const index = Number(property);
+          if (index > target.__values.length) throw new RangeError("Index is out of range");
+          if (!(value instanceof CSSVariableReferenceValue)) value = String(value);
+          target.__values[index] = value;
+          return true;
+        },
+      });
     }
     get length() { return this.__values.length; }
     [Symbol.iterator]() { return this.__values[Symbol.iterator](); }
@@ -28961,6 +28979,14 @@ let omoikaneUserActivationState;
   function typedStylePropertyName(property) {
     const name = String(property);
     return name.startsWith("--") ? name : name.toLowerCase();
+  }
+
+  function requireTypedStyleProperty(property) {
+    const name = typedStylePropertyName(property);
+    if (!name.startsWith("--") && !CSS.supports(name, "initial")) {
+      throw new TypeError("Unsupported CSS property");
+    }
+    return name;
   }
 
   function splitTypedStyleValues(value) {
@@ -29002,18 +29028,19 @@ let omoikaneUserActivationState;
       this.__declaration = declaration;
     }
     get(property) {
-      return reifyTypedStyleValue(property,
-        this.__declaration.getPropertyValue(typedStylePropertyName(property))) ?? undefined;
+      const name = requireTypedStyleProperty(property);
+      return reifyTypedStyleValue(name, this.__declaration.getPropertyValue(name)) ?? undefined;
     }
     getAll(property) {
-      const name = typedStylePropertyName(property);
+      const name = requireTypedStyleProperty(property);
       const source = this.__declaration.getPropertyValue(name);
       if (!source) return [];
       if (name.startsWith("--")) return [reifyTypedStyleValue(name, source)];
       return splitTypedStyleValues(source).map(value => reifyTypedStyleValue(name, value));
     }
     has(property) {
-      return this.__declaration.getPropertyValue(typedStylePropertyName(property)) !== "";
+      const name = requireTypedStyleProperty(property);
+      return this.__declaration.getPropertyValue(name) !== "";
     }
     get size() { return this.__declaration.length; }
     *keys() {
@@ -29021,8 +29048,8 @@ let omoikaneUserActivationState;
         yield this.__declaration.item(index);
       }
     }
-    *values() { for (const key of this.keys()) yield this.get(key); }
-    *entries() { for (const key of this.keys()) yield [key, this.get(key)]; }
+    *values() { for (const key of this.keys()) yield this.getAll(key); }
+    *entries() { for (const key of this.keys()) yield [key, this.getAll(key)]; }
     [Symbol.iterator]() { return this.entries(); }
     forEach(callback, thisArg = undefined) {
       for (const [key, value] of this) callback.call(thisArg, value, key, this);
@@ -29036,7 +29063,7 @@ let omoikaneUserActivationState;
 
   class StylePropertyMap extends StylePropertyMapReadOnly {
     set(property, ...values) {
-      const name = typedStylePropertyName(property);
+      const name = requireTypedStyleProperty(property);
       const listValued = name === "transition-duration" || name === "transition-delay" ||
         name === "animation-duration" || name === "animation-delay" ||
         name === "animation-name" || name === "background-image";
@@ -29058,10 +29085,23 @@ let omoikaneUserActivationState;
       this.__declaration.setProperty(name, value);
     }
     append(property, ...values) {
-      const name = typedStylePropertyName(property);
+      const name = requireTypedStyleProperty(property);
+      const listValued = name === "transition-duration" || name === "transition-delay" ||
+        name === "animation-duration" || name === "animation-delay" ||
+        name === "animation-name" || name === "background-image";
+      if (!listValued || name.startsWith("--")) {
+        throw new TypeError("The property is not list-valued");
+      }
       if (values.length === 0) throw new TypeError("StylePropertyMap.append requires a value");
+      if (values.some(value => value instanceof CSSUnparsedValue ||
+          value instanceof CSSVariableReferenceValue || String(value).includes("var("))) {
+        throw new TypeError("Variable references cannot be appended");
+      }
       const addition = values.map(serializeTypedStyleValue).join(", ");
       const current = this.__declaration.getPropertyValue(name);
+      if (/^(?:initial|inherit|unset|revert|revert-layer)$/i.test(current.trim())) {
+        throw new TypeError("Cannot append to a CSS-wide keyword");
+      }
       const value = current ? current + ", " + addition : addition;
       if (!name.startsWith("--") && !CSS.supports(name, value)) {
         throw new TypeError("The value is not valid for the property");
