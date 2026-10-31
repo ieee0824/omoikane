@@ -4863,6 +4863,7 @@ impl StyleResolver {
         );
         apply_initial_values(&mut properties);
         resolve_light_dark_colors(&mut properties, self.color_scheme_dark);
+        resolve_dependent_color_functions(&mut properties, parent_style);
         resolve_accent_current_color(&mut properties);
         resolve_text_emphasis_style(&mut properties);
         properties.insert(
@@ -6217,6 +6218,11 @@ fn is_valid_css_color_text(text: &str) -> bool {
         .is_some()
         || valid_light_dark_color(text)
         || crate::paint::color4::CssColor::parse(text).is_some()
+        || (text.to_ascii_lowercase().contains("currentcolor")
+            && crate::paint::color4::CssColor::parse(
+                &text.to_ascii_lowercase().replace("currentcolor", "black"),
+            )
+            .is_some())
         || crate::paint::color::parse_color(text).is_some()
 }
 
@@ -18240,6 +18246,43 @@ fn resolve_light_dark_color(text: &str, dark: bool) -> Option<String> {
     };
     let selected = if dark { dark_color } else { light }.trim();
     resolve_light_dark_color(selected, dark).or_else(|| Some(selected.to_string()))
+}
+
+fn resolve_dependent_color_functions(
+    properties: &mut PropertyMap,
+    parent_style: Option<&ComputedStyle>,
+) {
+    let parent_color = parent_style
+        .and_then(|style| style.get("color"))
+        .map(ComputedValue::css_text)
+        .unwrap_or_else(|| "black".to_string());
+    if let Some(value) = properties.get(&PropertyId::Color).cloned()
+        && let Some(resolved) = resolve_current_color_function(&value.css_text(), &parent_color)
+    {
+        properties.insert(PropertyId::Color, ComputedValue::Color(resolved));
+    }
+    let own_color = properties
+        .get(&PropertyId::Color)
+        .map(ComputedValue::css_text)
+        .unwrap_or(parent_color);
+    let replacements = properties
+        .iter()
+        .filter(|(name, _)| *name != "color")
+        .filter_map(|(name, value)| {
+            resolve_current_color_function(&value.css_text(), &own_color)
+                .map(|resolved| (name.to_string(), resolved))
+        })
+        .collect::<Vec<_>>();
+    for (name, resolved) in replacements {
+        properties.insert(name, ComputedValue::Color(resolved));
+    }
+}
+
+fn resolve_current_color_function(text: &str, current_color: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("currentcolor").then_some(())?;
+    let substituted = lower.replace("currentcolor", current_color);
+    crate::paint::color4::CssColor::parse(&substituted).map(|color| color.serialize_computed())
 }
 
 /// `color: currentColor` is equivalent to `color: inherit` per CSS Color Level 4.

@@ -124,6 +124,27 @@ fn relative_color_is_shared_by_supports_cssom_and_computed_style() {
     );
 }
 
+#[test]
+fn relative_color_resolves_current_color_at_the_owning_element() {
+    let document = TreeBuilder::parse(
+        "<div style='color:blue'><span id='target' style='color:rgb(from currentColor r g b);\
+         background-color:rgb(from red r g b)'></span></div>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let actual = runtime
+        .eval(
+            "(() => { const e=document.getElementById('target'); const s=getComputedStyle(e);\
+             e.style.backgroundColor='rgb(from currentColor r g b)';\
+             return JSON.stringify([s.color,getComputedStyle(e).backgroundColor]); })()",
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(actual, "[\"color(srgb 0 0 1)\",\"color(srgb 0 0 1)\"]");
+}
+
 fn color4_paint_cases() -> Vec<(String, String)> {
     let mut colors = vec![
         ("hwb(0 0% 0%)".to_owned(), "red".to_owned()),
