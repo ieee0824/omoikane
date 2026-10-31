@@ -816,6 +816,16 @@ impl ComputedStyle {
         used
     }
 
+    /// Projects absolute lengths for layout and paint while preserving the
+    /// cached snapshot when zoom does not change any used values.
+    fn zoomed_used_values_shared(style: Arc<Self>) -> Arc<Self> {
+        if style.effective_zoom() == 1.0 {
+            style
+        } else {
+            Arc::new(style.zoomed_used_values())
+        }
+    }
+
     pub(crate) fn shaping_options(&self) -> &Arc<crate::font::ShapingOptions> {
         &self.shaping_options
     }
@@ -4094,9 +4104,11 @@ impl StyleResolver {
             .with_visited_paint_pass(|pass| pass.style(node))
             .unwrap_or_else(|| self.computed_style_shared(node));
         let style = print_color_adjust::paint_style(style, &self.media_environment);
-        Arc::new(
-            forced_colors::paint_style(node, style, &self.media_environment).zoomed_used_values(),
-        )
+        ComputedStyle::zoomed_used_values_shared(forced_colors::paint_style(
+            node,
+            style,
+            &self.media_environment,
+        ))
     }
 
     /// Propagates background values without propagating the body's opt-out.
@@ -4139,10 +4151,11 @@ impl StyleResolver {
             .flatten();
         let viewport = print_color_adjust::paint_style(Arc::new(viewport), &self.media_environment);
         ViewportPaintStyle {
-            style: Arc::new(
-                forced_colors::paint_style(root, viewport, &self.media_environment)
-                    .zoomed_used_values(),
-            ),
+            style: ComputedStyle::zoomed_used_values_shared(forced_colors::paint_style(
+                root,
+                viewport,
+                &self.media_environment,
+            )),
             canvas_color,
         }
     }
@@ -4157,10 +4170,11 @@ impl StyleResolver {
             .unwrap_or_else(|| self.computed_pseudo_style_shared(node, pseudo));
         style.map(|style| {
             let style = print_color_adjust::paint_style(style, &self.media_environment);
-            Arc::new(
-                forced_colors::paint_style(node, style, &self.media_environment)
-                    .zoomed_used_values(),
-            )
+            ComputedStyle::zoomed_used_values_shared(forced_colors::paint_style(
+                node,
+                style,
+                &self.media_environment,
+            ))
         })
     }
 

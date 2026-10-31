@@ -325,7 +325,7 @@ fn printed_content_uses_each_fragment_destination_and_clip() {
         Origin::Author,
         parse_stylesheet(
             "@page { size: 60px 60px; margin: 0 } \
-             body { margin: 0 } \
+             body { margin: 0; print-color-adjust: exact } \
              div { width: 60px; height: 20px } \
              #blue { background: blue } #red { background: red }",
         )
