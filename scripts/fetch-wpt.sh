@@ -45,6 +45,7 @@ collect_pattern "/close-watcher/" "/html/semantics/the-button-element/command-an
   "/html/semantics/popovers/resources/popover-utils.js"
 collect_pattern "/css/css-highlight-api/"
 collect_pattern "/requestidlecallback/" "/scheduler/" "/dom/abort/resources/"
+collect_pattern "/paint-timing/" "/largest-contentful-paint/" "/server-timing/" "/longtask-timing/" "/event-timing/" "/layout-instability/" "/images/"
 collect_pattern \
   "/css/css-color/parsing/color-computed-color-function.html" \
   "/css/css-color/parsing/color-computed-hwb.html" \
@@ -219,6 +220,16 @@ collect_pattern "/css/css-text-decor/parsing/text-emphasis-position-computed.htm
 collect_pattern "/css/css-text-decor/parsing/text-emphasis-style-computed.html"
 collect_pattern "/css/css-text-decor/parsing/text-emphasis-style-computed-vertical-lr.html"
 collect_pattern "/css/css-text/parsing/text-autospace-valid.html"
+collect_pattern "/css/css-anchor-position/parsing/anchor-scope-parsing.html"
+collect_pattern "/css/css-anchor-position/parsing/position-try-fallbacks-parsing.html"
+collect_pattern "/css/css-anchor-position/parsing/position-try-order-parsing.html"
+collect_pattern "/css/css-anchor-position/parsing/position-visibility-parsing.html"
+collect_pattern "/css/css-anchor-position/parsing/position-visibility-computed.html"
+collect_pattern "/css/css-anchor-position/anchor-size-parse-valid.html"
+collect_pattern "/css/css-anchor-position/anchor-size-parse-invalid.html"
+collect_pattern "/css/css-anchor-position/at-position-try-cssom.html"
+collect_pattern "/css/css-anchor-position/at-position-try-parse.html"
+collect_pattern "/css/css-anchor-position/position-area-parsing.html"
 collect_pattern "/css/css-text/parsing/text-autospace-invalid.html"
 collect_pattern "/css/css-text/parsing/text-autospace-computed.html"
 collect_pattern "/css/css-text/parsing/text-spacing-trim-valid.html"

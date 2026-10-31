@@ -2945,15 +2945,18 @@ fn layout_document(
         content: viewport.rect,
         ..BoxDimensions::default()
     };
+    let mut anchors = collect_anchor_geometries(&children, resolver);
     for (child, style, static_position) in positioned_children {
-        if let Some(positioned) = layout_positioned_child(
+        if let Some(positioned) = layout_positioned_child_with_anchors(
             &child,
             resolver,
             &style,
             positioned_ancestor.unwrap_or(initial_containing_block),
             static_position,
             viewport,
+            &anchors,
         ) {
+            append_anchor_geometries(&positioned, resolver, &mut anchors);
             children.push(positioned);
         }
     }
@@ -2972,8 +2975,10 @@ fn layout_document(
             viewport.rect,
             LayoutViewport::new(viewport.rect),
             true,
+            &anchors,
         ) {
             layout.z_index = i32::MAX;
+            append_anchor_geometries(&layout, resolver, &mut anchors);
             children.push(layout);
         }
     }
@@ -4535,6 +4540,7 @@ fn layout_block_cell_body(
     } else {
         positioned_ancestor
     };
+    let mut anchors = collect_anchor_geometries(&children, resolver);
     for (source, cs, static_position) in positioned_children {
         if let Some(positioned) = layout_positioned_source(
             &source,
@@ -4546,7 +4552,9 @@ fn layout_block_cell_body(
             }),
             static_position,
             viewport,
+            &anchors,
         ) {
+            append_anchor_geometries(&positioned, resolver, &mut anchors);
             children.push(positioned);
         }
     }
@@ -6466,15 +6474,17 @@ fn layout_positioned_source(
     parent_box: BoxDimensions,
     containing_block: Rect,
     viewport: LayoutViewport,
+    anchors: &[AnchorGeometry],
 ) -> Option<LayoutBox> {
     if let LayoutSource::Node(node) = source {
-        return layout_positioned_child(
+        return layout_positioned_child_with_anchors(
             node,
             resolver,
             style,
             parent_box,
             containing_block,
             viewport,
+            anchors,
         );
     }
 
@@ -6485,7 +6495,7 @@ fn layout_positioned_source(
             containing_block
         }
     };
-    let (left, right, top, bottom) = positioned_insets(style, origin);
+    let (left, right, top, bottom) = positioned_insets(style, origin, anchors);
     let mut layout = source.layout(
         resolver,
         Rect {
@@ -6527,6 +6537,26 @@ fn layout_positioned_child(
     containing_block: Rect,
     viewport: LayoutViewport,
 ) -> Option<LayoutBox> {
+    layout_positioned_child_with_anchors(
+        child,
+        resolver,
+        style,
+        parent_box,
+        containing_block,
+        viewport,
+        &[],
+    )
+}
+
+fn layout_positioned_child_with_anchors(
+    child: &NodeHandle,
+    resolver: &mut StyleResolver,
+    style: &ComputedStyle,
+    parent_box: BoxDimensions,
+    containing_block: Rect,
+    viewport: LayoutViewport,
+    anchors: &[AnchorGeometry],
+) -> Option<LayoutBox> {
     layout_positioned_child_mode(
         child,
         resolver,
@@ -6535,19 +6565,113 @@ fn layout_positioned_child(
         containing_block,
         viewport,
         false,
+        anchors,
     )
 }
 
 fn positioned_insets(
     style: &ComputedStyle,
     origin: Rect,
+    anchors: &[AnchorGeometry],
 ) -> (Option<f32>, Option<f32>, Option<f32>, Option<f32>) {
     (
-        resolved_length(style, "left", origin.width),
-        resolved_length(style, "right", origin.width),
-        resolved_length(style, "top", origin.height),
-        resolved_length(style, "bottom", origin.height),
+        resolved_positioned_inset(style, "left", origin, anchors),
+        resolved_positioned_inset(style, "right", origin, anchors),
+        resolved_positioned_inset(style, "top", origin, anchors),
+        resolved_positioned_inset(style, "bottom", origin, anchors),
     )
+}
+
+#[derive(Clone)]
+struct AnchorGeometry {
+    names: Vec<String>,
+    rect: Rect,
+}
+
+fn collect_anchor_geometries(
+    children: &[LayoutBox],
+    resolver: &mut StyleResolver,
+) -> Vec<AnchorGeometry> {
+    let mut anchors = Vec::new();
+    for child in children {
+        append_anchor_geometries(child, resolver, &mut anchors);
+    }
+    anchors
+}
+
+fn append_anchor_geometries(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    anchors: &mut Vec<AnchorGeometry>,
+) {
+    let style = layout_box_style(layout, resolver);
+    if let Some(ComputedValue::Keyword(names)) = style.get_by_id(PropertyId::AnchorName) {
+        let names = crate::css::split_top_level_commas(names)
+            .into_iter()
+            .flat_map(|part| part.split_ascii_whitespace())
+            .filter(|name| name.starts_with("--"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if !names.is_empty() {
+            anchors.push(AnchorGeometry {
+                names,
+                rect: layout.dimensions.border_box(),
+            });
+        }
+    }
+    for child in &layout.children {
+        append_anchor_geometries(child, resolver, anchors);
+    }
+}
+
+fn resolved_positioned_inset(
+    style: &ComputedStyle,
+    property: &str,
+    origin: Rect,
+    anchors: &[AnchorGeometry],
+) -> Option<f32> {
+    let basis = if matches!(property, "left" | "right") {
+        origin.width
+    } else {
+        origin.height
+    };
+    let Some(ComputedValue::Keyword(value)) = style.get(property) else {
+        return resolved_length(style, property, basis);
+    };
+    let value = value.trim();
+    let arguments = value
+        .strip_prefix("anchor(")
+        .and_then(|value| value.strip_suffix(')'))?;
+    let parts = arguments.split_ascii_whitespace().collect::<Vec<_>>();
+    let (name, side) = match parts.as_slice() {
+        [name, side] if name.starts_with("--") => (*name, *side),
+        [side] => {
+            let ComputedValue::Keyword(name) = style.get_by_id(PropertyId::PositionAnchor)? else {
+                return None;
+            };
+            (name.as_str(), *side)
+        }
+        _ => return None,
+    };
+    let anchor = anchors
+        .iter()
+        .rev()
+        .find(|anchor| anchor.names.iter().any(|candidate| candidate == name))?;
+    let horizontal = matches!(property, "left" | "right");
+    let coordinate = match (horizontal, side.to_ascii_lowercase().as_str()) {
+        (true, "left" | "start" | "self-start") => anchor.rect.x,
+        (true, "right" | "end" | "self-end") => anchor.rect.x + anchor.rect.width,
+        (true, "center") => anchor.rect.x + anchor.rect.width / 2.0,
+        (false, "top" | "start" | "self-start") => anchor.rect.y,
+        (false, "bottom" | "end" | "self-end") => anchor.rect.y + anchor.rect.height,
+        (false, "center") => anchor.rect.y + anchor.rect.height / 2.0,
+        _ => return None,
+    };
+    Some(if horizontal {
+        coordinate - origin.x
+    } else {
+        coordinate - origin.y
+    })
 }
 
 fn positioned_auto_content_width(
@@ -6674,6 +6798,7 @@ fn layout_positioned_child_mode(
     containing_block: Rect,
     viewport: LayoutViewport,
     top_layer_root: bool,
+    anchors: &[AnchorGeometry],
 ) -> Option<LayoutBox> {
     let position = position_scheme(style);
     let origin = match position {
@@ -6684,10 +6809,12 @@ fn layout_positioned_child_mode(
         PositionScheme::Sticky => containing_block,
     };
 
-    let (left, right, top, bottom) = positioned_insets(style, origin);
+    let (left, right, top, bottom) = positioned_insets(style, origin, anchors);
     let stretch = positioned_auto_stretch(child, style, position, origin, left, right, top, bottom);
     let static_outer = containing_block;
-    let specified_width = resolved_length(style, "width", origin.width);
+    let anchor_width = resolved_anchor_size(style, "width", anchors);
+    let anchor_height = resolved_anchor_size(style, "height", anchors);
+    let specified_width = anchor_width.or_else(|| resolved_length(style, "width", origin.width));
     let child_width = stretch.available_width.unwrap_or_else(|| {
         if specified_width.is_none() {
             shrink_to_fit_layout_width(child, resolver, origin.width)
@@ -6728,6 +6855,12 @@ fn layout_positioned_child_mode(
         origin.width,
         width_percentage_basis,
     )?;
+    if let Some(width) = anchor_width {
+        layout_child.dimensions.content.width = width;
+    }
+    if let Some(height) = anchor_height {
+        layout_child.dimensions.content.height = height;
+    }
     if specified_width.is_none() && stretch.available_width.is_none() {
         let auto_width =
             positioned_auto_content_width(child, resolver, style, &layout_child, origin.width);
@@ -6782,23 +6915,194 @@ fn layout_positioned_child_mode(
         outer_width,
         outer_height,
     );
-    let outer_x = if let Some(left) = left {
+    let mut outer_x = if let Some(left) = left {
         origin.x + left + auto_margin_x
     } else if let Some(right) = right {
         origin.x + origin.width - outer_width - right
     } else {
         static_outer.x
     };
-    let outer_y = if let Some(top) = top {
+    let mut outer_y = if let Some(top) = top {
         origin.y + top + auto_margin_y
     } else if let Some(bottom) = bottom {
         origin.y + origin.height - outer_height - bottom
     } else {
         static_outer.y
     };
+    if let Some((area_x, area_y)) =
+        position_area_origin(style, anchors, outer_width, outer_height, false)
+    {
+        if left.is_none() && right.is_none() {
+            outer_x = area_x;
+        }
+        if top.is_none() && bottom.is_none() {
+            outer_y = area_y;
+        }
+    }
+    if let Some(anchor) = resolved_position_anchor(style, anchors) {
+        if left.is_none()
+            && right.is_none()
+            && matches!(style.get("justify-self"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("anchor-center"))
+        {
+            outer_x = anchor.rect.x + (anchor.rect.width - outer_width) / 2.0;
+        }
+        if top.is_none()
+            && bottom.is_none()
+            && matches!(style.get("align-self"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("anchor-center"))
+        {
+            outer_y = anchor.rect.y + (anchor.rect.height - outer_height) / 2.0;
+        }
+    }
+    let overflows = outer_x < origin.x
+        || outer_y < origin.y
+        || outer_x + outer_width > origin.x + origin.width
+        || outer_y + outer_height > origin.y + origin.height;
+    let flip_block = matches!(
+        style.get_by_id(PropertyId::PositionTryFallbacks),
+        Some(ComputedValue::Keyword(fallbacks))
+            if fallbacks.split_ascii_whitespace().any(|value| value == "flip-block")
+    );
+    if overflows
+        && let Some(name) = style
+            .get_by_id(PropertyId::PositionTryFallbacks)
+            .and_then(|value| match value {
+                ComputedValue::Keyword(value) => {
+                    value.split([',', ' ']).find(|part| part.starts_with("--"))
+                }
+                _ => None,
+            })
+        && let Some(fallback_style) = resolver.position_try_style(style, name)
+        && let Some(fallback) = layout_positioned_child_mode(
+            child,
+            resolver,
+            &fallback_style,
+            parent_box,
+            containing_block,
+            viewport,
+            top_layer_root,
+            anchors,
+        )
+    {
+        let rect = fallback.dimensions.border_box();
+        if rect.x >= origin.x
+            && rect.y >= origin.y
+            && rect.x + rect.width <= origin.x + origin.width
+            && rect.y + rect.height <= origin.y + origin.height
+        {
+            return Some(fallback);
+        }
+    }
+    if overflows
+        && flip_block
+        && let Some((area_x, area_y)) =
+            position_area_origin(style, anchors, outer_width, outer_height, true)
+        && area_x >= origin.x
+        && area_y >= origin.y
+        && area_x + outer_width <= origin.x + origin.width
+        && area_y + outer_height <= origin.y + origin.height
+    {
+        outer_x = area_x;
+        outer_y = area_y;
+    }
     translate_layout_box_to_outer(&mut layout_child, outer_x, outer_y, resolver);
     layout_child.z_index = z_index(style);
     Some(layout_child)
+}
+
+fn resolved_anchor_size(
+    style: &ComputedStyle,
+    property: &str,
+    anchors: &[AnchorGeometry],
+) -> Option<f32> {
+    let ComputedValue::Keyword(value) = style.get(property)? else {
+        return None;
+    };
+    let arguments = value
+        .trim()
+        .strip_prefix("anchor-size(")?
+        .strip_suffix(')')?;
+    let parts = arguments.split_ascii_whitespace().collect::<Vec<_>>();
+    let (name, dimension) = match parts.as_slice() {
+        [name, dimension] if name.starts_with("--") => (*name, *dimension),
+        [dimension] => {
+            let ComputedValue::Keyword(name) = style.get_by_id(PropertyId::PositionAnchor)? else {
+                return None;
+            };
+            (name.as_str(), *dimension)
+        }
+        _ => return None,
+    };
+    let anchor = anchors
+        .iter()
+        .rev()
+        .find(|anchor| anchor.names.iter().any(|candidate| candidate == name))?;
+    match dimension.to_ascii_lowercase().as_str() {
+        "width" | "inline" | "self-inline" => Some(anchor.rect.width),
+        "height" | "block" | "self-block" => Some(anchor.rect.height),
+        _ => None,
+    }
+}
+
+fn resolved_position_anchor<'a>(
+    style: &ComputedStyle,
+    anchors: &'a [AnchorGeometry],
+) -> Option<&'a AnchorGeometry> {
+    let ComputedValue::Keyword(name) = style.get_by_id(PropertyId::PositionAnchor)? else {
+        return None;
+    };
+    anchors
+        .iter()
+        .rev()
+        .find(|anchor| anchor.names.iter().any(|candidate| candidate == name))
+}
+
+fn position_area_origin(
+    style: &ComputedStyle,
+    anchors: &[AnchorGeometry],
+    outer_width: f32,
+    outer_height: f32,
+    flip_block: bool,
+) -> Option<(f32, f32)> {
+    let ComputedValue::Keyword(name) = style.get_by_id(PropertyId::PositionAnchor)? else {
+        return None;
+    };
+    let anchor = anchors
+        .iter()
+        .rev()
+        .find(|anchor| anchor.names.iter().any(|candidate| candidate == name))?;
+    let ComputedValue::Keyword(area) = style.get_by_id(PropertyId::PositionArea)? else {
+        return None;
+    };
+    if area.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    let words = area.split_ascii_whitespace().collect::<Vec<_>>();
+    let horizontal = words.iter().find_map(|word| match *word {
+        "left" | "inline-start" | "start" | "self-start" => Some(-1),
+        "right" | "inline-end" | "end" | "self-end" => Some(1),
+        "center" => Some(0),
+        _ => None,
+    });
+    let mut vertical = words.iter().find_map(|word| match *word {
+        "top" | "block-start" => Some(-1),
+        "bottom" | "block-end" => Some(1),
+        "center" => Some(0),
+        _ => None,
+    });
+    if flip_block {
+        vertical = vertical.map(|side| -side);
+    }
+    let x = match horizontal.unwrap_or(0) {
+        -1 => anchor.rect.x - outer_width,
+        1 => anchor.rect.x + anchor.rect.width,
+        _ => anchor.rect.x + (anchor.rect.width - outer_width) / 2.0,
+    };
+    let y = match vertical.unwrap_or(0) {
+        -1 => anchor.rect.y - outer_height,
+        1 => anchor.rect.y + anchor.rect.height,
+        _ => anchor.rect.y + (anchor.rect.height - outer_height) / 2.0,
+    };
+    Some((x, y))
 }
 
 /// Resolves `auto` margins of an absolutely positioned box whose opposing
@@ -6894,6 +7198,7 @@ fn relayout_fixed_descendants(
                 },
                 static_position,
                 viewport,
+                &[],
             ) {
                 *child = resolved;
             }
@@ -7015,6 +7320,7 @@ fn translate_inherited_box(
                 height: 1.0,
                 ..Rect::default()
             },
+            &[],
         );
         if left.is_some() || right.is_some() {
             dx = 0.0;
