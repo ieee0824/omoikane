@@ -120,7 +120,7 @@ fn relative_color_is_shared_by_supports_cssom_and_computed_style() {
         .to_std_string_escaped();
     assert_eq!(
         actual,
-        "[true,\"rgb(from red r calc(g + 32) b / alpha)\",\"color(srgb 1 0.12549 0)\"]"
+        "[true,\"rgb(from red r calc((g) + (32)) b / alpha)\",\"color(srgb 1 0.12549 0)\"]"
     );
 }
 
