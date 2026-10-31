@@ -28761,7 +28761,7 @@ let omoikaneUserActivationState;
       this.timeline = timeline === undefined ? globalThis.document && globalThis.document.timeline || null : timeline;
       const timing = effect ? effect.getTiming() : {};
       this.id = String(timing.id || "");
-      this.currentTime = 0;
+      this._currentTime = 0;
       this.startTime = null;
       this.playbackRate = 1;
       this.playState = "idle";
@@ -28779,6 +28779,13 @@ let omoikaneUserActivationState;
       this.finished = new Promise(resolve => { this._finishedResolve = resolve; });
       this.ready = Promise.resolve(this);
     }
+    get currentTime() {
+      if (this.timeline && this.timeline.currentTime instanceof CSSUnitValue) {
+        return this.timeline.currentTime;
+      }
+      return this._currentTime;
+    }
+    set currentTime(value) { this._currentTime = value; }
     _applyFinalKeyframe() {
       const frame = this._keyframes[this._keyframes.length - 1];
       if (!frame || !this._target || !this._target.style) return;
@@ -28802,7 +28809,7 @@ let omoikaneUserActivationState;
       if (this._timer !== null) clearTimeout(this._timer);
       this.playState = "running";
       this.pending = false;
-      if (this._iterations !== Infinity) {
+      if (!(this.timeline && this.timeline.currentTime instanceof CSSUnitValue) && this._iterations !== Infinity) {
         const total = this._delay + this._duration * this._iterations;
         this._timer = setTimeout(() => this._complete(), total);
       }

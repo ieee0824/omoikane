@@ -1725,6 +1725,7 @@ impl Parser {
                     | "rotate"
                     | "scale"
                     | "will-change"
+                    | "animation-composition"
                     | "transition-duration"
                     | "transition-delay"
                     | "anchor-name"

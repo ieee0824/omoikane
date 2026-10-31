@@ -8150,7 +8150,16 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             return validate_keyword_value(value, &["normal", "inline-size", "size"]);
         }
         "animation-composition" => {
-            return validate_keyword_value(value, &["replace", "add", "accumulate"]);
+            let normalized = render_value(value)
+                .split(',')
+                .map(|value| {
+                    let value = value.trim().to_ascii_lowercase();
+                    matches!(value.as_str(), "replace" | "add" | "accumulate").then_some(value)
+                })
+                .collect::<Option<Vec<_>>>();
+            return normalized.map_or(DeclarationValidation::Invalid, |values| {
+                DeclarationValidation::Valid(ComputedValue::Keyword(values.join(", ")))
+            });
         }
         "container-name" => return validate_container_name_declaration(value),
         "contain" => return validate_contain_declaration(value),

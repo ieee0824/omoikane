@@ -103,10 +103,11 @@ fn animation_composition_is_exposed_through_cssom_validation() {
                 CSS.supports('animation-composition', 'replace'),
                 CSS.supports('animation-composition', 'add'),
                 CSS.supports('animation-composition', 'accumulate'),
+                CSS.supports('animation-composition', 'replace, add, accumulate'),
                 CSS.supports('animation-composition', 'auto')
             ])",
         ),
-        "[true,true,true,false]"
+        "[true,true,true,true,false]"
     );
 }
 
@@ -134,5 +135,26 @@ fn scroll_and_view_timelines_derive_progress_from_current_geometry() {
               ]); })()",
         ),
         "[true,true,\"block\",25,\"percent\",true,true,\"px\",\"px\",\"percent\"]"
+    );
+}
+
+#[test]
+fn animation_reads_progress_from_a_scroll_timeline() {
+    let mut runtime = runtime();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "(() => { const source = document.createElement('div');
+              Object.defineProperties(source, {
+                scrollTop: { value: 25, writable: true },
+                scrollHeight: { value: 200 }, clientHeight: { value: 100 }
+              });
+              const timeline = new ScrollTimeline({ source });
+              const animation = new Animation(new KeyframeEffect(null, [], 1000), timeline);
+              animation.play();
+              return JSON.stringify([animation.currentTime.value, animation.currentTime.unit,
+                animation.playState]); })()",
+        ),
+        "[25,\"percent\",\"running\"]"
     );
 }
