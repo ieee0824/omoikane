@@ -61,6 +61,60 @@ fn animation_accepts_an_effect_and_element_animate_remains_compatible() {
 }
 
 #[test]
+fn css_animations_materialize_css_animation_effects() {
+    let mut runtime = runtime();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "(() => { const style = document.createElement('style');
+              style.textContent = '@keyframes fade { from { opacity: 0; } to { opacity: 1; } }';
+              document.documentElement.appendChild(style);
+              const target = document.getElementById('target');
+              target.style.animationName = 'fade';
+              target.style.animationDuration = '100s';
+              const animation = target.getAnimations()[0];
+              return JSON.stringify([
+                animation instanceof CSSAnimation, animation.animationName,
+                animation.effect instanceof KeyframeEffect,
+                animation.effect.target === target,
+                animation.effect.getKeyframes().map(frame => [frame.opacity, frame.offset])
+              ]); })()",
+        ),
+        "[true,\"fade\",true,true,[[\"0\",0],[\"1\",1]]]"
+    );
+}
+
+#[test]
+fn css_pseudo_animations_and_transitions_materialize_typed_effects() {
+    let document = TreeBuilder::parse(
+        "<style>#target::before { content: 'x'; animation: fade 100s; }\
+         #target { opacity: 0; transition: opacity 100s linear; }\
+         @keyframes fade { from { opacity: 0; } to { opacity: 1; } }</style>\
+         <div id='target'></div>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(document).expect("runtime");
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "(() => { const target = document.getElementById('target');
+              getComputedStyle(target).opacity;
+              target.style.opacity = '1';
+              getComputedStyle(target).opacity;
+              const animations = target.getAnimations();
+              const pseudo = animations.find(animation => animation instanceof CSSAnimation);
+              const transition = animations.find(animation => animation instanceof CSSTransition);
+              return JSON.stringify([
+                pseudo.effect.target === target, pseudo.effect.pseudoElement,
+                transition.transitionProperty, transition.effect.target === target,
+                transition.playState
+              ]); })()",
+        ),
+        "[true,\"::before\",\"opacity\",true,\"running\"]"
+    );
+}
+
+#[test]
 fn linear_easing_is_exposed_through_cssom_validation() {
     let mut runtime = runtime();
     assert_eq!(

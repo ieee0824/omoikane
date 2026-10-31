@@ -23254,6 +23254,7 @@ let omoikaneUserActivationState;
     for (const record of records) {
       const target = wrapNode(record.nodeId);
       if (!target) continue;
+      updateCssTransitionForEvent(target, record);
       target.dispatchEvent(new TransitionEvent(record.type, {
         bubbles: true,
         propertyName: record.propertyName,
@@ -28843,6 +28844,100 @@ let omoikaneUserActivationState;
     constructor(effect = null, timeline = undefined) { super(effect, timeline); this.transitionProperty = ""; }
   }
 
+  function cssAnimationMilliseconds(value) {
+    const text = String(value || "0s").trim().toLowerCase();
+    const number = Number.parseFloat(text);
+    if (!Number.isFinite(number)) return 0;
+    return text.endsWith("ms") ? number : number * 1000;
+  }
+
+  function cssKeyframePropertyName(name) {
+    return String(name).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+  }
+
+  function cssKeyframesForName(name) {
+    let found = null;
+    const visit = rules => {
+      for (const rule of rules || []) {
+        if (rule instanceof CSSKeyframesRule && rule.name === name) found = rule;
+        else if (rule && rule.cssRules) visit(rule.cssRules);
+      }
+    };
+    for (const sheet of globalThis.document && globalThis.document.styleSheets || []) {
+      try { visit(sheet.cssRules); } catch (_) {}
+    }
+    if (!found) return [];
+    const frames = [];
+    for (const rule of found.cssRules) {
+      const declarations = JSON.parse(__omoikane_css_declarations(rule.style.cssText));
+      for (const key of rule.keyText.split(",")) {
+        const frame = { offset: Number.parseFloat(key) / 100 };
+        for (const [property, value] of declarations) {
+          if (property === "animation-timing-function") frame.easing = value;
+          else if (property === "animation-composition") frame.composite = value;
+          else frame[cssKeyframePropertyName(property)] = value;
+        }
+        frames.push(frame);
+      }
+    }
+    return frames.sort((left, right) => left.offset - right.offset);
+  }
+
+  function cssAnimationsForElement(element, pseudoElement = null) {
+    let style;
+    try { style = getComputedStyle(element, pseudoElement); } catch (_) { return []; }
+    const names = String(style.animationName || "none").split(",").map(value => value.trim());
+    const durations = String(style.animationDuration || "0s").split(",").map(value => value.trim());
+    const delays = String(style.animationDelay || "0s").split(",").map(value => value.trim());
+    const easings = String(style.animationTimingFunction || "ease").split(",").map(value => value.trim());
+    const compositions = String(style.animationComposition || "replace").split(",").map(value => value.trim());
+    const active = names.filter(name => name && name.toLowerCase() !== "none");
+    const storageKey = pseudoElement || "";
+    if (!element.__cssAnimations) element.__cssAnimations = new Map();
+    if (!active.length) {
+      element.__cssAnimations.delete(storageKey);
+      return [];
+    }
+    const existing = element.__cssAnimations.get(storageKey) || [];
+    const animations = active.map((name, index) => {
+      let animation = existing[index];
+      const frames = cssKeyframesForName(name);
+      if (!(animation instanceof CSSAnimation) || animation.animationName !== name) {
+        const effect = new KeyframeEffect(element, frames, {
+          duration: cssAnimationMilliseconds(durations[index % durations.length]),
+          delay: cssAnimationMilliseconds(delays[index % delays.length]),
+          easing: easings[index % easings.length] || "ease",
+          composite: compositions[index % compositions.length] || "replace",
+          pseudoElement,
+        });
+        animation = new CSSAnimation(effect, element.ownerDocument && element.ownerDocument.timeline);
+        animation.animationName = name;
+        animation.play();
+      } else {
+        animation.effect.setKeyframes(frames);
+      }
+      return animation;
+    });
+    element.__cssAnimations.set(storageKey, animations);
+    return animations;
+  }
+
+  function updateCssTransitionForEvent(element, record) {
+    if (!element.__cssTransitions) element.__cssTransitions = new Map();
+    const property = String(record.propertyName || "");
+    if (record.type === "transitionrun") {
+      const effect = new KeyframeEffect(element, [], { pseudoElement: record.pseudoElement || null });
+      const transition = new CSSTransition(effect, element.ownerDocument && element.ownerDocument.timeline);
+      transition.transitionProperty = property;
+      transition.playState = "running";
+      element.__cssTransitions.set(property, transition);
+    } else if (record.type === "transitionend" || record.type === "transitioncancel") {
+      const transition = element.__cssTransitions.get(property);
+      if (transition) transition.playState = record.type === "transitionend" ? "finished" : "idle";
+      element.__cssTransitions.delete(property);
+    }
+  }
+
   Element.prototype.animate = function(keyframes, options) {
     const effect = new KeyframeEffect(this, keyframes, options);
     const animation = new Animation(effect, this.ownerDocument && this.ownerDocument.timeline);
@@ -28852,7 +28947,13 @@ let omoikaneUserActivationState;
     return animation;
   };
   Element.prototype.getAnimations = function() {
-    return (this.__animations || []).filter(animation => animation.playState !== "idle").slice();
+    return cssAnimationsForElement(this)
+      .concat(cssAnimationsForElement(this, "::before"))
+      .concat(cssAnimationsForElement(this, "::after"))
+      .concat(Array.from(this.__cssTransitions && this.__cssTransitions.values() || []))
+      .concat(
+      (this.__animations || []).filter(animation => animation.playState !== "idle")
+    ).slice();
   };
   Document.prototype.getAnimations = function() {
     const animations = [];
