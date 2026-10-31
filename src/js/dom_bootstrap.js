@@ -1155,6 +1155,8 @@ let omoikaneUserActivationState;
     (!name.startsWith("--") && numericMathFunctionPattern.test(value)) ||
     (!name.startsWith("--") && /sibling-(?:index|count)\s*\(/i.test(value));
   const styleShorthandLonghands = Object.freeze({
+    "margin": ["margin-top", "margin-right", "margin-bottom", "margin-left"],
+    "padding": ["padding-top", "padding-right", "padding-bottom", "padding-left"],
     "margin-block": ["margin-block-start", "margin-block-end"],
     "margin-inline": ["margin-inline-start", "margin-inline-end"],
     "padding-block": ["padding-block-start", "padding-block-end"],
@@ -1319,7 +1321,7 @@ let omoikaneUserActivationState;
       return parts.filter(Boolean).join(" ");
     }
     if (parts.some(value => !value)) return "";
-    if (kebab === "inset") {
+    if (kebab === "inset" || kebab === "margin" || kebab === "padding") {
       const [top, right, bottom, left] = parts;
       if (top === right && top === bottom && top === left) return top;
       if (top === bottom && right === left) return top + " " + right;
@@ -10323,7 +10325,9 @@ let omoikaneUserActivationState;
       return JSON.parse(__omoikane_css_rule_sources(css)).filter(rule =>
         (cssomRuleIsRecognized(rule) &&
           (!/^@property(?=\s|\/\*|\{)/i.test(cssRuleWithoutLeadingComments(rule)) ||
-          __omoikane_css_property_rule(rule) !== null) && fontAtRulePreludeValid(rule))
+          __omoikane_css_property_rule(rule) !== null) && fontAtRulePreludeValid(rule) &&
+          (!/^@view-transition(?=\s|\/\*|\{)/i.test(cssRuleWithoutLeadingComments(rule)) ||
+            viewTransitionRuleSource(rule) !== null))
       );
     } catch (error) {
       throw new DOMException(error.message || "Invalid CSS rule.", "SyntaxError");
@@ -10387,7 +10391,7 @@ let omoikaneUserActivationState;
   }
 
   function declarationView(block, onChange = null, validateProperties = true, elementContext = true,
-                           allowedProperties = null) {
+                           allowedProperties = null, expandInitialShorthands = false) {
     let source = String(block || "");
     let cachedSource = null;
     let cachedDeclarations = [];
@@ -10398,7 +10402,18 @@ let omoikaneUserActivationState;
        nativeStyleSupports(name, value.replace(/\s*!\s*important\s*$/i, "")));
     const declarations = () => {
       if (cachedSource !== source) {
-        const parsed = JSON.parse(__omoikane_css_declarations(source)).map(([name, value]) => {
+        let entries = JSON.parse(__omoikane_css_declarations(source));
+        if (expandInitialShorthands && !allowedProperties) {
+          entries = entries.flatMap(([name, value]) => {
+            if (!styleShorthandLonghands[name]) return [[name, value]];
+            const expanded = JSON.parse(__omoikane_expand_style_shorthand(name, value));
+            return expanded.length ? expanded : [];
+          });
+          entries = entries.filter(([name], index) =>
+            entries.findLastIndex(([laterName]) => laterName === name) === index
+          );
+        }
+        const parsed = entries.map(([name, value]) => {
           if (needsStyleValueNormalization(name, value)) {
             const normalized = __omoikane_normalize_style_value(name, value);
             if (normalized !== null) value = normalized;
@@ -10424,6 +10439,9 @@ let omoikaneUserActivationState;
       const values = declarations();
       if (key === "contain-intrinsic-size") {
         return containIntrinsicSizeShorthand(values);
+      }
+      if (key === "margin" || key === "padding") {
+        return logicalShorthandValue(key, values) || "";
       }
       const found = values.filter(declaration => declaration.name === key);
       return found.length ? found[found.length - 1].value : "";
@@ -11690,7 +11708,7 @@ let omoikaneUserActivationState;
       this.__name = source.slice(1, open).trim().toLowerCase();
       this.__style = declarationView(source.slice(open + 1, close), () => {
         if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.cssText);
-      }, false, false);
+      }, false, false, null, true);
       if (sheet) sheet.__registerRuleView(this);
     }
     get type() { return 9; }
@@ -11698,6 +11716,11 @@ let omoikaneUserActivationState;
     get style() { return this.__style; }
     set style(value) { this.__style.cssText = value; }
     get cssText() { return "@" + this.name + " { " + this.style.cssText + " }"; }
+  }
+
+  function isCssMarginRuleSource(source) {
+    return /^@(?:top-(?:left-corner|left|center|right|right-corner)|right-(?:top|middle|bottom)|bottom-(?:right-corner|right|center|left|left-corner)|left-(?:bottom|middle|top))(?=\s|\{)/i
+      .test(cssRuleWithoutLeadingComments(source));
   }
 
   class CSSPageRule extends CSSGroupingRule {
@@ -11709,8 +11732,20 @@ let omoikaneUserActivationState;
       const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
       this.__selectorText = source.slice("@page".length, open).trim();
       const contents = splitNestedStyleBody(source.slice(open + 1, close));
-      this.__style = declarationView(contents.leading, () => this.__syncFromInner(), false, false);
-      this.__innerSheet = new CSSStyleSheet(null, { rules: contents.rules });
+      let declarations = contents.leading;
+      const rules = [];
+      for (const rule of contents.rules) {
+        if (/^@-omoikane-nested-declarations(?=\s|\{)/i.test(rule)) {
+          const ruleOpen = cssRuleBlockStart(rule), ruleClose = rule.lastIndexOf("}");
+          declarations += " " + rule.slice(ruleOpen + 1, ruleClose);
+        } else if (isCssMarginRuleSource(rule)) {
+          rules.push(rule);
+        }
+      }
+      this.__style = declarationView(
+        declarations, () => this.__syncFromInner(), false, false, null, true
+      );
+      this.__innerSheet = new CSSStyleSheet(null, { rules });
       this.__innerSheet.__parentRule = this;
       if (sheet) sheet.__registerRuleView(this);
     }
@@ -11773,16 +11808,35 @@ let omoikaneUserActivationState;
   }
 
   const viewTransitionDescriptors = new Set(["navigation", "types"]);
+  function viewTransitionRuleSource(text) {
+    const source = cssRuleWithoutLeadingComments(text);
+    const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
+    if (open < 0 || close <= open ||
+        source.slice(0, open).replace(/\/\*[\s\S]*?\*\//g, " ").trim() !== "@view-transition") {
+      return null;
+    }
+    const declarations = JSON.parse(__omoikane_css_declarations(source.slice(open + 1, close)));
+    const accepted = declarations.filter(([name, value]) => {
+      if (/!\s*important\s*$/i.test(value)) return false;
+      if (name === "navigation") return /^(?:auto|none)$/i.test(value.trim());
+      if (name === "types") return /^[-_a-z][-_a-z0-9]*(?:\s+[-_a-z][-_a-z0-9]*)*$/i.test(value.trim());
+      return false;
+    });
+    const body = accepted.map(([name, value]) => name + ": " + value + ";").join(" ");
+    return "@view-transition" + (body ? " { " + body + " }" : " { }");
+  }
   class CSSViewTransitionRule extends CSSDescriptorRule {
     constructor(text, sheet = null, index = -1) {
-      super(text, sheet, index, viewTransitionDescriptors);
+      super(viewTransitionRuleSource(text) || "@view-transition { }", sheet, index,
+        viewTransitionDescriptors);
       this.__prelude = "@view-transition";
     }
     get type() { return 0; }
     get navigation() { return this.__style.getPropertyValue("navigation"); }
-    set navigation(value) { this.__style.setProperty("navigation", value); }
-    get types() { return this.__style.getPropertyValue("types"); }
-    set types(value) { this.__style.setProperty("types", value); }
+    get types() {
+      const value = this.__style.getPropertyValue("types");
+      return value ? Object.freeze(value.trim().split(/\s+/)) : Object.freeze([]);
+    }
   }
 
   function createCssRule(text, sheet = null, index = -1) {
@@ -11819,7 +11873,7 @@ let omoikaneUserActivationState;
       ? new CSSKeyframesRule(text, sheet, index)
       : /^@page(?=\s|\/\*|\{)/i.test(ruleSource)
       ? new CSSPageRule(text, sheet, index)
-      : /^@(?:top|right|bottom|left)-|^@(?:top|bottom)-(?:left|center|right)-corner(?=\s|\{)/i.test(ruleSource)
+      : isCssMarginRuleSource(ruleSource)
       ? new CSSMarginRule(text, sheet, index)
       : /^@namespace(?=\s|\/\*|;)/i.test(ruleSource)
       ? new CSSNamespaceRule(text, sheet, index)
@@ -12209,6 +12263,10 @@ let omoikaneUserActivationState;
       }
       if (/^\s*@import(?=\s|\/\*)/i.test(text) && cssImportParts(text) === null) {
         throw new DOMException("Invalid @import rule.", "SyntaxError");
+      }
+      if (/^\s*@view-transition(?=\s|\/\*|\{)/i.test(text) &&
+          viewTransitionRuleSource(source) === null) {
+        throw new DOMException("Invalid @view-transition rule.", "SyntaxError");
       }
       let count;
       const fontFeatureRule = /^\s*@font-feature-values(?=\s|\/\*|;|\{)/i.test(text);

@@ -80,7 +80,7 @@ fn page_namespace_and_modern_rules_use_dedicated_interfaces() {
                 transition.navigation, transition.types
               ]); })()",
         ),
-        "[true,\"svg\",\"https://example.test/svg\",true,\"report:left\",\"1cm\",true,\"top-center\",true,true,true,true,true,\"auto\",\"slide\"]"
+        "[true,\"svg\",\"https://example.test/svg\",true,\"report:left\",\"1cm\",true,\"top-center\",true,true,true,true,true,\"auto\",[\"slide\"]]"
     );
 }
 
@@ -104,12 +104,29 @@ fn dedicated_rule_mutations_update_the_owning_stylesheet() {
                 page.style.margin, margin.style.content,
                 starting.cssRules.length, starting.cssRules[1].selectorText,
                 transition.navigation, transition.types,
-                page.cssText.includes('margin: 2cm'), page.cssText.includes('content: \"new\"'),
+                page.cssText.includes('margin-top: 2cm'), page.cssText.includes('content: \"new\"'),
                 starting.cssText.includes('b { opacity: 1; }'),
-                transition.cssText.includes('navigation: none')
+                transition.cssText.includes('navigation: auto')
               ]); })()",
         ),
-        "[true,true,\"2cm\",\"\\\"new\\\"\",2,\"b\",\"none\",\"new\",true,true,true,true]"
+        "[true,true,\"2cm\",\"\\\"new\\\"\",2,\"b\",\"auto\",[\"old\"],true,true,true,true]"
+    );
+}
+
+#[test]
+fn invalid_view_transition_preludes_are_rejected() {
+    let mut runtime = runtime();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "(() => { const sheet = new CSSStyleSheet();
+              let name = ''; try { sheet.insertRule('@view-transition extra {}'); }
+              catch (error) { name = error.name; }
+              sheet.replaceSync('@view-transition extra {} main {}');
+              return JSON.stringify([name, sheet.cssRules.length,
+                sheet.cssRules[0] instanceof CSSStyleRule]); })()",
+        ),
+        "[\"SyntaxError\",1,true]"
     );
 }
 
