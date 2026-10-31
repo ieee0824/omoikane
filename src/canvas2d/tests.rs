@@ -68,12 +68,13 @@ fn unbounded_operators_clear_outside_the_shape_but_inside_the_clip() {
 #[test]
 fn strokes_use_the_user_space_line_width() {
     let mut pixels = vec![0; 20 * 20 * 4];
-    // A 1px-wide line scaled by 4 horizontally is 4 device pixels wide.
+    // A 1px-wide line scaled by 4 horizontally is 4 device pixels wide;
+    // paths are already in device space.
     run(
         &mut pixels,
         20,
         20,
-        r#"{"kind":"stroke","paths":[{"points":[[2.5,0],[2.5,20]]}],
+        r#"{"kind":"stroke","paths":[{"points":[[10,0],[10,20]]}],
             "transform":[4,0,0,1,0,0],"stroke":{"width":1},
             "paint":{"type":"color","color":[0,0,0,255]}}"#,
     );
@@ -133,4 +134,34 @@ fn point_queries_follow_fill_and_stroke_geometry() {
         &style,
         [2.5, 5.0]
     ));
+}
+
+#[test]
+fn shapes_outside_the_surface_still_cast_shadows() {
+    let mut pixels = vec![0; 10 * 10 * 4];
+    run(
+        &mut pixels,
+        10,
+        10,
+        r#"{"kind":"fill","paths":[{"points":[[-10,0],[0,0],[0,10],[-10,10]]}],
+            "shadow":{"color":[255,0,0,255],"offsetX":10},
+            "paint":{"type":"color","color":[0,255,0,255]}}"#,
+    );
+    assert_eq!(pixel(&pixels, 10, 5, 5), [255, 0, 0, 255]);
+}
+
+#[test]
+fn clear_operator_removes_covered_pixels_whatever_the_paint() {
+    let mut pixels = vec![255; 10 * 10 * 4];
+    run(
+        &mut pixels,
+        10,
+        10,
+        &format!(
+            r#"{{"kind":"fill","paths":{LEFT_HALF},"composite":"clear","alpha":0.5,
+                "paint":{{"type":"color","color":[0,0,0,10]}}}}"#
+        ),
+    );
+    assert_eq!(pixel(&pixels, 10, 2, 2), [0, 0, 0, 0]);
+    assert_eq!(pixel(&pixels, 10, 7, 2), [255, 255, 255, 255]);
 }

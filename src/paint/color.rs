@@ -247,7 +247,7 @@ fn parse_rgb_channel(s: &str) -> Option<f32> {
     let parse = |text: &str| {
         text.parse::<f64>()
             .ok()
-            .filter(|value| value.is_finite())
+            .filter(|value| !value.is_nan())
             .map(|value| value.clamp(-1.0e6, 1.0e6) as f32)
     };
     if let Some(pct) = s.strip_suffix('%') {

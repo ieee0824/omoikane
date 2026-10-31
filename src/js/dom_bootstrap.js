@@ -17919,7 +17919,7 @@ let omoikaneUserActivationState;
   // device-space paths; the native rasterizer paints them.
   const canvasConstructionToken = {};
   const canvasIdentity = [1,0,0,1,0,0];
-  const canvasCompositeOperations = new Set(["source-over","source-in","source-out","source-atop",
+  const canvasCompositeOperations = new Set(["clear","plus-lighter","source-over","source-in","source-out","source-atop",
     "destination-over","destination-in","destination-out","destination-atop","lighter","copy","xor",
     "multiply","screen","overlay","darken","lighten","color-dodge","color-burn","hard-light",
     "soft-light","difference","exclusion","hue","saturation","color","luminosity"]);
@@ -18054,18 +18054,30 @@ let omoikaneUserActivationState;
     const step = radius > 0.25 ? 2 * Math.acos(Math.max(-1, 1 - 0.1 / radius)) : Math.PI / 2;
     const steps = Math.max(1, Math.min(4096, Math.ceil(Math.abs(sweep) / step)));
     const cos = Math.cos(rotation), sin = Math.sin(rotation);
-    for (let i = 0; i <= steps; i++) {
-      const angle = start + sweep * i / steps;
+    // Points just inside each end keep the stroke's end direction on the
+    // curve's tangent instead of the first or last chord.
+    const near = Math.min(1e-3, 0.25 / steps);
+    const fractions = [0];
+    if (sweep) fractions.push(near);
+    for (let i = 1; i < steps; i++) fractions.push(i / steps);
+    if (sweep) fractions.push(1 - near);
+    fractions.push(1);
+    for (const fraction of fractions) {
+      const angle = start + sweep * fraction;
       const px = rx * Math.cos(angle), py = ry * Math.sin(angle);
       canvasPathAddDevice(path, applyCanvasMatrix(m, x + px*cos - py*sin, y + px*sin + py*cos));
     }
   }
+  /// The signed sweep from `start` to `end`. Angles that differ by a whole
+  /// turn in the drawing direction draw a full ellipse, as browsers do.
   function canvasArcSweep(start, end, anticlockwise) {
     const tau = 2 * Math.PI;
-    let sweep = anticlockwise ? start - end : end - start;
-    if (sweep >= tau) sweep = tau;
-    else { sweep %= tau; if (sweep < 0) sweep += tau; }
-    return anticlockwise ? -sweep : sweep;
+    if (!anticlockwise) {
+      if (end - start >= tau) return tau;
+      return start > end ? tau - (start - end) % tau : end - start;
+    }
+    if (start - end >= tau) return -tau;
+    return start < end ? -(tau - (end - start) % tau) : end - start;
   }
   function canvasPathEllipse(path, m, x, y, rx, ry, rotation, start, end, anticlockwise) {
     canvasPathArcPoints(path, m, x, y, rx, ry, rotation, start, canvasArcSweep(start, end, anticlockwise));
@@ -18279,7 +18291,7 @@ let omoikaneUserActivationState;
     }
     const raw = source.__id != null ? __omoikane_canvas_image_source(source.__id) : null;
     if (raw === null) {
-      if (isImage && !source.complete) return null;
+      if (isImage && source.complete === false) return null;
       if (isVideo) return null;
       throw new DOMException("Image source is unavailable", "InvalidStateError");
     }

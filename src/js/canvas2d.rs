@@ -205,7 +205,8 @@ mod tests {
 
     #[test]
     fn svg_path_data_becomes_absolute_commands() {
-        let commands = serde_json::Value::Array(svg_path_commands("M 1 2 h 3 v 4 z l 1 1")).to_string();
+        let commands =
+            serde_json::Value::Array(svg_path_commands("M 1 2 h 3 v 4 z l 1 1")).to_string();
         assert_eq!(
             commands,
             r#"[["M",1.0,2.0],["L",4.0,2.0],["L",4.0,6.0],["Z"],["L",2.0,3.0]]"#

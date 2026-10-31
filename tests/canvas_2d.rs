@@ -145,6 +145,8 @@ fn path2d_and_point_queries() {
         if (px(6, 6) !== '0,255,0,255' || px(16, 16) !== '0,255,0,255' || px(13, 13) !== '0,0,0,0')
           return 'path2d fill ' + px(16, 16);
         try { ctx.fill(path, 'bogus'); return 'fill rule'; } catch (e) { if (!(e instanceof TypeError)) return e.name; }
+        ctx.beginPath(); ctx.arc(10, 10, 5, 0, Math.PI * 2, true);
+        if (!ctx.isPointInPath(10, 10)) return 'anticlockwise full circle';
         ctx.beginPath(); ctx.arc(10, 10, 5, 0, Math.PI * 2);
         return ctx.isPointInPath(10, 10) && !ctx.isPointInPath(10, 16) && !ctx.isPointInPath(NaN, 10) || 'arc';
         "#,

@@ -5,6 +5,7 @@ use super::Rgba;
 /// A Porter-Duff operator or a blend mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Operator {
+    Clear,
     #[default]
     SourceOver,
     SourceIn,
@@ -44,6 +45,7 @@ impl Operator {
     pub(crate) fn parse(value: &str) -> Option<Self> {
         use BlendMode::*;
         Some(match value {
+            "clear" => Self::Clear,
             "source-over" => Self::SourceOver,
             "source-in" => Self::SourceIn,
             "source-out" => Self::SourceOut,
@@ -52,7 +54,7 @@ impl Operator {
             "destination-in" => Self::DestinationIn,
             "destination-out" => Self::DestinationOut,
             "destination-atop" => Self::DestinationAtop,
-            "lighter" => Self::Lighter,
+            "lighter" | "plus-lighter" => Self::Lighter,
             "copy" => Self::Copy,
             "xor" => Self::Xor,
             "multiply" => Self::Blend(Multiply),
@@ -96,6 +98,8 @@ impl Operator {
             }))
         };
         match self {
+            // Clears only where the source covers, scaled by its coverage.
+            Self::Clear => porter_duff(0.0, 1.0 - sa),
             Self::SourceOver => porter_duff(1.0, 1.0 - sa),
             Self::SourceIn => porter_duff(da, 0.0),
             Self::SourceOut => porter_duff(1.0 - da, 0.0),
@@ -253,7 +257,12 @@ mod tests {
         );
         assert_eq!(Operator::Xor.apply(RED, RED).0, [0.0; 4]);
         assert!(Operator::Copy.is_unbounded() && !Operator::Xor.is_unbounded());
-        assert_eq!(Operator::parse("plus-lighter"), None);
+        assert_eq!(Operator::parse("plus-lighter"), Some(Operator::Lighter));
+        assert_eq!(
+            Operator::Clear.apply(HALF_BLUE, RED).0,
+            [0.5, 0.0, 0.0, 0.5]
+        );
+        assert_eq!(Operator::parse("plus-darker"), None);
     }
 
     #[test]

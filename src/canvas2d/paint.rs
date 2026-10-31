@@ -222,7 +222,7 @@ impl<'a> Paint<'a> {
     }
 
     /// The premultiplied color at the center of device pixel `(x, y)`.
-    pub(crate) fn sample(&self, x: usize, y: usize) -> Rgba {
+    pub(crate) fn sample(&self, x: i64, y: i64) -> Rgba {
         let point = self.inverse.apply([x as f64 + 0.5, y as f64 + 0.5]);
         match &self.kind {
             Kind::Color(color) => *color,
@@ -383,7 +383,7 @@ mod tests {
     }
 
     fn color(paint: &Paint<'_>, x: usize, y: usize) -> [u8; 4] {
-        paint.sample(x, y).to_unpremultiplied()
+        paint.sample(x as i64, y as i64).to_unpremultiplied()
     }
 
     #[test]

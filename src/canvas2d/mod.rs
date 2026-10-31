@@ -251,13 +251,14 @@ pub(crate) fn draw(
 ) -> bool {
     let (width, height) = (surface.width, surface.height);
     let clip = clip_mask(&command.clip, width, height);
-    let coverage = match command.kind {
-        DrawKind::Fill => raster::fill_mask(&command.paths, command.rule, width, height),
+    let (shape, rule) = match command.kind {
+        DrawKind::Fill => (command.paths.clone(), command.rule),
         DrawKind::Stroke => {
             let Some(style) = &command.stroke else {
                 return false;
             };
-            stroke_mask(&command.paths, command.transform, style, width, height)
+            let outline = stroke_outline(&command.paths, command.transform, style);
+            (outline, FillRule::NonZero)
         }
         DrawKind::Clear => {
             let mask = raster::fill_mask(&command.paths, FillRule::NonZero, width, height);
@@ -268,24 +269,44 @@ pub(crate) fn draw(
     let Some(spec) = &command.paint else {
         return false;
     };
-    let Some(paint) = paint::Paint::new(spec, command.transform, texture, command.smoothing) else {
-        return false;
-    };
     let operator = command
         .composite
         .as_deref()
         .and_then(Operator::parse)
         .unwrap_or_default();
-    let source = source_layer(&coverage, &paint);
-    if let Some(shadow) = command
+    // `clear` removes what the shape covers whatever the paint is.
+    let (spec, alpha) = match operator {
+        Operator::Clear => (&CLEAR_PAINT, 1.0),
+        _ => (spec, command.alpha),
+    };
+    let Some(paint) = paint::Paint::new(spec, command.transform, texture, command.smoothing) else {
+        return false;
+    };
+    let shadow = command
         .shadow
         .as_ref()
-        .and_then(|shadow| shadow::layer(&source, shadow))
-    {
-        composite(surface, &shadow, operator, command.alpha, clip.as_ref());
+        .filter(|shadow| shadow::is_visible(shadow));
+    let margin = shadow.map_or(Margin::default(), shadow::margin);
+    let source = source_layer(&shape, rule, width, height, margin, &paint);
+    if let Some(shadow) = shadow.and_then(|shadow| shadow::layer(&source, shadow)) {
+        composite(surface, &shadow, operator, alpha, clip.as_ref());
     }
-    composite(surface, &source, operator, command.alpha, clip.as_ref());
+    composite(surface, &source, operator, alpha, clip.as_ref());
     true
+}
+
+const CLEAR_PAINT: PaintSpec = PaintSpec::Color {
+    color: [0, 0, 0, 255],
+};
+
+/// Extra device pixels around the surface that the source image covers, so
+/// a shadow can be cast by parts of the shape outside the surface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Margin {
+    pub(crate) left: usize,
+    pub(crate) top: usize,
+    pub(crate) right: usize,
+    pub(crate) bottom: usize,
 }
 
 /// The intersection of `regions`, or `None` without a clip.
@@ -313,41 +334,44 @@ fn stroke_outline(paths: &[SubPath], transform: Matrix, style: &StrokeStyle) -> 
     transform.map_paths(&outline)
 }
 
-fn stroke_mask(
-    paths: &[SubPath],
-    transform: Matrix,
-    style: &StrokeStyle,
+/// Image A of the drawing model: the paint inside `shape`, over the surface
+/// grown by `margin`.
+fn source_layer(
+    shape: &[SubPath],
+    rule: FillRule,
     width: usize,
     height: usize,
-) -> Mask {
-    raster::fill_mask(
-        &stroke_outline(paths, transform, style),
-        FillRule::NonZero,
-        width,
-        height,
-    )
-}
-
-/// Image A of the drawing model: the paint inside the covered area.
-fn source_layer(coverage: &Mask, paint: &paint::Paint<'_>) -> Layer {
+    margin: Margin,
+    paint: &paint::Paint<'_>,
+) -> Layer {
+    let offset = Matrix([1.0, 0.0, 0.0, 1.0, margin.left as f64, margin.top as f64]);
+    let coverage = raster::fill_mask(
+        &offset.map_paths(shape),
+        rule,
+        width + margin.left + margin.right,
+        height + margin.top + margin.bottom,
+    );
     let (left, top, right, bottom) = coverage.bounds;
-    let (width, height) = (right.saturating_sub(left), bottom.saturating_sub(top));
-    let mut data = Vec::with_capacity(width * height);
-    for y in top..top + height {
-        for x in left..left + width {
+    let (layer_width, layer_height) = (right.saturating_sub(left), bottom.saturating_sub(top));
+    let (origin_x, origin_y) = (margin.left as i64, margin.top as i64);
+    let mut data = Vec::with_capacity(layer_width * layer_height);
+    for y in top..top + layer_height {
+        for x in left..left + layer_width {
             let cover = coverage.at(x, y);
             data.push(if cover > 0.0 && !paint.is_none() {
-                paint.sample(x, y).scale(f64::from(cover))
+                paint
+                    .sample(x as i64 - origin_x, y as i64 - origin_y)
+                    .scale(f64::from(cover))
             } else {
                 Rgba::TRANSPARENT
             });
         }
     }
     Layer {
-        left: left as i64,
-        top: top as i64,
-        width,
-        height,
+        left: left as i64 - origin_x,
+        top: top as i64 - origin_y,
+        width: layer_width,
+        height: layer_height,
         data,
     }
 }

@@ -5,11 +5,10 @@ use super::{FillRule, SubPath};
 /// Vertical samples per pixel row.
 const SUBSAMPLES: usize = 4;
 
-/// Per-pixel coverage in `0.0..=1.0` over a `width × height` surface.
+/// Per-pixel coverage in `0.0..=1.0` over a surface `width` pixels wide.
 #[derive(Debug, Clone)]
 pub(crate) struct Mask {
     pub(crate) width: usize,
-    pub(crate) height: usize,
     pub(crate) coverage: Vec<f32>,
     /// The rows and columns holding nonzero coverage, as
     /// `(left, top, right, bottom)` with exclusive ends.
@@ -17,16 +16,6 @@ pub(crate) struct Mask {
 }
 
 impl Mask {
-    /// A mask with full coverage everywhere.
-    pub(crate) fn full(width: usize, height: usize) -> Self {
-        Self {
-            width,
-            height,
-            coverage: vec![1.0; width * height],
-            bounds: (0, 0, width, height),
-        }
-    }
-
     pub(crate) fn at(&self, x: usize, y: usize) -> f32 {
         self.coverage[y * self.width + x]
     }
@@ -41,10 +30,6 @@ impl Mask {
         if self.bounds.0 >= self.bounds.2 || self.bounds.1 >= self.bounds.3 {
             self.bounds = (0, 0, 0, 0);
         }
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.bounds.0 >= self.bounds.2 || self.bounds.1 >= self.bounds.3
     }
 }
 
@@ -62,7 +47,6 @@ pub(crate) fn fill_mask(paths: &[SubPath], rule: FillRule, width: usize, height:
     let mut edges = edges(paths);
     let mut mask = Mask {
         width,
-        height,
         coverage: vec![0.0; width * height],
         bounds: (0, 0, 0, 0),
     };

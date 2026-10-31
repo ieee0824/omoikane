@@ -1,6 +1,28 @@
 //! Shadows (HTML §4.12.5.1.18).
 
-use super::{Layer, Rgba, Shadow};
+use super::{Layer, Margin, Rgba, Shadow};
+
+/// Whether `shadow` draws anything (HTML "shadows are drawn").
+pub(crate) fn is_visible(shadow: &Shadow) -> bool {
+    shadow.color[3] > 0
+        && [shadow.blur, shadow.offset_x, shadow.offset_y]
+            .iter()
+            .all(|value| value.is_finite())
+        && (shadow.blur > 0.0 || shadow.offset_x != 0.0 || shadow.offset_y != 0.0)
+}
+
+/// How far beyond the surface the shape can cast a visible shadow.
+pub(crate) fn margin(shadow: &Shadow) -> Margin {
+    let blur = (shadow.blur.max(0.0) * 1.5).ceil() as usize + 1;
+    let (x, y) = (shadow.offset_x.round(), shadow.offset_y.round());
+    let extent = |value: f64| (value.max(0.0).min(1.0e5)) as usize + blur;
+    Margin {
+        left: extent(x),
+        top: extent(y),
+        right: extent(-x),
+        bottom: extent(-y),
+    }
+}
 
 /// Image B of the drawing model: the shadow cast by `source`, or `None`
 /// when the shadow styles draw nothing.
