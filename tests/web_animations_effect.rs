@@ -79,6 +79,21 @@ fn linear_easing_is_exposed_through_cssom_validation() {
 }
 
 #[test]
+fn transition_behavior_is_exposed_through_cssom_validation() {
+    let mut runtime = runtime();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "JSON.stringify([
+                CSS.supports('transition-behavior', 'allow-discrete'),
+                CSS.supports('transition-behavior', 'auto')
+            ])",
+        ),
+        "[true,false]"
+    );
+}
+
+#[test]
 fn scroll_and_view_timelines_derive_progress_from_current_geometry() {
     let mut runtime = runtime();
     assert_eq!(

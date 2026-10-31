@@ -2,7 +2,7 @@
 //!
 //! Transition values use comma-separated lists whose commas must survive the
 //! generic declaration parser. This module validates those lists and expands
-//! the shorthand into its four longhands. Timeline sampling lives above the
+//! the shorthand into its longhands. Timeline sampling lives above the
 //! CSS parser and consumes the normalized longhand values produced here.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -24,6 +24,7 @@ struct TransitionDescriptor {
     duration: String,
     timing_function: String,
     delay: String,
+    behavior: String,
 }
 
 /// Per-document CSS transition state sampled by a [`super::StyleResolver`].
@@ -283,6 +284,7 @@ struct RunningTransition {
     start_ms: f64,
     end_ms: f64,
     timing: TimingFunction,
+    discrete: bool,
     started: bool,
 }
 
@@ -307,6 +309,7 @@ struct TransitionParameters {
     duration_ms: f64,
     delay_ms: f64,
     timing: TimingFunction,
+    allow_discrete: bool,
 }
 
 impl TransitionTimeline {
@@ -636,15 +639,16 @@ fn update_transition_for_property(
         cancel_transition(node_id, now_ms, state, events, &property);
         return;
     };
+    let discrete = interpolate_property_with_color(
+        &property,
+        &start_value,
+        &end_value,
+        0.5,
+        &sampled_current_color(properties, &state.running, now_ms),
+    )
+    .is_none();
     if parameters.duration_ms + parameters.delay_ms <= 0.0
-        || interpolate_property_with_color(
-            &property,
-            &start_value,
-            &end_value,
-            0.5,
-            &sampled_current_color(properties, &state.running, now_ms),
-        )
-        .is_none()
+        || (discrete && !parameters.allow_discrete)
     {
         cancel_transition(node_id, now_ms, state, events, &property);
         return;
@@ -657,6 +661,7 @@ fn update_transition_for_property(
         end_value,
         interrupted.as_ref(),
         parameters,
+        discrete,
         now_ms,
     );
     events.push(running.event_record(node_id, "transitionrun", property.clone(), now_ms));
@@ -727,6 +732,7 @@ impl RunningTransition {
         end_value: ComputedValue,
         interrupted: Option<&Self>,
         parameters: TransitionParameters,
+        discrete: bool,
         now_ms: f64,
     ) -> Self {
         let (reversing_adjusted_start_value, reversing_shortening_factor) = interrupted
@@ -757,6 +763,7 @@ impl RunningTransition {
             start_ms,
             end_ms,
             timing: parameters.timing,
+            discrete,
             started,
         }
     }
@@ -773,6 +780,23 @@ impl RunningTransition {
 
     fn sample(&self, property: &str, now_ms: f64, current_color: &str) -> Option<ComputedValue> {
         let progress = self.input_progress(now_ms);
+        if self.discrete {
+            if now_ms < self.start_ms {
+                return Some(self.start_value.clone());
+            }
+            return Some(
+                if discrete_uses_end_value(
+                    property,
+                    &self.start_value,
+                    &self.end_value,
+                    self.timing.sample(progress),
+                ) {
+                    self.end_value.clone()
+                } else {
+                    self.start_value.clone()
+                },
+            );
+        }
         interpolate_property_with_color(
             property,
             &self.start_value,
@@ -797,6 +821,26 @@ impl RunningTransition {
             property_name,
             elapsed_time: elapsed_ms / 1000.0,
         }
+    }
+}
+
+fn discrete_uses_end_value(
+    property: &str,
+    start: &ComputedValue,
+    end: &ComputedValue,
+    progress: f64,
+) -> bool {
+    let hidden_value = match property {
+        "display" => "none",
+        "content-visibility" => "hidden",
+        _ => return progress >= 0.5,
+    };
+    let start_hidden = start.css_text().eq_ignore_ascii_case(hidden_value);
+    let end_hidden = end.css_text().eq_ignore_ascii_case(hidden_value);
+    match (start_hidden, end_hidden) {
+        (true, false) => true,
+        (false, true) => progress >= 1.0,
+        _ => progress >= 0.5,
     }
 }
 
@@ -857,6 +901,7 @@ struct TransitionConfiguration {
     durations_ms: Vec<f64>,
     timings: Vec<TimingFunction>,
     delays_ms: Vec<f64>,
+    allow_discrete: Vec<bool>,
 }
 
 impl TransitionConfiguration {
@@ -865,6 +910,7 @@ impl TransitionConfiguration {
         let duration_text = property_keyword(properties, "transition-duration", "0s");
         let timing_text = property_keyword(properties, "transition-timing-function", "ease");
         let delay_text = property_keyword(properties, "transition-delay", "0s");
+        let behavior_text = property_keyword(properties, "transition-behavior", "normal");
         Self {
             properties: split_top_level(property_text, ',')
                 .unwrap_or_default()
@@ -878,6 +924,11 @@ impl TransitionConfiguration {
                 .filter_map(TimingFunction::parse)
                 .collect(),
             delays_ms: parse_time_list_ms(delay_text, true),
+            allow_discrete: split_top_level(behavior_text, ',')
+                .unwrap_or_default()
+                .into_iter()
+                .map(|value| value.trim().eq_ignore_ascii_case("allow-discrete"))
+                .collect(),
         }
     }
 
@@ -912,6 +963,7 @@ impl TransitionConfiguration {
             duration_ms: *repeated(&self.durations_ms, index)?,
             delay_ms: *repeated(&self.delays_ms, index)?,
             timing: repeated(&self.timings, index)?.clone(),
+            allow_discrete: *repeated(&self.allow_discrete, index)?,
         })
     }
 }
@@ -1213,6 +1265,11 @@ pub(crate) fn expand_transition_shorthand(value: Value, important: bool) -> Vec<
             value: Value::Keyword(join(|item| &item.delay)),
             important,
         },
+        Declaration {
+            name: "transition-behavior".to_string(),
+            value: Value::Keyword(join(|item| &item.behavior)),
+            important,
+        },
     ]
 }
 
@@ -1245,6 +1302,10 @@ pub(crate) fn normalize_transition_shorthand(input: &str) -> Option<String> {
     properties.insert(
         "transition-delay".to_string(),
         ComputedValue::Keyword(join(|item| &item.delay)),
+    );
+    properties.insert(
+        "transition-behavior".to_string(),
+        ComputedValue::Keyword(join(|item| &item.behavior)),
     );
     Some(computed_transition_shorthand(&properties))
 }
@@ -1281,6 +1342,14 @@ pub(crate) fn normalize_transition_longhand(name: &str, value: &str) -> Option<S
         "transition-timing-function" => items
             .into_iter()
             .map(normalize_timing_function)
+            .collect::<Option<Vec<_>>>()?,
+        "transition-behavior" => items
+            .into_iter()
+            .map(|item| match item.trim().to_ascii_lowercase().as_str() {
+                "normal" => Some("normal".to_string()),
+                "allow-discrete" => Some("allow-discrete".to_string()),
+                _ => None,
+            })
             .collect::<Option<Vec<_>>>()?,
         _ => return None,
     };
@@ -1323,6 +1392,7 @@ fn parse_transition_shorthand(input: &str) -> Option<Vec<TransitionDescriptor>> 
         let mut duration = None;
         let mut timing_function = None;
         let mut delay = None;
+        let mut behavior = None;
         for component in components {
             if let Some(time) = normalize_time(component, delay.is_none()) {
                 if duration.is_none() {
@@ -1341,6 +1411,15 @@ fn parse_transition_shorthand(input: &str) -> Option<Vec<TransitionDescriptor>> 
                 && let Some(timing) = normalize_timing_function(component)
             {
                 timing_function = Some(timing);
+                continue;
+            }
+            if behavior.is_none()
+                && matches!(
+                    component.to_ascii_lowercase().as_str(),
+                    "normal" | "allow-discrete"
+                )
+            {
+                behavior = Some(component.to_ascii_lowercase());
                 continue;
             }
             if property.is_none()
@@ -1362,6 +1441,7 @@ fn parse_transition_shorthand(input: &str) -> Option<Vec<TransitionDescriptor>> 
             duration: duration.unwrap_or_else(|| "0s".to_string()),
             timing_function: timing_function.unwrap_or_else(|| "ease".to_string()),
             delay: delay.unwrap_or_else(|| "0s".to_string()),
+            behavior: behavior.unwrap_or_else(|| "normal".to_string()),
         });
     }
     if descriptors.len() > 1 && descriptors.iter().any(|item| item.property == "none") {
@@ -1378,6 +1458,7 @@ pub(crate) fn computed_transition_shorthand(properties: &PropertyMap) -> String 
     let durations = split_keyword_property(properties, "transition-duration", "0s");
     let timings = split_keyword_property(properties, "transition-timing-function", "ease");
     let delays = split_keyword_property(properties, "transition-delay", "0s");
+    let behaviors = split_keyword_property(properties, "transition-behavior", "normal");
     property_items
         .iter()
         .enumerate()
@@ -1389,6 +1470,9 @@ pub(crate) fn computed_transition_shorthand(properties: &PropertyMap) -> String 
                 .map(String::as_str)
                 .unwrap_or("ease");
             let delay = repeated(&delays, index).map(String::as_str).unwrap_or("0s");
+            let behavior = repeated(&behaviors, index)
+                .map(String::as_str)
+                .unwrap_or("normal");
             let duration_is_zero = time_to_ms(duration, false) == Some(0.0);
             let delay_is_zero = time_to_ms(delay, true) == Some(0.0);
             let timing_is_ease = timing.eq_ignore_ascii_case("ease");
@@ -1404,6 +1488,9 @@ pub(crate) fn computed_transition_shorthand(properties: &PropertyMap) -> String 
             }
             if !delay_is_zero {
                 components.push(delay);
+            }
+            if behavior != "normal" {
+                components.push(behavior);
             }
             if components.is_empty() {
                 "all".to_string()
@@ -1423,12 +1510,13 @@ fn split_keyword_property(properties: &PropertyMap, name: &str, fallback: &str) 
         .collect()
 }
 
-fn transition_longhands() -> [&'static str; 4] {
+fn transition_longhands() -> [&'static str; 5] {
     [
         "transition-property",
         "transition-duration",
         "transition-timing-function",
         "transition-delay",
+        "transition-behavior",
     ]
 }
 
@@ -1751,6 +1839,7 @@ mod tests {
                 assert_eq!(running.start_ms, expected.start_ms);
                 assert_eq!(running.end_ms, expected.end_ms);
                 assert_eq!(running.started, expected.started);
+                assert_eq!(running.discrete, expected.discrete);
                 for progress in [0.0, 0.25, 0.5, 1.0] {
                     assert_eq!(
                         running.timing.sample(progress),
@@ -1966,7 +2055,9 @@ mod tests {
                 duration_ms: 1_000.0,
                 delay_ms: 0.0,
                 timing: TimingFunction::Linear,
+                allow_discrete: false,
             },
+            false,
             0.0,
         );
         let mut timeline = TransitionTimeline::default();
@@ -2183,7 +2274,7 @@ mod tests {
             ),
             false,
         );
-        assert_eq!(declarations.len(), 4);
+        assert_eq!(declarations.len(), 5);
         assert_eq!(
             declarations[0].value,
             Value::Keyword("opacity, transform".into())
@@ -2194,6 +2285,10 @@ mod tests {
             Value::Keyword("linear, cubic-bezier(0.1, 0.2, 0.3, 1)".into())
         );
         assert_eq!(declarations[3].value, Value::Keyword("50ms, 0s".into()));
+        assert_eq!(
+            declarations[4].value,
+            Value::Keyword("normal, normal".into())
+        );
     }
 
     #[test]
@@ -2213,6 +2308,55 @@ mod tests {
         assert_eq!(
             normalize_transition_longhand("transition-property", "initial"),
             Some("initial".into())
+        );
+    }
+
+    #[test]
+    fn parses_transition_behavior_in_longhand_and_shorthand() {
+        assert_eq!(
+            normalize_transition_longhand("transition-behavior", "normal, ALLOW-DISCRETE"),
+            Some("normal, allow-discrete".into())
+        );
+        let descriptors = parse_transition_shorthand("visibility 1s allow-discrete").unwrap();
+        assert_eq!(descriptors[0].behavior, "allow-discrete");
+        assert!(normalize_transition_longhand("transition-behavior", "auto").is_none());
+    }
+
+    #[test]
+    fn allow_discrete_switches_non_interpolable_values_at_half_progress() {
+        let mut timeline = TransitionTimeline::default();
+        let mut initial = timeline_style(None, "visibility", "1s", "0s");
+        initial.insert("visibility", ComputedValue::Keyword("visible".into()));
+        initial.insert(
+            "transition-behavior",
+            ComputedValue::Keyword("allow-discrete".into()),
+        );
+        timeline.sample(1, &mut initial);
+
+        let mut target_style = initial.clone();
+        target_style.insert("visibility", ComputedValue::Keyword("hidden".into()));
+        timeline.set_time_ms(10.0);
+        let mut target = target_style.clone();
+        timeline.sample(1, &mut target);
+        assert_eq!(
+            target.get("visibility"),
+            Some(&ComputedValue::Keyword("visible".into()))
+        );
+        assert_eq!(timeline.take_events().len(), 2);
+
+        timeline.set_time_ms(509.0);
+        let mut target = target_style.clone();
+        timeline.sample(1, &mut target);
+        assert_eq!(
+            target.get("visibility"),
+            Some(&ComputedValue::Keyword("visible".into()))
+        );
+        timeline.set_time_ms(510.0);
+        let mut target = target_style;
+        timeline.sample(1, &mut target);
+        assert_eq!(
+            target.get("visibility"),
+            Some(&ComputedValue::Keyword("hidden".into()))
         );
     }
 

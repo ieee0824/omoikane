@@ -8163,6 +8163,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         "transform-origin" => return validate_transform_origin_declaration(value),
         "perspective-origin" => return validate_perspective_origin_declaration(value),
         "transition-property"
+        | "transition-behavior"
         | "transition-duration"
         | "transition-timing-function"
         | "transition-delay" => {
@@ -18090,6 +18091,10 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (PropertyId::MixBlendMode, InitialValue::Keyword("normal")),
     (PropertyId::Isolation, InitialValue::Keyword("auto")),
     (PropertyId::TransitionProperty, InitialValue::Keyword("all")),
+    (
+        PropertyId::TransitionBehavior,
+        InitialValue::Keyword("normal"),
+    ),
     (PropertyId::TransitionDuration, InitialValue::Keyword("0s")),
     (
         PropertyId::TransitionTimingFunction,

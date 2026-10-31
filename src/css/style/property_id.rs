@@ -387,6 +387,7 @@ define_properties! {
         "transform" => Transform,
         "transform-origin" => TransformOrigin,
         "transform-style" => TransformStyle,
+        "transition-behavior" => TransitionBehavior,
         "transition-delay" => TransitionDelay,
         "transition-duration" => TransitionDuration,
         "transition-property" => TransitionProperty,

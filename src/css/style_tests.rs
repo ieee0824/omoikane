@@ -2969,6 +2969,10 @@ fn transition_shorthand_expands_lists_and_computes_initial_values() {
         Some(&ComputedValue::Keyword("0.05s, 0s".to_string()))
     );
     assert_eq!(
+        style.get("transition-behavior"),
+        Some(&ComputedValue::Keyword("normal, normal".to_string()))
+    );
+    assert_eq!(
         style.get("transition"),
         Some(&ComputedValue::Keyword(
             "opacity 0.2s linear 0.05s, transform 1s ease-in".to_string()
@@ -2992,6 +2996,10 @@ fn transition_shorthand_expands_lists_and_computes_initial_values() {
     assert_eq!(
         initial.get("transition-delay"),
         Some(&ComputedValue::Keyword("0s".to_string()))
+    );
+    assert_eq!(
+        initial.get("transition-behavior"),
+        Some(&ComputedValue::Keyword("normal".to_string()))
     );
     assert_eq!(
         initial.get("transition"),
