@@ -3010,6 +3010,35 @@ fn transition_shorthand_expands_lists_and_computes_initial_values() {
 }
 
 #[test]
+fn starting_style_seeds_the_first_transition_timeline_sample() {
+    let element = NodeHandle::element("div");
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@starting-style { div { opacity: 0; } } \
+             div { opacity: 1; transition: opacity 1s linear; }",
+        )
+        .unwrap(),
+    );
+
+    let initial = resolver.computed_style(&element);
+    assert_eq!(initial.get("opacity"), Some(&ComputedValue::Number(0.0)));
+    assert_eq!(
+        resolver
+            .take_transition_events()
+            .iter()
+            .map(|event| event.event_type)
+            .collect::<Vec<_>>(),
+        ["transitionrun", "transitionstart"]
+    );
+
+    resolver.set_transition_time_ms(500.0);
+    let halfway = resolver.computed_style(&element);
+    assert_eq!(halfway.get("opacity"), Some(&ComputedValue::Number(0.5)));
+}
+
+#[test]
 fn transition_property_preserves_unknown_custom_ident_case() {
     let element = NodeHandle::element("div");
     element.set_attribute(

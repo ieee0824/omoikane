@@ -313,6 +313,32 @@ struct TransitionParameters {
 }
 
 impl TransitionTimeline {
+    /// Whether this element has no transition baseline yet and may consume
+    /// an `@starting-style` snapshot.
+    pub(crate) fn needs_starting_style(&self, node_id: usize) -> bool {
+        self.elements
+            .get(&node_id)
+            .is_none_or(|state| !state.initialized)
+    }
+
+    /// Seeds a newly styled element from `@starting-style` before comparing
+    /// it with the normal after-change style in the same style update.
+    pub(crate) fn sample_with_starting_style(
+        &mut self,
+        node_id: usize,
+        starting: Option<PropertyMap>,
+        properties: &mut PropertyMap,
+    ) {
+        if let Some(starting) = starting
+            && self.needs_starting_style(node_id)
+        {
+            let state = self.elements.entry(node_id).or_default();
+            state.base_values = starting;
+            state.initialized = true;
+        }
+        self.sample(node_id, properties);
+    }
+
     fn sample_time_advances(&self, time_ms: f64) -> bool {
         time_ms.is_finite() && time_ms.max(0.0) > self.now_ms
     }
