@@ -161,10 +161,14 @@ impl JsRuntime {
         {
             return NextRendering::EveryFrame;
         }
-        let timer_delay = state
-            .event_loop
-            .next_timer_delay_ms()
-            .map(Duration::from_millis);
+        // Waiting idle callbacks get one idle period per frame.
+        let idle_delay = (!state.idle_period_requests.is_empty())
+            .then_some(super::idle_period::IDLE_PERIOD_INTERVAL_MS);
+        let timer_delay = match (state.event_loop.next_timer_delay_ms(), idle_delay) {
+            (Some(timer), Some(idle)) => Some(timer.min(idle)),
+            (timer, idle) => timer.or(idle),
+        }
+        .map(Duration::from_millis);
         let cookie_delay = if state.worker_id.is_some()
             || state.shared_worker.is_global()
             || state.worklet.is_child_global()
@@ -295,6 +299,27 @@ mod tests {
             panic!("an expiring cookie should wake the idle renderer");
         };
         assert!(delay > Duration::ZERO && delay <= Duration::from_secs(60));
+    }
+
+    #[test]
+    fn waiting_idle_callbacks_wake_the_renderer_each_frame() {
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime =
+            JsRuntime::with_document_and_url(document, "https://example.test/page").unwrap();
+        runtime
+            .eval("globalThis.runs = 0; requestIdleCallback(function again() { if (++runs < 3) requestIdleCallback(again); })")
+            .unwrap();
+        // Each pump runs one idle period; the reposted callback waits a frame.
+        for runs in 1..=2 {
+            runtime.run_until_idle().unwrap();
+            assert_eq!(runtime.eval("runs").unwrap().as_number(), Some(runs as f64));
+            assert_eq!(
+                runtime.next_rendering(),
+                NextRendering::After(Duration::from_millis(16))
+            );
+        }
+        runtime.run_until_idle().unwrap();
+        assert_eq!(runtime.next_rendering(), NextRendering::Idle);
     }
 
     #[test]

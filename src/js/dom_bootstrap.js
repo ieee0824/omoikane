@@ -30900,7 +30900,8 @@ let omoikaneUserActivationState;
     }
     try { delete globalThis.history; } catch (_) { globalThis.history = undefined; }
     Object.defineProperty(globalThis, "name", { configurable:true, enumerable:true, value:"", writable:false });
-    for (const name of ["ElementInternals", "CustomStateSet", "RadioNodeList"]) {
+    for (const name of ["ElementInternals", "CustomStateSet", "RadioNodeList",
+      "requestIdleCallback", "cancelIdleCallback", "IdleDeadline"]) {
       try { delete globalThis[name]; } catch (_) { globalThis[name] = undefined; }
     }
     // Async Clipboard is a Window-only surface in this runtime. Keep the
