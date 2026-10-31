@@ -245,6 +245,7 @@ mod resource_loading;
 mod script_loading;
 pub(crate) use document_script_startup::{DocumentScriptStartup, DocumentScriptWait};
 mod security_reporting;
+mod server_timing;
 mod storage;
 mod storage_access;
 #[cfg(test)]
@@ -10579,11 +10580,13 @@ impl JsRuntime {
         state.document_csp.insert(document.identity(), policy);
     }
 
-    /// Installs security and isolation metadata from the Document's response
-    /// before running author scripts in a manually constructed runtime.
+    /// Installs security and isolation metadata and the navigation entry's
+    /// Server Timing from the Document's response before running author
+    /// scripts in a manually constructed runtime.
     pub fn install_document_response_headers(&mut self, headers: &[(String, String)]) {
         self.install_response_security_headers(headers);
         self.install_isolation_policy(headers);
+        self.install_navigation_server_timing(headers);
     }
 
     /// Installs a top-level response's COOP, COEP and Permissions Policy before
@@ -17113,6 +17116,11 @@ fn register_host_bindings(
             js_string!("__omoikane_set_attribute"),
             3,
             NativeFunction::from_copy_closure(set_attribute_native),
+        ),
+        (
+            js_string!("__omoikane_set_style_computation_source"),
+            2,
+            NativeFunction::from_copy_closure(set_style_computation_source_native),
         ),
         (
             js_string!("__omoikane_set_attribute_ns"),
@@ -23744,6 +23752,33 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
                     csp_source.as_ref(),
                 );
         }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn set_style_computation_source_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    let source = args
+        .get(1)
+        .filter(|value| !value.is_null() && !value.is_undefined())
+        .map(|value| {
+            value
+                .to_string(context)
+                .map(|value| value.to_std_string_escaped())
+        })
+        .transpose()?;
+    with_node_render_mutation(&[node_id], |state| {
+        let node = state
+            .borrow()
+            .get_node(node_id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        node.set_style_computation_source(source);
+        state.borrow_mut().mark_style_dirty_for_node(&node);
         Ok(JsValue::undefined())
     })
 }

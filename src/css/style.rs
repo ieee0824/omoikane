@@ -3317,7 +3317,7 @@ impl StyleResolver {
                 dependency
             };
         stylesheet_dependency
-            || parsed_inline_style(node.get_attribute("style").as_deref())
+            || parsed_inline_style(node.inline_style_source().as_deref())
                 .iter()
                 .any(|declaration| value_reads_data_attribute(&declaration.value, &attribute_name))
     }
@@ -4458,7 +4458,7 @@ impl StyleResolver {
         if pseudo.is_none()
             && node.node_type() == NodeType::Element
             && !self.blocked_inline_style_nodes.contains(&node.identity())
-            && let Some(inline_style) = node.get_attribute("style")
+            && let Some(inline_style) = node.inline_style_source()
         {
             let layer_context = LayerContextKey {
                 origin: Origin::Author,
@@ -4862,6 +4862,8 @@ impl StyleResolver {
             &self.media_environment,
         );
         apply_initial_values(&mut properties);
+        resolve_light_dark_colors(&mut properties, self.color_scheme_dark);
+        resolve_dependent_color_functions(&mut properties, parent_style);
         resolve_accent_current_color(&mut properties);
         resolve_text_emphasis_style(&mut properties);
         properties.insert(
@@ -6214,8 +6216,26 @@ fn is_valid_css_color_text(text: &str) -> bool {
     crate::css::ForcedColorPalette::for_color_scheme(false)
         .system_color(text)
         .is_some()
+        || valid_light_dark_color(text)
         || crate::paint::color4::CssColor::parse(text).is_some()
+        || (text.to_ascii_lowercase().contains("currentcolor")
+            && crate::paint::color4::CssColor::parse(
+                &text.to_ascii_lowercase().replace("currentcolor", "black"),
+            )
+            .is_some())
         || crate::paint::color::parse_color(text).is_some()
+}
+
+fn valid_light_dark_color(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    let Some(body) = lower
+        .strip_prefix("light-dark(")
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let colors = super::split_top_level_commas(body);
+    colors.len() == 2 && colors.into_iter().all(is_valid_css_color_text)
 }
 
 pub(super) fn is_valid_color_value(value: &Value) -> bool {
@@ -6425,13 +6445,53 @@ pub(crate) fn normalize_tree_counting_numeric(property: &str, text: &str) -> Opt
 
 /// Folds context-free number math for specified-value CSSOM serialization.
 pub(crate) fn normalize_numeric_math_specified(property: &str, text: &str) -> Option<String> {
+    let deferred_color_mix = is_color_property(property)
+        && text
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("color-mix(")
+        && crate::paint::color4::CssColor::parse(text).is_none()
+        && crate::paint::color4::CssColor::parse_with_context(
+            text,
+            Some(crate::paint::color4::ColorContext {
+                font: 16.0,
+                root_font: 16.0,
+                viewport: [800.0, 600.0],
+                container: [800.0, 600.0],
+            }),
+        )
+        .is_some();
+    if deferred_color_mix {
+        return Some(text.trim().to_ascii_lowercase());
+    }
     if !supports_declaration(property, text) {
         return None;
+    }
+    if is_color_property(property) && text.to_ascii_lowercase().contains("currentcolor") {
+        let mut canonical = text.trim().to_ascii_lowercase();
+        for (alias, name) in [("rgba(from ", "rgb(from "), ("hsla(from ", "hsl(from ")] {
+            if canonical.starts_with(alias) {
+                canonical.replace_range(..alias.len(), name);
+                break;
+            }
+        }
+        if canonical.starts_with("color(from ") {
+            canonical = canonical.replacen(" xyz ", " xyz-d65 ", 1);
+        }
+        return Some(canonical);
     }
     if is_color_property(property)
         && let Some(color) = crate::paint::color4::CssColor::parse(text)
     {
         return Some(color.serialize());
+    }
+    if is_color_property(property)
+        && text
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("color-mix(")
+    {
+        return Some(text.trim().to_ascii_lowercase());
     }
     let value = super::parse_style_attribute(&format!("{property}: {text}"))
         .into_iter()
@@ -10265,6 +10325,9 @@ fn is_position_offset_property(name: &str) -> bool {
 }
 
 fn validate_color_scheme_declaration(value: &Value) -> DeclarationValidation {
+    if matches!(value, Value::CommaList(_)) {
+        return DeclarationValidation::Invalid;
+    }
     let rendered = render_value(value);
     let words = rendered.split_ascii_whitespace().collect::<Vec<_>>();
     if words.len() == 1
@@ -10278,15 +10341,19 @@ fn validate_color_scheme_declaration(value: &Value) -> DeclarationValidation {
     }
     let mut schemes = Vec::new();
     let mut only = false;
-    for word in words {
+    let word_count = words.len();
+    for (index, word) in words.into_iter().enumerate() {
         if word.eq_ignore_ascii_case("only") {
-            if only {
+            if only || (index != 0 && index + 1 != word_count) {
                 return DeclarationValidation::Invalid;
             }
             only = true;
             continue;
         }
-        if is_css_wide_keyword(&word.to_ascii_lowercase()) || word.eq_ignore_ascii_case("normal") {
+        if is_css_wide_keyword(&word.to_ascii_lowercase())
+            || word.eq_ignore_ascii_case("normal")
+            || word.eq_ignore_ascii_case("default")
+        {
             return DeclarationValidation::Invalid;
         }
         schemes.push(word.to_ascii_lowercase());
@@ -13271,6 +13338,11 @@ pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
     ) {
         return normalize_counter_specified(property, value).is_some();
     }
+    if property.eq_ignore_ascii_case("color-scheme")
+        && super::split_top_level_commas(value).len() != 1
+    {
+        return false;
+    }
     if (property.starts_with("inset")
         || property.starts_with("margin-")
         || property.starts_with("padding-")
@@ -14992,10 +15064,38 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
             ComputedValue::Number(normalize_numeric_property(property_name, *value))
         }
         Value::TreeCounting { .. } => ComputedValue::Keyword(render_value(value)),
+        Value::Function { name, .. } if name.eq_ignore_ascii_case("light-dark") => {
+            ComputedValue::Color(render_value(value))
+        }
         Value::Function { name, .. }
             if matches!(
                 name.to_ascii_lowercase().as_str(),
-                "hwb" | "lab" | "lch" | "oklab" | "oklch" | "color"
+                "rgb" | "rgba" | "hsl" | "hsla"
+            ) && {
+                let rendered = render_value(value);
+                rendered
+                    .split_once('(')
+                    .is_some_and(|(_, body)| body.trim_start().starts_with("from "))
+                    || rendered
+                        .split(|character: char| {
+                            !character.is_ascii_alphanumeric() && character != '-'
+                        })
+                        .any(|token| token.eq_ignore_ascii_case("none"))
+            } =>
+        {
+            compute_color4_value(value, ctx)
+        }
+        Value::Function { name, .. }
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "hwb"
+                    | "lab"
+                    | "lch"
+                    | "oklab"
+                    | "oklch"
+                    | "color"
+                    | "color-mix"
+                    | "contrast-color"
             ) =>
         {
             compute_color4_value(value, ctx)
@@ -18161,6 +18261,83 @@ fn zero_border_width_for_none_style(properties: &mut PropertyMap) {
             properties.insert(width_key, ComputedValue::Px(0.0));
         }
     }
+}
+
+fn resolve_light_dark_colors(properties: &mut PropertyMap, preferred_dark: bool) {
+    let scheme = properties
+        .get(&PropertyId::ColorScheme)
+        .map(ComputedValue::css_text)
+        .unwrap_or_else(|| "normal".to_string());
+    let words = scheme.split_ascii_whitespace().collect::<Vec<_>>();
+    let supports_light = words.iter().any(|word| word.eq_ignore_ascii_case("light"));
+    let supports_dark = words.iter().any(|word| word.eq_ignore_ascii_case("dark"));
+    let dark = match (supports_light, supports_dark) {
+        (false, true) => true,
+        (true, false) => false,
+        (true, true) => preferred_dark,
+        (false, false) => false,
+    };
+    let replacements = properties
+        .iter()
+        .filter_map(|(name, value)| match value {
+            ComputedValue::Color(text) => {
+                resolve_light_dark_color(text, dark).map(|color| (name.to_string(), color))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (name, color) in replacements {
+        properties.insert(name, ComputedValue::Color(color));
+    }
+}
+
+fn resolve_light_dark_color(text: &str, dark: bool) -> Option<String> {
+    let trimmed = text.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let body = lower.strip_prefix("light-dark(")?.strip_suffix(')')?;
+    let colors = super::split_top_level_commas(body);
+    let [light, dark_color] = colors.as_slice() else {
+        return None;
+    };
+    let selected = if dark { dark_color } else { light }.trim();
+    resolve_light_dark_color(selected, dark).or_else(|| Some(selected.to_string()))
+}
+
+fn resolve_dependent_color_functions(
+    properties: &mut PropertyMap,
+    parent_style: Option<&ComputedStyle>,
+) {
+    let parent_color = parent_style
+        .and_then(|style| style.get("color"))
+        .map(ComputedValue::css_text)
+        .unwrap_or_else(|| "black".to_string());
+    if let Some(value) = properties.get(&PropertyId::Color).cloned()
+        && let Some(resolved) = resolve_current_color_function(&value.css_text(), &parent_color)
+    {
+        properties.insert(PropertyId::Color, ComputedValue::Color(resolved));
+    }
+    let own_color = properties
+        .get(&PropertyId::Color)
+        .map(ComputedValue::css_text)
+        .unwrap_or(parent_color);
+    let replacements = properties
+        .iter()
+        .filter(|(name, _)| *name != "color")
+        .filter_map(|(name, value)| {
+            resolve_current_color_function(&value.css_text(), &own_color)
+                .map(|resolved| (name.to_string(), resolved))
+        })
+        .collect::<Vec<_>>();
+    for (name, resolved) in replacements {
+        properties.insert(name, ComputedValue::Color(resolved));
+    }
+}
+
+fn resolve_current_color_function(text: &str, current_color: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("currentcolor").then_some(())?;
+    let substituted = lower.replace("currentcolor", current_color);
+    crate::paint::color4::CssColor::parse(&substituted).map(|color| color.serialize_computed())
 }
 
 /// `color: currentColor` is equivalent to `color: inherit` per CSS Color Level 4.

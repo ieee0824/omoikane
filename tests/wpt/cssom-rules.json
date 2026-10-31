@@ -1,0 +1,8 @@
+{
+  "tests": [
+    { "path": "css/css-animations/keyframes-rule-caching.html" },
+    { "path": "css/css-page/cssom/page-001.html" },
+    { "path": "css/css-page/cssom/margin-001.html" },
+    { "path": "css/css-view-transitions/navigation/at-rule-cssom.html" }
+  ]
+}

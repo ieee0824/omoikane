@@ -1133,6 +1133,7 @@ impl CdpSession {
         runtime.install_response_security_headers(response_headers);
         runtime.set_document_response_status(response_status);
         runtime.install_isolation_policy(response_headers);
+        runtime.install_navigation_server_timing(response_headers);
         if inherit_javascript_security {
             runtime.inherit_javascript_navigation_security(&self.runtime);
         }
@@ -1216,6 +1217,7 @@ impl CdpSession {
         runtime.install_response_security_headers(response_headers);
         runtime.set_document_response_status(response_status);
         runtime.install_isolation_policy(response_headers);
+        runtime.install_navigation_server_timing(response_headers);
         if let Some(state) = form_state {
             runtime
                 .restore_form_state(state, FormStateRestoreMode::Restore)

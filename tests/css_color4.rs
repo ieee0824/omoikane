@@ -46,8 +46,148 @@ fn color4_is_valid_in_registered_custom_properties_and_stylesheet_cssom() {
          const e=document.getElementById('target'); e.style.setProperty('--tint','lch(50% 0 0)'); \
          const s=document.styleSheets[0].cssRules[0].style; \
          return getComputedStyle(e).getPropertyValue('--tint') === 'lch(50 0 0)' && s.color === 'lab(50 25 0)' && s.backgroundColor === 'color(display-p3 1 0 0)' && \
+         CSS.supports('color','light-dark(white, black)') && \
          CSS.supports('color','hwb(none 0 0 / none)') && CSS.supports('color','oklch(.5 .2 20)'); })()"
     ).unwrap().to_boolean());
+}
+
+#[test]
+fn color_mix_is_shared_by_supports_cssom_computed_style_and_paint() {
+    let document = TreeBuilder::parse(
+        "<div id='target' style='color:color-mix(in srgb, red 20%, blue)'></div>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let actual = runtime
+        .eval(
+            "(() => { const e=document.getElementById('target'); return JSON.stringify([\
+             CSS.supports('color','color-mix(in srgb, red, blue)'), e.style.color,\
+             getComputedStyle(e).color]); })()",
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        actual,
+        "[true,\"color-mix(in srgb, red 20%, blue 80%)\",\"color(srgb 0.2 0 0.8)\"]"
+    );
+
+    use omoikane::layout::Rect;
+    let viewport = Rect {
+        width: 200.0,
+        height: 180.0,
+        ..Rect::default()
+    };
+    let actual = render_color4_fixture("color-mix(in srgb, red, blue)", viewport);
+    let expected = render_color4_fixture("rgb(128, 0, 128)", viewport);
+    let differences = actual
+        .pixels()
+        .iter()
+        .zip(expected.pixels())
+        .enumerate()
+        .filter(|(_, (actual, expected))| actual != expected)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert!(
+        differences.is_empty(),
+        "{} differing channels, first {:?}",
+        differences.len(),
+        (
+            differences.first(),
+            actual.pixel(20, 20),
+            expected.pixel(20, 20)
+        )
+    );
+}
+
+#[test]
+fn relative_color_is_shared_by_supports_cssom_and_computed_style() {
+    let document = TreeBuilder::parse(
+        "<div id='target' style='color:rgb(from red r calc(g + 32) b / alpha)'></div>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let actual = runtime
+        .eval(
+            "(() => { const e=document.getElementById('target'); return JSON.stringify([\
+             CSS.supports('color','rgb(from red r calc(g + 32) b / alpha)'),\
+             e.style.color,getComputedStyle(e).color]); })()",
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        actual,
+        "[true,\"rgb(from red r calc((g) + (32)) b / alpha)\",\"color(srgb 1 0.12549 0)\"]"
+    );
+}
+
+#[test]
+fn relative_color_resolves_current_color_at_the_owning_element() {
+    let document = TreeBuilder::parse(
+        "<div style='color:blue'><span id='target' style='color:rgb(from currentColor r g b);\
+         background-color:rgb(from red r g b)'></span></div>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let actual = runtime
+        .eval(
+            "(() => { const e=document.getElementById('target'); const s=getComputedStyle(e);\
+             e.style.backgroundColor='rgb(from currentColor r g b)';\
+             return JSON.stringify([s.color,getComputedStyle(e).backgroundColor]); })()",
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(actual, "[\"color(srgb 0 0 1)\",\"color(srgb 0 0 1)\"]");
+}
+
+#[test]
+fn relative_hwb_cssom_keeps_non_quantized_computation_channels() {
+    let document = TreeBuilder::parse("<div id='target'></div>").document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let actual = runtime
+        .eval(
+            "(() => { const e=document.getElementById('target');\
+             e.style.color='hwb(from hwb(120deg 20% 50% / .5) h w b / none)';\
+             return JSON.stringify([e.style.color,e.getAttribute('style'),\
+             getComputedStyle(e).color]); })()",
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        actual,
+        "[\"hwb(from rgba(51, 128, 51, 0.5) h w b / none)\",\
+         \"color: hwb(from rgba(51, 128, 51, 0.5) h w b / none);\",\
+         \"hwb(120 20% 50% / none)\"]"
+    );
+}
+
+#[test]
+fn relative_hsl_preserves_a_missing_alpha_in_computed_style() {
+    let document = TreeBuilder::parse(
+        "<div id='target' style='color:hsl(from rebeccapurple h s l / none)'></div>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let actual = runtime
+        .eval(
+            "(() => { const e=document.getElementById('target'); const first=getComputedStyle(e).color;\
+             e.style.color=first; return JSON.stringify([first,getComputedStyle(e).color]); })()",
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        actual,
+        "[\"hsl(270 50% 40% / none)\",\"hsl(270 50% 40% / none)\"]"
+    );
 }
 
 fn color4_paint_cases() -> Vec<(String, String)> {

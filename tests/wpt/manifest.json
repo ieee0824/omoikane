@@ -1431,6 +1431,9 @@
     {"path": "html/canvas/element/transformations/2d.transformation.scale.zero.html"},
     {"path": "html/canvas/element/transformations/2d.transformation.setTransform.skewed.html"},
     {"path": "html/canvas/element/transformations/2d.transformation.transform.nonfinite.html"},
-    {"path": "html/canvas/element/transformations/2d.transformation.translate.nonfinite.html"}
+    {"path": "html/canvas/element/transformations/2d.transformation.translate.nonfinite.html"},
+    {"path": "server-timing/navigation_timing_idl.https.html"},
+    {"path": "server-timing/resource_timing_idl.https.html"},
+    {"path": "server-timing/service_worker_idl.https.html"}
   ]
 }

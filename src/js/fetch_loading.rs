@@ -281,7 +281,23 @@ pub(super) fn apply(
             .with_message("fetch redirect blocked by CSP connect-src")
             .into());
     }
-    Ok(serialize(fetched, method, credentials, &normalized_url))
+    // Server-Timing is read from the full header list, before CORS filters
+    // what script may see, and only after the timing allow check.
+    let origin = script_errors::document_fetch_origin(state, document_id);
+    let server_timing = super::server_timing::timing_allowed(
+        fetched.response_type,
+        fetched.response.headers(),
+        &origin,
+    )
+    .then(|| super::server_timing::parse_server_timing(fetched.response.headers()))
+    .unwrap_or_default();
+    Ok(serialize(
+        fetched,
+        method,
+        credentials,
+        &normalized_url,
+        super::server_timing::server_timing_json(&server_timing),
+    ))
 }
 
 /// Encodes the existing Fetch/XHR payload without consulting runtime state.
@@ -290,6 +306,7 @@ fn serialize(
     method: Method,
     credentials: CredentialsMode,
     normalized_url: &str,
+    server_timing: serde_json::Value,
 ) -> String {
     let response = fetched.response;
     let opaque = matches!(
@@ -341,6 +358,7 @@ fn serialize(
         "bodyText": body_text.as_deref().unwrap_or(""),
         "bodyBase64": body_base64,
         "bodyPresent": body_present,
+        "serverTiming": server_timing,
     })
     .to_string();
     payload

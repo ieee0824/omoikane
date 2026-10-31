@@ -2184,6 +2184,7 @@ fn css_ui_properties_validate_initial_values_and_inheritance() {
             "{property}: {invalid}"
         );
     }
+    assert!(!supports_declaration("color-scheme", "light, dark"));
 
     let document = NodeHandle::document();
     let parent = NodeHandle::element("div");
@@ -6572,6 +6573,36 @@ fn media_prefers_color_scheme_dark_does_not_apply_in_light_mode() {
         style.get("color"),
         Some(&ComputedValue::Color("white".to_string())),
         "@media (prefers-color-scheme: dark) must not apply in light mode"
+    );
+}
+
+#[test]
+fn light_dark_uses_the_elements_used_color_scheme() {
+    let (_document, div) = make_div_tree();
+    div.set_attribute(
+        "style",
+        "color-scheme: light dark; color: light-dark(white, light-dark(red, black))",
+    );
+    let mut resolver = StyleResolver::new();
+    assert_eq!(
+        resolver.computed_style(&div).get("color"),
+        Some(&ComputedValue::Color("white".to_string()))
+    );
+    resolver.set_color_scheme_dark(true);
+    assert_eq!(
+        resolver.computed_style(&div).get("color"),
+        Some(&ComputedValue::Color("black".to_string()))
+    );
+
+    div.set_attribute(
+        "style",
+        "color-scheme: light; color: light-dark(white, black)",
+    );
+    let mut resolver = StyleResolver::new();
+    resolver.set_color_scheme_dark(true);
+    assert_eq!(
+        resolver.computed_style(&div).get("color"),
+        Some(&ComputedValue::Color("white".to_string()))
     );
 }
 

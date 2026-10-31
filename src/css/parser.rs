@@ -1730,6 +1730,7 @@ impl Parser {
                     | "anchor-name"
                     | "anchor-scope"
                     | "position-try-fallbacks"
+                    | "color-scheme"
             )
             || contains_var && matches!(name.as_str(), "font" | "transition"))
             && has_top_level_comma(&value_tokens)

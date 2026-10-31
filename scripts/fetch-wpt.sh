@@ -45,6 +45,7 @@ collect_pattern "/close-watcher/" "/html/semantics/the-button-element/command-an
   "/html/semantics/popovers/resources/popover-utils.js"
 collect_pattern "/css/css-highlight-api/"
 collect_pattern "/requestidlecallback/" "/scheduler/" "/dom/abort/resources/"
+collect_pattern "/common/performance-timeline-utils.js" "/common/performance-timeline-utils.js.headers"
 collect_pattern "/paint-timing/" "/largest-contentful-paint/" "/server-timing/" "/longtask-timing/" "/event-timing/" "/layout-instability/" "/images/"
 collect_pattern \
   "/css/css-color/parsing/color-computed-color-function.html" \
@@ -56,6 +57,28 @@ collect_pattern \
   "/css/css-color/parsing/color-valid-color-function.html" \
   "/css/css-color/parsing/color-valid-hwb.html" \
   "/css/css-color/parsing/color-valid-lab.html"
+# CSS Color 5 (#1277).
+collect_pattern \
+  "/css/css-color/parsing/color-computed-color-mix-function.html" \
+  "/css/css-color/parsing/color-invalid-color-mix-function.html" \
+  "/css/css-color/parsing/color-valid-color-mix-function.html" \
+  "/css/css-color/parsing/color-computed-contrast-color-function.html" \
+  "/css/css-color/parsing/color-invalid-contrast-color-function.html" \
+  "/css/css-color/parsing/color-valid-contrast-color-function.html" \
+  "/css/css-color/parsing/color-computed-relative-color.html" \
+  "/css/css-color/parsing/color-invalid-relative-color.html" \
+  "/css/css-color/parsing/color-valid-relative-color.html" \
+  "/css/css-color/light-dark-basic.html" \
+  "/css/css-color/light-dark-currentcolor-in-color.html" \
+  "/css/css-color-adjust/parsing/color-scheme-computed.html" \
+  "/css/css-color-adjust/parsing/color-scheme-invalid.html" \
+  "/css/css-color-adjust/parsing/color-scheme-valid.html"
+# CSSOM rule interfaces (#1280).
+collect_pattern \
+  "/css/css-animations/keyframes-rule-caching.html" \
+  "/css/css-page/cssom/page-001.html" \
+  "/css/css-page/cssom/margin-001.html" \
+  "/css/css-view-transitions/navigation/at-rule-cssom.html"
 collect_pattern "/css/css-logical/"
 collect_pattern "/css/css-fonts/parsing/" "/css/css-fonts/font-variant-alternates-parsing.html" "/css/css-fonts/test_font_feature_values_parsing.html"
 collect_pattern "/reporting/" "/content-security-policy/securitypolicyviolation/constructor-required-fields.html"
