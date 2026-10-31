@@ -1712,6 +1712,9 @@ impl Parser {
                     | "will-change"
                     | "transition-duration"
                     | "transition-delay"
+                    | "anchor-name"
+                    | "anchor-scope"
+                    | "position-try-fallbacks"
             )
             || contains_var && matches!(name.as_str(), "font" | "transition"))
             && has_top_level_comma(&value_tokens)

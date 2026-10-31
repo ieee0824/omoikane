@@ -7225,6 +7225,10 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     // or `eq_ignore_ascii_case()` per branch.
     let key = name.to_ascii_lowercase();
 
+    if let Some(validation) = validate_anchor_position_declaration(&key, value) {
+        return validation;
+    }
+
     // The following checks recognize properties whose value can itself be a
     // top-level `Value::CommaList` (handled generically further down), so
     // they must keep running before that generic handling: a comma-separated
@@ -8076,6 +8080,119 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     DeclarationValidation::Unvalidated
+}
+
+fn validate_anchor_position_declaration(
+    name: &str,
+    value: &Value,
+) -> Option<DeclarationValidation> {
+    let css_wide = |value: &Value| {
+        matches!(value, Value::Keyword(keyword)
+            if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+    };
+    let keyword = |value: &Value, allowed: &[&str]| {
+        matches!(value, Value::Keyword(word)
+            if css_wide(value) || allowed.contains(&word.to_ascii_lowercase().as_str()))
+    };
+    let comma_separated_dashed_idents = |value: &Value| {
+        if let Value::List(values) | Value::CommaList(values) = value {
+            return !values.is_empty() && values.iter().all(is_dashed_ident);
+        }
+        let rendered = render_value(value);
+        let names = super::split_top_level_commas(&rendered);
+        !names.is_empty()
+            && names.iter().all(|name| {
+                name.starts_with("--") && name.len() > 2 && !name.contains(char::is_whitespace)
+            })
+    };
+    let valid = match name {
+        "anchor-name" => keyword(value, &["none"]) || comma_separated_dashed_idents(value),
+        "anchor-scope" => keyword(value, &["none", "all"]) || comma_separated_dashed_idents(value),
+        "position-anchor" => keyword(value, &["auto"]) || is_dashed_ident(value),
+        "position-try-order" => keyword(
+            value,
+            &[
+                "normal",
+                "most-width",
+                "most-height",
+                "most-block-size",
+                "most-inline-size",
+            ],
+        ),
+        "position-area" => valid_position_area(value, css_wide),
+        "position-try-fallbacks" => valid_position_try_fallbacks(value, css_wide),
+        _ => return None,
+    };
+    Some(if valid {
+        DeclarationValidation::Valid(ComputedValue::Keyword(
+            render_value(value).to_ascii_lowercase(),
+        ))
+    } else {
+        DeclarationValidation::Invalid
+    })
+}
+
+fn is_dashed_ident(value: &Value) -> bool {
+    match value {
+        Value::Keyword(ident) => ident.starts_with("--") && ident.len() > 2,
+        Value::List(values) => matches!(values.as_slice(), [value] if is_dashed_ident(value)),
+        _ => false,
+    }
+}
+
+fn valid_position_area(value: &Value, css_wide: impl Fn(&Value) -> bool) -> bool {
+    if css_wide(value) {
+        return true;
+    }
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    if values.is_empty() || values.len() > 2 {
+        return false;
+    }
+    values.iter().all(|value| {
+        matches!(value, Value::Keyword(keyword) if matches!(
+            keyword.to_ascii_lowercase().as_str(),
+            "none" | "center" | "top" | "right" | "bottom" | "left" |
+            "start" | "end" | "self-start" | "self-end" |
+            "block-start" | "block-end" | "inline-start" | "inline-end" |
+            "span-all" | "span-top" | "span-right" | "span-bottom" | "span-left" |
+            "span-start" | "span-end" | "span-self-start" | "span-self-end" |
+            "span-block-start" | "span-block-end" | "span-inline-start" | "span-inline-end"
+        ))
+    })
+}
+
+fn valid_position_try_fallbacks(value: &Value, css_wide: impl Fn(&Value) -> bool) -> bool {
+    if css_wide(value)
+        || matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("none"))
+    {
+        return true;
+    }
+    let entries = match value {
+        Value::CommaList(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    !entries.is_empty()
+        && entries.iter().all(|entry| {
+            let parts = match entry {
+                Value::List(values) => values.as_slice(),
+                value => std::slice::from_ref(value),
+            };
+            let Some(Value::Keyword(first)) = parts.first() else {
+                return false;
+            };
+            let named = first.starts_with("--") && first.len() > 2;
+            let area = valid_position_area(&parts[0], |_| false);
+            (named || area)
+                && parts[1..].iter().all(|part| {
+                    matches!(part, Value::Keyword(tactic) if matches!(
+                        tactic.to_ascii_lowercase().as_str(),
+                        "flip-block" | "flip-inline" | "flip-start" | "flip-x" | "flip-y"
+                    ))
+                })
+        })
 }
 
 fn canonical_paint_order(parts: &[&str]) -> String {

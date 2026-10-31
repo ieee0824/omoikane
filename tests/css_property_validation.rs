@@ -101,7 +101,7 @@ fn property_support_agrees_with_css_supports_and_cascade() {
                 return element.style.getPropertyValue(name) === '10deg' &&
                     getComputedStyle(element).getPropertyValue(name) === '10deg';
             }
-            if (name === 'font-feature-settings' || name === 'font-variation-settings' || name === 'counter-set' ||
+            if (name === 'font-feature-settings' || name === 'font-variation-settings' || name === 'counter-set' || name === 'anchor-name' ||
                 name === 'hyphenate-character' || name === 'scrollbar-color') {
                 return CSS.supports(name, value) &&
                     element.style.getPropertyValue(name) === value &&
@@ -110,6 +110,51 @@ fn property_support_agrees_with_css_supports_and_cascade() {
             return !CSS.supports(name, value) && element.style.getPropertyValue(name) === '' && getComputedStyle(element).getPropertyValue(name) === '';
         });
     })()"#).unwrap().as_boolean(), Some(true));
+}
+
+#[test]
+fn anchor_position_properties_share_strict_cssom_and_supports_grammar() {
+    let mut runtime = JsRuntime::new().unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"(() => {
+        const element = document.body.appendChild(document.createElement('div'));
+        const valid = [
+            ['anchor-name', '--menu, --fallback'],
+            ['anchor-scope', 'all'],
+            ['position-anchor', '--menu'],
+            ['position-area', 'block-end span-inline-end'],
+            ['position-try-fallbacks', '--below flip-inline, top'],
+            ['position-try-order', 'most-block-size'],
+        ];
+        const invalid = [
+            ['anchor-name', 'menu'],
+            ['anchor-scope', '--'],
+            ['position-anchor', 'menu'],
+            ['position-area', 'top bottom left'],
+            ['position-try-fallbacks', 'unknown'],
+            ['position-try-order', 'largest'],
+        ];
+        for (const [name, value] of valid) {
+            if (!CSS.supports(name, value)) return `unsupported:${name}:${value}`;
+            element.style.setProperty(name, value);
+            if (!element.style.getPropertyValue(name)) return `not-stored:${name}:${value}`;
+        }
+        for (const [name, value] of invalid) {
+            element.style.removeProperty(name);
+            element.style.setProperty(name, value);
+            if (CSS.supports(name, value)) return `accepted:${name}:${value}`;
+            if (element.style.getPropertyValue(name) !== '') return `stored:${name}:${value}`;
+        }
+        return 'ok';
+    })()"#
+            )
+            .unwrap()
+            .as_string()
+            .map(|value| value.to_std_string_escaped()),
+        Some("ok".to_string())
+    );
 }
 
 #[test]
