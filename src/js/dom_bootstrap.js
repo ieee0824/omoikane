@@ -28444,12 +28444,185 @@ let omoikaneUserActivationState;
     permissionStatusEntries.clear();
   };
 
-  class Animation extends EventTarget {
+  function animationTimingInput(options) {
+    if (typeof options === "number") return { duration: options };
+    if (options === null || options === undefined) return {};
+    if (typeof options !== "object" && typeof options !== "function") {
+      throw new TypeError("Animation timing must be a number or dictionary");
+    }
+    return options;
+  }
+
+  function ownedKeyframeSequence(input) {
+    if (input === null || input === undefined) return [];
+    let frames;
+    if (Array.isArray(input) || typeof input[Symbol.iterator] === "function") {
+      frames = Array.from(input);
+    } else {
+      const source = input;
+      const properties = Object.keys(source).filter(name =>
+        !["offset", "easing", "composite"].includes(name)
+      );
+      const lengths = properties.map(name => Array.isArray(source[name]) ? source[name].length : 1);
+      const count = Math.max(1, ...lengths);
+      frames = Array.from({ length: count }, (_, index) => {
+        const frame = {};
+        for (const name of properties) {
+          const values = Array.isArray(source[name]) ? source[name] : [source[name]];
+          if (index < values.length) frame[name] = values[index];
+        }
+        for (const name of ["offset", "easing", "composite"]) {
+          if (!(name in source)) continue;
+          const values = Array.isArray(source[name]) ? source[name] : [source[name]];
+          if (index < values.length) frame[name] = values[index];
+        }
+        return frame;
+      });
+    }
+    const owned = frames.map(frame => {
+      if (frame === null || (typeof frame !== "object" && typeof frame !== "function")) {
+        throw new TypeError("Each keyframe must be an object");
+      }
+      const copy = {};
+      for (const name of Object.keys(frame)) copy[name] = frame[name];
+      return copy;
+    });
+    let previousOffset = -Infinity;
+    for (const frame of owned) {
+      if (frame.offset === undefined || frame.offset === null) continue;
+      const offset = Number(frame.offset);
+      if (!Number.isFinite(offset) || offset < 0 || offset > 1 || offset < previousOffset) {
+        throw new TypeError("Keyframe offsets must be ordered numbers between 0 and 1");
+      }
+      frame.offset = offset;
+      previousOffset = offset;
+    }
+    const explicit = owned.map((frame, index) => frame.offset === undefined || frame.offset === null
+      ? null : { index, value: frame.offset });
+    if (owned.length && explicit.every(value => value === null)) {
+      owned.forEach((frame, index) => {
+        frame.computedOffset = owned.length === 1 ? 1 : index / (owned.length - 1);
+      });
+    } else {
+      const anchors = [{ index: 0, value: explicit[0]?.value ?? 0 }];
+      for (const value of explicit) if (value !== null && value.index !== 0) anchors.push(value);
+      if (anchors.at(-1).index !== owned.length - 1) {
+        anchors.push({ index: owned.length - 1, value: 1 });
+      }
+      for (let anchor = 0; anchor < anchors.length - 1; anchor++) {
+        const from = anchors[anchor], to = anchors[anchor + 1];
+        for (let index = from.index; index <= to.index; index++) {
+          const distance = to.index - from.index;
+          owned[index].computedOffset = distance === 0 ? to.value :
+            from.value + (to.value - from.value) * (index - from.index) / distance;
+        }
+      }
+    }
+    for (const frame of owned) {
+      frame.offset = frame.offset === undefined ? null : frame.offset;
+      frame.easing = frame.easing === undefined ? "linear" : String(frame.easing);
+      frame.composite = frame.composite === undefined ? "auto" : String(frame.composite);
+    }
+    return owned;
+  }
+
+  class AnimationEffect {
+    constructor() {
+      if (new.target === AnimationEffect) throw new TypeError("Illegal constructor");
+    }
+    getTiming() { return { ...this.__timing }; }
+    getComputedTiming() {
+      const duration = Number(this.__timing.duration) || 0;
+      const iterations = this.__timing.iterations === Infinity ? Infinity :
+        Math.max(0, Number(this.__timing.iterations) || 1);
+      return { ...this.getTiming(), activeDuration: duration * iterations,
+        endTime: (Number(this.__timing.delay) || 0) + duration * iterations,
+        localTime: null, progress: null, currentIteration: null };
+    }
+    updateTiming(options = {}) {
+      const timing = animationTimingInput(options);
+      for (const name of ["delay", "endDelay", "fill", "iterationStart", "iterations",
+        "duration", "direction", "easing"]) {
+        if (name in timing) this.__timing[name] = timing[name];
+      }
+    }
+  }
+
+  class KeyframeEffect extends AnimationEffect {
     constructor(target, keyframes, options = {}) {
       super();
-      const timing = typeof options === "number" ? { duration: options } : (options || {});
-      this.effect = { target, getKeyframes: () => this._keyframes.slice() };
-      this.timeline = globalThis.document && globalThis.document.timeline || null;
+      if (target instanceof KeyframeEffect && arguments.length === 1) {
+        this.__target = target.target;
+        this.__pseudoElement = target.pseudoElement;
+        this.__iterationComposite = target.iterationComposite;
+        this.__composite = target.composite;
+        this.__timing = target.getTiming();
+        this.__keyframes = target.getKeyframes();
+        return;
+      }
+      if (target !== null && target !== undefined && !(target instanceof Element)) {
+        throw new TypeError("KeyframeEffect target must be an Element or null");
+      }
+      const timing = animationTimingInput(options);
+      this.__target = target ?? null;
+      this.__pseudoElement = timing.pseudoElement === undefined ? null : String(timing.pseudoElement);
+      this.__iterationComposite = timing.iterationComposite === "accumulate" ? "accumulate" : "replace";
+      this.__composite = ["add", "accumulate"].includes(timing.composite) ? timing.composite : "replace";
+      this.__timing = {
+        delay: Number(timing.delay) || 0, endDelay: Number(timing.endDelay) || 0,
+        fill: timing.fill === undefined ? "auto" : String(timing.fill),
+        iterationStart: Number(timing.iterationStart) || 0,
+        iterations: timing.iterations === Infinity ? Infinity : Math.max(0, Number(timing.iterations) || 1),
+        duration: timing.duration === "auto" ? "auto" : Math.max(0, Number(timing.duration) || 0),
+        direction: timing.direction === undefined ? "normal" : String(timing.direction),
+        easing: timing.easing === undefined ? "linear" : String(timing.easing),
+      };
+      this.__keyframes = ownedKeyframeSequence(keyframes);
+    }
+    get target() { return this.__target; }
+    set target(value) {
+      if (value !== null && !(value instanceof Element)) throw new TypeError("Invalid target");
+      this.__target = value;
+    }
+    get pseudoElement() { return this.__pseudoElement; }
+    set pseudoElement(value) { this.__pseudoElement = value === null ? null : String(value); }
+    get iterationComposite() { return this.__iterationComposite; }
+    set iterationComposite(value) {
+      const normalized = String(value);
+      if (!["replace", "accumulate"].includes(normalized)) throw new TypeError("Invalid iterationComposite");
+      this.__iterationComposite = normalized;
+    }
+    get composite() { return this.__composite; }
+    set composite(value) {
+      const normalized = String(value);
+      if (!["replace", "add", "accumulate"].includes(normalized)) throw new TypeError("Invalid composite");
+      this.__composite = normalized;
+    }
+    getKeyframes() { return this.__keyframes.map(frame => ({ ...frame })); }
+    setKeyframes(keyframes) { this.__keyframes = ownedKeyframeSequence(keyframes); }
+  }
+
+  class AnimationTimeline {
+    get currentTime() { return null; }
+  }
+
+  class DocumentTimeline extends AnimationTimeline {
+    constructor(options = {}) { super(); this.originTime = Number(options && options.originTime) || 0; }
+    get currentTime() { return 0; }
+  }
+
+  class Animation extends EventTarget {
+    constructor(effect = null, timeline = undefined) {
+      super();
+      if (effect !== null && !(effect instanceof AnimationEffect)) {
+        throw new TypeError("Animation effect must be an AnimationEffect or null");
+      }
+      if (timeline !== undefined && timeline !== null && !(timeline instanceof AnimationTimeline)) {
+        throw new TypeError("Animation timeline must be an AnimationTimeline or null");
+      }
+      this.effect = effect;
+      this.timeline = timeline === undefined ? globalThis.document && globalThis.document.timeline || null : timeline;
+      const timing = effect ? effect.getTiming() : {};
       this.id = String(timing.id || "");
       this.currentTime = 0;
       this.startTime = null;
@@ -28459,8 +28632,8 @@ let omoikaneUserActivationState;
       this.pending = false;
       this.onfinish = null;
       this.oncancel = null;
-      this._target = target;
-      this._keyframes = Array.isArray(keyframes) ? keyframes.slice() : [keyframes || {}];
+      this._target = effect && effect.target;
+      this._keyframes = effect ? effect.getKeyframes() : [];
       this._duration = Math.max(0, Number(timing.duration) || 0);
       this._delay = Math.max(0, Number(timing.delay) || 0);
       this._iterations = timing.iterations === Infinity ? Infinity : Math.max(0, Number(timing.iterations) || 1);
@@ -28468,7 +28641,6 @@ let omoikaneUserActivationState;
       this._finishedResolve = null;
       this.finished = new Promise(resolve => { this._finishedResolve = resolve; });
       this.ready = Promise.resolve(this);
-      this.play();
     }
     _applyFinalKeyframe() {
       const frame = this._keyframes[this._keyframes.length - 1];
@@ -28519,8 +28691,18 @@ let omoikaneUserActivationState;
     commitStyles() { this._applyFinalKeyframe(); }
   }
 
+  class CSSAnimation extends Animation {
+    constructor(effect = null, timeline = undefined) { super(effect, timeline); this.animationName = ""; }
+  }
+
+  class CSSTransition extends Animation {
+    constructor(effect = null, timeline = undefined) { super(effect, timeline); this.transitionProperty = ""; }
+  }
+
   Element.prototype.animate = function(keyframes, options) {
-    const animation = new Animation(this, keyframes, options);
+    const effect = new KeyframeEffect(this, keyframes, options);
+    const animation = new Animation(effect, this.ownerDocument && this.ownerDocument.timeline);
+    animation.play();
     if (!this.__animations) this.__animations = [];
     this.__animations.push(animation);
     return animation;
@@ -28538,9 +28720,15 @@ let omoikaneUserActivationState;
     return animations;
   };
   if (!globalThis.document.timeline) {
-    globalThis.document.timeline = { currentTime: 0 };
+    globalThis.document.timeline = new DocumentTimeline();
   }
+  globalThis.AnimationEffect = AnimationEffect;
+  globalThis.KeyframeEffect = KeyframeEffect;
+  globalThis.AnimationTimeline = AnimationTimeline;
+  globalThis.DocumentTimeline = DocumentTimeline;
   globalThis.Animation = Animation;
+  globalThis.CSSAnimation = CSSAnimation;
+  globalThis.CSSTransition = CSSTransition;
 
   class AbortSignal extends EventTarget {
     constructor() {
