@@ -2815,6 +2815,78 @@ fn invalidation_subtrees(roots: impl IntoIterator<Item = NodeHandle>) -> Option<
 }
 
 impl StyleResolver {
+    /// Projects the accepted declarations of the last matching document
+    /// `@position-try` rule onto an already-computed style. The returned value
+    /// is owned and only lives for one fallback layout attempt.
+    pub(crate) fn position_try_style(
+        &self,
+        base: &ComputedStyle,
+        name: &str,
+    ) -> Option<ComputedStyle> {
+        fn find<'a>(rules: &'a [Rule], name: &str, found: &mut Option<&'a [Declaration]>) {
+            for rule in rules {
+                let Rule::At(rule) = rule else {
+                    continue;
+                };
+                if rule.name.eq_ignore_ascii_case("position-try") && rule.prelude.trim() == name {
+                    *found = Some(&rule.declarations);
+                }
+                if let Some(children) = &rule.block {
+                    find(children, name, found);
+                }
+            }
+        }
+
+        let mut declarations = None;
+        for input in &self.stylesheets {
+            find(&input.stylesheet.rules, name, &mut declarations);
+        }
+        let declarations = declarations?;
+        let mut style = base.clone();
+        let flow = logical_flow_from_properties(&style.properties);
+        for declaration in declarations {
+            let property = canonical_property_name(&declaration.name);
+            if declaration.important
+                || !matches!(
+                    property,
+                    "top"
+                        | "right"
+                        | "bottom"
+                        | "left"
+                        | "margin-top"
+                        | "margin-right"
+                        | "margin-bottom"
+                        | "margin-left"
+                        | "width"
+                        | "height"
+                        | "min-width"
+                        | "min-height"
+                        | "max-width"
+                        | "max-height"
+                        | "align-self"
+                        | "justify-self"
+                        | "position-anchor"
+                        | "position-area"
+                )
+            {
+                continue;
+            }
+            let computed = match validate_declaration(property, &declaration.value) {
+                DeclarationValidation::Invalid => continue,
+                DeclarationValidation::Valid(value) => value,
+                DeclarationValidation::Unvalidated => {
+                    compute_value(&declaration.value, property, ResolutionContext::default())
+                }
+            };
+            insert_computed_property(&mut style.properties, property, computed, flow);
+        }
+        style.properties.insert(
+            PropertyId::PositionTryFallbacks,
+            ComputedValue::Keyword("none".into()),
+        );
+        Some(style)
+    }
+
     pub(crate) fn replace_counter_values(
         &mut self,
         values: HashMap<(usize, Option<PseudoElement>), HashMap<String, Vec<i32>>>,
@@ -7225,6 +7297,10 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     // or `eq_ignore_ascii_case()` per branch.
     let key = name.to_ascii_lowercase();
 
+    if let Some(validation) = validate_anchor_position_declaration(&key, value) {
+        return validation;
+    }
+
     // The following checks recognize properties whose value can itself be a
     // top-level `Value::CommaList` (handled generically further down), so
     // they must keep running before that generic handling: a comma-separated
@@ -8065,6 +8141,9 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if is_non_negative_sizing_property(name) {
         return validate_sizing_value(name, value);
     }
+    if is_position_offset_property(name) && valid_anchor_size_expression(value) {
+        return DeclarationValidation::Unvalidated;
+    }
     if is_position_offset_property(name)
         && matches!(value, Value::Function { name: function, .. } if is_length_percentage_math_function(function))
     {
@@ -8076,6 +8155,320 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     DeclarationValidation::Unvalidated
+}
+
+fn validate_anchor_position_declaration(
+    name: &str,
+    value: &Value,
+) -> Option<DeclarationValidation> {
+    let css_wide = |value: &Value| {
+        matches!(value, Value::Keyword(keyword)
+            if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+    };
+    let keyword = |value: &Value, allowed: &[&str]| {
+        matches!(value, Value::Keyword(word)
+            if css_wide(value) || allowed.contains(&word.to_ascii_lowercase().as_str()))
+    };
+    let comma_separated_dashed_idents = |value: &Value| {
+        if let Value::List(values) | Value::CommaList(values) = value {
+            return !values.is_empty() && values.iter().all(is_dashed_ident);
+        }
+        let rendered = render_value(value);
+        let names = super::split_top_level_commas(&rendered);
+        !names.is_empty()
+            && names.iter().all(|name| {
+                name.starts_with("--") && name.len() > 2 && !name.contains(char::is_whitespace)
+            })
+    };
+    let valid = match name {
+        "anchor-name" => keyword(value, &["none"]) || comma_separated_dashed_idents(value),
+        "anchor-scope" => {
+            keyword(value, &["none", "all"])
+                || match value {
+                    Value::CommaList(values) => {
+                        !values.is_empty() && values.iter().all(is_dashed_ident)
+                    }
+                    value => is_dashed_ident(value),
+                }
+        }
+        "position-anchor" => keyword(value, &["auto"]) || is_dashed_ident(value),
+        "position-try-order" => keyword(
+            value,
+            &[
+                "normal",
+                "most-width",
+                "most-height",
+                "most-block-size",
+                "most-inline-size",
+            ],
+        ),
+        "position-visibility" => valid_position_visibility(value),
+        "position-area" => valid_position_area(value, css_wide),
+        "position-try-fallbacks" => valid_position_try_fallbacks(value, css_wide),
+        _ => return None,
+    };
+    Some(if valid {
+        let normalized = match name {
+            "position-area" => {
+                normalize_position_area(value).unwrap_or_else(|| render_value(value))
+            }
+            "position-try-fallbacks" => {
+                normalize_position_try_fallbacks(value).unwrap_or_else(|| render_value(value))
+            }
+            "position-visibility" => normalize_position_visibility(value)
+                .unwrap_or_else(|| render_value(value).trim().to_string()),
+            _ => render_value(value).trim().to_string(),
+        };
+        DeclarationValidation::Valid(ComputedValue::Keyword(normalized.to_ascii_lowercase()))
+    } else {
+        DeclarationValidation::Invalid
+    })
+}
+
+fn position_visibility_keywords(value: &Value) -> Option<Vec<&'static str>> {
+    let rendered = render_value(value);
+    let mut keywords = rendered
+        .split_ascii_whitespace()
+        .map(|keyword| match keyword.to_ascii_lowercase().as_str() {
+            "anchor-valid" => Some("anchor-valid"),
+            "anchor-visible" => Some("anchor-visible"),
+            "no-overflow" => Some("no-overflow"),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    keywords.sort_unstable_by_key(|keyword| match *keyword {
+        "anchor-valid" => 0,
+        "anchor-visible" => 1,
+        "no-overflow" => 2,
+        _ => unreachable!(),
+    });
+    keywords.dedup();
+    Some(keywords)
+}
+
+fn valid_position_visibility(value: &Value) -> bool {
+    if matches!(value, Value::Keyword(keyword)
+        if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+            || keyword.eq_ignore_ascii_case("always"))
+    {
+        return true;
+    }
+    position_visibility_keywords(value).is_some_and(|keywords| {
+        !keywords.is_empty()
+            && keywords.len() == render_value(value).split_ascii_whitespace().count()
+    })
+}
+
+fn normalize_position_visibility(value: &Value) -> Option<String> {
+    if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("always")) {
+        return Some("always".into());
+    }
+    let keywords = position_visibility_keywords(value)?;
+    (keywords.len() == render_value(value).split_ascii_whitespace().count())
+        .then(|| keywords.join(" "))
+}
+
+fn is_dashed_ident(value: &Value) -> bool {
+    match value {
+        Value::Keyword(ident) => ident.starts_with("--") && ident.len() > 2,
+        Value::List(values) => matches!(values.as_slice(), [value] if is_dashed_ident(value)),
+        _ => false,
+    }
+}
+
+fn valid_position_area(value: &Value, css_wide: impl Fn(&Value) -> bool) -> bool {
+    css_wide(value) || normalize_position_area(value).is_some()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PositionAreaAxis {
+    Horizontal,
+    Vertical,
+    Inline,
+    Block,
+    SelfInline,
+    SelfBlock,
+    StartEnd,
+    SelfStartEnd,
+    Universal,
+}
+
+fn position_area_axis(keyword: &str) -> Option<PositionAreaAxis> {
+    let keyword = keyword.trim_start_matches("span-");
+    Some(match keyword {
+        "center" | "all" => PositionAreaAxis::Universal,
+        "left" | "right" | "x-start" | "x-end" | "self-x-start" | "self-x-end" => {
+            PositionAreaAxis::Horizontal
+        }
+        "top" | "bottom" | "y-start" | "y-end" | "self-y-start" | "self-y-end" => {
+            PositionAreaAxis::Vertical
+        }
+        "inline-start" | "inline-end" => PositionAreaAxis::Inline,
+        "block-start" | "block-end" => PositionAreaAxis::Block,
+        "self-inline-start" | "self-inline-end" => PositionAreaAxis::SelfInline,
+        "self-block-start" | "self-block-end" => PositionAreaAxis::SelfBlock,
+        "start" | "end" => PositionAreaAxis::StartEnd,
+        "self-start" | "self-end" => PositionAreaAxis::SelfStartEnd,
+        _ => return None,
+    })
+}
+
+fn normalize_position_area(value: &Value) -> Option<String> {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    if values.is_empty() || values.len() > 2 {
+        return None;
+    }
+    let words = values
+        .iter()
+        .map(|value| match value {
+            Value::Keyword(keyword) => Some(keyword.to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if words.len() == 1 {
+        return (words[0] == "none" || position_area_axis(&words[0]).is_some())
+            .then(|| words[0].clone());
+    }
+    if words.iter().any(|word| word == "none") {
+        return None;
+    }
+    let first = position_area_axis(&words[0])?;
+    let second = position_area_axis(&words[1])?;
+    if first == PositionAreaAxis::Universal && second == PositionAreaAxis::Universal {
+        return Some(if words[0] != words[1] {
+            format!("{} {}", words[0], words[1])
+        } else if words[0] == "center" {
+            "center".into()
+        } else {
+            "span-all".into()
+        });
+    }
+    if first == PositionAreaAxis::Universal || second == PositionAreaAxis::Universal {
+        let (specific, universal, specific_first) = if first == PositionAreaAxis::Universal {
+            (&words[1], &words[0], false)
+        } else {
+            (&words[0], &words[1], true)
+        };
+        let axis = position_area_axis(specific)?;
+        if universal == "span-all"
+            && !matches!(
+                axis,
+                PositionAreaAxis::StartEnd | PositionAreaAxis::SelfStartEnd
+            )
+        {
+            return Some(specific.clone());
+        }
+        return Some(match axis {
+            PositionAreaAxis::Horizontal
+            | PositionAreaAxis::Block
+            | PositionAreaAxis::SelfBlock => format!("{specific} {universal}"),
+            PositionAreaAxis::Vertical
+            | PositionAreaAxis::Inline
+            | PositionAreaAxis::SelfInline => format!("{universal} {specific}"),
+            PositionAreaAxis::StartEnd | PositionAreaAxis::SelfStartEnd if specific_first => {
+                format!("{specific} {universal}")
+            }
+            PositionAreaAxis::StartEnd | PositionAreaAxis::SelfStartEnd => {
+                format!("{universal} {specific}")
+            }
+            PositionAreaAxis::Universal => unreachable!(),
+        });
+    }
+    let valid = matches!(
+        (first, second),
+        (PositionAreaAxis::Horizontal, PositionAreaAxis::Vertical)
+            | (PositionAreaAxis::Vertical, PositionAreaAxis::Horizontal)
+            | (PositionAreaAxis::Block, PositionAreaAxis::Inline)
+            | (PositionAreaAxis::Inline, PositionAreaAxis::Block)
+            | (PositionAreaAxis::SelfBlock, PositionAreaAxis::SelfInline)
+            | (PositionAreaAxis::SelfInline, PositionAreaAxis::SelfBlock)
+            | (PositionAreaAxis::StartEnd, PositionAreaAxis::StartEnd)
+            | (
+                PositionAreaAxis::SelfStartEnd,
+                PositionAreaAxis::SelfStartEnd
+            )
+    );
+    if !valid {
+        return None;
+    }
+    if words[0] == words[1] {
+        return Some(words[0].clone());
+    }
+    Some(match (first, second) {
+        (PositionAreaAxis::Vertical, PositionAreaAxis::Horizontal)
+        | (PositionAreaAxis::Inline, PositionAreaAxis::Block)
+        | (PositionAreaAxis::SelfInline, PositionAreaAxis::SelfBlock) => {
+            format!("{} {}", words[1], words[0])
+        }
+        _ => format!("{} {}", words[0], words[1]),
+    })
+}
+
+fn valid_position_try_fallbacks(value: &Value, css_wide: impl Fn(&Value) -> bool) -> bool {
+    css_wide(value) || normalize_position_try_fallbacks(value).is_some()
+}
+
+fn normalize_position_try_fallbacks(value: &Value) -> Option<String> {
+    if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("none")) {
+        return Some("none".into());
+    }
+    let entries = match value {
+        Value::CommaList(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    if entries.is_empty() {
+        return None;
+    }
+    let tactic = |value: &str| {
+        matches!(
+            value,
+            "flip-block" | "flip-inline" | "flip-start" | "flip-x" | "flip-y"
+        )
+    };
+    entries
+        .iter()
+        .map(|entry| {
+            let parts = match entry {
+                Value::List(values) => values.as_slice(),
+                value => std::slice::from_ref(value),
+            };
+            let words = parts
+                .iter()
+                .map(|part| match part {
+                    Value::Keyword(word) => Some(word.to_ascii_lowercase()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let names = words
+                .iter()
+                .filter(|word| word.starts_with("--") && word.len() > 2)
+                .collect::<Vec<_>>();
+            let tactics = words.iter().filter(|word| tactic(word)).collect::<Vec<_>>();
+            if names.len() <= 1
+                && !tactics.is_empty()
+                && names.len() + tactics.len() == words.len()
+                && names
+                    .first()
+                    .is_none_or(|name| words.first() == Some(name) || words.last() == Some(name))
+                && tactics
+                    .iter()
+                    .enumerate()
+                    .all(|(index, tactic)| !tactics[..index].contains(tactic))
+            {
+                let mut canonical = names.into_iter().cloned().collect::<Vec<_>>();
+                canonical.extend(tactics.into_iter().cloned());
+                return Some(canonical.join(" "));
+            }
+            if names.len() == 1 && words.len() == 1 {
+                return Some(words[0].clone());
+            }
+            normalize_position_area(entry).filter(|area| area != "none")
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(|entries| entries.join(", "))
 }
 
 fn canonical_paint_order(parts: &[&str]) -> String {
@@ -9123,6 +9516,7 @@ fn validate_box_spacing_declaration(name: &str, value: &Value) -> Option<Declara
 pub(super) fn box_spacing_component_is_valid(name: &str, value: &Value) -> bool {
     let margin = name.starts_with("margin-");
     match value {
+        Value::Function { .. } if margin && valid_anchor_size_expression(value) => true,
         Value::Keyword(keyword) => {
             is_css_wide_keyword(&keyword.to_ascii_lowercase())
                 || (margin && keyword.eq_ignore_ascii_case("auto"))
@@ -9175,6 +9569,8 @@ fn validate_logical_box_declaration(name: &str, value: &Value) -> Option<Declara
     );
     if is_offset {
         let valid = matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("auto") || is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+            || valid_anchor_function(value)
+            || valid_anchor_size_expression(value)
             || valid_logical_length(value, true, true);
         return Some(if valid {
             DeclarationValidation::Unvalidated
@@ -9234,6 +9630,51 @@ fn validate_logical_box_declaration(name: &str, value: &Value) -> Option<Declara
         return Some(DeclarationValidation::Invalid);
     }
     None
+}
+
+fn valid_anchor_function(value: &Value) -> bool {
+    let Value::Function { name, arguments } = value else {
+        return false;
+    };
+    if !name.eq_ignore_ascii_case("anchor") || arguments.is_empty() {
+        return false;
+    }
+    let components = arguments
+        .iter()
+        .flat_map(|argument| match argument {
+            Value::List(values) => values.iter().collect::<Vec<_>>(),
+            value => vec![value],
+        })
+        .collect::<Vec<_>>();
+    let mut index = 0;
+    if components
+        .get(index)
+        .is_some_and(|value| is_dashed_ident(value))
+    {
+        index += 1;
+    }
+    let Some(Value::Keyword(side)) = components.get(index) else {
+        return false;
+    };
+    if !matches!(
+        side.to_ascii_lowercase().as_str(),
+        "top"
+            | "right"
+            | "bottom"
+            | "left"
+            | "center"
+            | "start"
+            | "end"
+            | "self-start"
+            | "self-end"
+            | "inside"
+            | "outside"
+    ) && !side.ends_with('%')
+    {
+        return false;
+    }
+    index += 1;
+    index == components.len()
 }
 
 fn valid_logical_length(value: &Value, allow_negative: bool, allow_percentage: bool) -> bool {
@@ -9495,6 +9936,9 @@ fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
             || (name.starts_with("max-") && keyword == "none")
     };
     match value {
+        Value::Function { .. } if valid_anchor_size_function(value) => {
+            DeclarationValidation::Unvalidated
+        }
         Value::Keyword(keyword) if valid_keyword(keyword) => DeclarationValidation::Unvalidated,
         Value::Length(number, unit)
             if *number >= 0.0
@@ -9504,6 +9948,12 @@ fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
         }
         Value::Percentage(number) if *number >= 0.0 => DeclarationValidation::Unvalidated,
         Value::Number(number) if *number == 0.0 => DeclarationValidation::Unvalidated,
+        Value::Function { name: function, .. }
+            if is_length_percentage_math_function(function)
+                && valid_anchor_size_expression(value) =>
+        {
+            DeclarationValidation::Unvalidated
+        }
         Value::Function { name: function, .. } if is_length_percentage_math_function(function) => {
             if typed_math::infer(value, Some(typed_math::NumericType::LENGTH))
                 == Some(typed_math::NumericType::LENGTH)
@@ -9515,6 +9965,259 @@ fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
         }
         _ => DeclarationValidation::Invalid,
     }
+}
+
+fn valid_anchor_size_function(value: &Value) -> bool {
+    let Value::Function { name, arguments } = value else {
+        return false;
+    };
+    if !name.eq_ignore_ascii_case("anchor-size") || arguments.len() > 2 {
+        return false;
+    }
+    let Some(first) = arguments.first() else {
+        return true;
+    };
+    let components = match first {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let size = |value: &Value| {
+        matches!(value, Value::Keyword(size) if matches!(
+            size.to_ascii_lowercase().as_str(),
+            "width" | "height" | "block" | "inline" | "self-block" | "self-inline"
+        ))
+    };
+    let descriptor = match components {
+        [] => true,
+        [value] => is_dashed_ident(value) || size(value) || valid_anchor_size_fallback(value),
+        [first, second] => {
+            (is_dashed_ident(first) && size(second)) || (size(first) && is_dashed_ident(second))
+        }
+        _ => false,
+    };
+    descriptor && arguments.get(1).is_none_or(valid_anchor_size_fallback)
+}
+
+fn valid_anchor_size_fallback(value: &Value) -> bool {
+    match value {
+        Value::Length(number, unit) => {
+            number.is_finite()
+                && resolve_length_to_px(*number, unit, ResolutionContext::default()).is_some()
+        }
+        Value::Percentage(number) => number.is_finite(),
+        Value::Number(number) => *number == 0.0,
+        Value::Function { name, .. } if name.eq_ignore_ascii_case("anchor-size") => {
+            valid_anchor_size_function(value)
+        }
+        Value::Function { name, arguments } if is_length_percentage_math_function(name) => {
+            !arguments.is_empty() && arguments.iter().all(valid_anchor_size_math_component)
+        }
+        _ => false,
+    }
+}
+
+fn valid_anchor_size_math_component(value: &Value) -> bool {
+    match value {
+        Value::List(values) | Value::CommaList(values) => {
+            values.iter().all(valid_anchor_size_math_component)
+        }
+        Value::Number(number) => number.is_finite(),
+        Value::Keyword(operator) => matches!(operator.as_str(), "+" | "-" | "*" | "/"),
+        value => valid_anchor_size_fallback(value),
+    }
+}
+
+fn contains_valid_anchor_size_function(value: &Value) -> bool {
+    match value {
+        Value::Function { name, arguments } => {
+            (name.eq_ignore_ascii_case("anchor-size") && valid_anchor_size_function(value))
+                || arguments.iter().any(contains_valid_anchor_size_function)
+        }
+        Value::List(values) | Value::CommaList(values) => {
+            values.iter().any(contains_valid_anchor_size_function)
+        }
+        _ => false,
+    }
+}
+
+fn valid_anchor_size_expression(value: &Value) -> bool {
+    match value {
+        Value::Function { name, .. } if name.eq_ignore_ascii_case("anchor-size") => {
+            valid_anchor_size_function(value)
+        }
+        Value::Function { name, arguments } if is_length_percentage_math_function(name) => {
+            arguments.iter().all(valid_anchor_size_expression_component)
+                && contains_valid_anchor_size_function(value)
+        }
+        _ => false,
+    }
+}
+
+fn valid_anchor_size_expression_component(value: &Value) -> bool {
+    match value {
+        Value::Function { name, .. } if name.eq_ignore_ascii_case("anchor-size") => {
+            valid_anchor_size_function(value)
+        }
+        Value::Function { name, arguments } if is_length_percentage_math_function(name) => {
+            arguments.iter().all(valid_anchor_size_expression_component)
+        }
+        Value::List(values) | Value::CommaList(values) => {
+            values.iter().all(valid_anchor_size_expression_component)
+        }
+        Value::Length(..) | Value::Percentage(_) | Value::Number(_) => true,
+        Value::Keyword(operator) => matches!(operator.as_str(), "+" | "-" | "*" | "/"),
+        _ => false,
+    }
+}
+
+fn canonical_anchor_size_tree(value: &Value) -> Value {
+    match value {
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("anchor-size") => {
+            let mut arguments = arguments
+                .iter()
+                .map(canonical_anchor_size_tree)
+                .collect::<Vec<_>>();
+            if let Some(Value::List(parts)) = arguments.first_mut()
+                && matches!(parts.as_slice(), [Value::Keyword(size), name]
+                    if matches!(size.to_ascii_lowercase().as_str(),
+                        "width" | "height" | "block" | "inline" | "self-block" | "self-inline")
+                    && is_dashed_ident(name))
+            {
+                parts.swap(0, 1);
+            }
+            if let Some(Value::Number(number)) = arguments.get_mut(1)
+                && *number == 0.0
+            {
+                arguments[1] = Value::Length(0.0, "px".into());
+            }
+            Value::Function {
+                name: name.to_ascii_lowercase(),
+                arguments,
+            }
+        }
+        Value::Function { name, arguments } => Value::Function {
+            name: name.clone(),
+            arguments: arguments.iter().map(canonical_anchor_size_tree).collect(),
+        },
+        Value::List(values) => Value::List(values.iter().map(canonical_anchor_size_tree).collect()),
+        Value::CommaList(values) => {
+            Value::CommaList(values.iter().map(canonical_anchor_size_tree).collect())
+        }
+        value => value.clone(),
+    }
+}
+
+fn render_canonical_anchor_size(value: &Value) -> String {
+    let value = canonical_anchor_size_tree(value);
+    render_anchor_size_value(&value, false)
+}
+
+fn render_anchor_size_value(value: &Value, nested_calc: bool) -> String {
+    match value {
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+            let parts = arguments
+                .first()
+                .and_then(|argument| match argument {
+                    Value::List(parts) => Some(parts.as_slice()),
+                    _ => None,
+                })
+                .unwrap_or(arguments.as_slice());
+            if matches!(parts, [Value::Function { name, .. }] if name.eq_ignore_ascii_case("anchor-size"))
+            {
+                return render_anchor_size_value(&parts[0], false);
+            }
+            let body = if let [
+                Value::Function {
+                    name,
+                    arguments: inner,
+                },
+                Value::Keyword(operator),
+                Value::Number(divisor),
+            ] = parts
+                && name.eq_ignore_ascii_case("calc")
+                && operator == "/"
+                && *divisor == 2.0
+            {
+                let inner = inner
+                    .iter()
+                    .map(|value| render_anchor_size_value(value, true))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("0.5 * ({inner})")
+            } else if let [
+                anchor @ Value::Function { name, .. },
+                Value::Keyword(operator),
+                percentage @ Value::Percentage(_),
+            ] = parts
+                && name.eq_ignore_ascii_case("anchor-size")
+                && operator == "+"
+            {
+                format!(
+                    "{} + {}",
+                    render_anchor_size_value(percentage, false),
+                    render_anchor_size_value(anchor, false)
+                )
+            } else {
+                parts
+                    .iter()
+                    .map(|value| render_anchor_size_value(value, true))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            if nested_calc {
+                format!("({body})")
+            } else {
+                format!("calc({body})")
+            }
+        }
+        Value::Function { name, arguments } => format!(
+            "{name}({})",
+            arguments
+                .iter()
+                .map(|value| render_anchor_size_value(value, false))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::List(values) => values
+            .iter()
+            .map(|value| render_anchor_size_value(value, nested_calc))
+            .collect::<Vec<_>>()
+            .join(" "),
+        Value::CommaList(values) => values
+            .iter()
+            .map(|value| render_anchor_size_value(value, nested_calc))
+            .collect::<Vec<_>>()
+            .join(", "),
+        value => render_value(value),
+    }
+}
+
+pub(crate) fn normalize_anchor_position_specified(property: &str, text: &str) -> Option<String> {
+    let keyword = text.trim().to_ascii_lowercase();
+    if is_css_wide_keyword(&keyword) {
+        return Some(keyword);
+    }
+    // Parse through a custom property so shorthand expansion does not discard
+    // the original component-value tree that needs CSSOM canonicalization.
+    // `supports_declaration` below remains the property-specific grammar
+    // boundary.
+    let declarations = super::parse_style_attribute(&format!("--omoikane-anchor-value: {text}"));
+    let declaration = declarations.first()?;
+    if property == "position-area" {
+        return normalize_position_area(&declaration.value);
+    }
+    if property == "position-try-fallbacks" {
+        return normalize_position_try_fallbacks(&declaration.value);
+    }
+    if property == "position-visibility" {
+        return normalize_position_visibility(&declaration.value);
+    }
+    if contains_valid_anchor_size_function(&declaration.value)
+        && supports_declaration(property, text)
+    {
+        return Some(render_canonical_anchor_size(&declaration.value));
+    }
+    None
 }
 
 fn is_length_percentage_math_function(name: &str) -> bool {
@@ -16970,6 +17673,10 @@ impl InitialValue {
 /// depends on another property's resolved value or on the number of layers
 /// in a shorthand — those stay as explicit code in `apply_initial_values`.
 const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
+    (
+        PropertyId::PositionVisibility,
+        InitialValue::Keyword("anchor-visible"),
+    ),
     (PropertyId::AccentColor, InitialValue::Keyword("auto")),
     (PropertyId::Appearance, InitialValue::Keyword("none")),
     (PropertyId::CaretColor, InitialValue::Keyword("auto")),
