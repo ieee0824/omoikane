@@ -14201,6 +14201,47 @@ fn anchor_size_sets_the_positioned_box_used_dimensions() {
 }
 
 #[test]
+fn anchor_center_self_alignment_centers_a_positioned_box_on_its_anchor() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let anchor = NodeHandle::element("section");
+    let positioned = NodeHandle::element("aside");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(anchor);
+    container.append_child(positioned.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0 } div { position: relative; width: 200px; height: 100px } \
+             section { anchor-name: --trigger; margin-left: 40px; width: 30px; height: 20px } \
+             aside { position: absolute; position-anchor: --trigger; \
+                     justify-self: anchor-center; align-self: anchor-center; \
+                     width: 10px; height: 10px }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        },
+    )
+    .unwrap();
+    let rect = find_layout_box(&layout, &positioned)
+        .unwrap()
+        .dimensions
+        .border_box();
+    assert_eq!((rect.x, rect.y), (50.0, 5.0));
+}
+
+#[test]
 fn named_position_try_rule_relocates_an_overflowing_box() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

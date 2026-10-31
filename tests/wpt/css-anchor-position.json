@@ -3,6 +3,8 @@
     { "path": "css/css-anchor-position/parsing/anchor-scope-parsing.html" },
     { "path": "css/css-anchor-position/parsing/position-try-fallbacks-parsing.html" },
     { "path": "css/css-anchor-position/parsing/position-try-order-parsing.html" },
+    { "path": "css/css-anchor-position/parsing/position-visibility-parsing.html" },
+    { "path": "css/css-anchor-position/parsing/position-visibility-computed.html" },
     { "path": "css/css-anchor-position/anchor-size-parse-valid.html" },
     { "path": "css/css-anchor-position/anchor-size-parse-invalid.html" },
     { "path": "css/css-anchor-position/at-position-try-cssom.html" },

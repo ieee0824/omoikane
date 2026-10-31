@@ -2978,6 +2978,7 @@ fn layout_document(
             &anchors,
         ) {
             layout.z_index = i32::MAX;
+            append_anchor_geometries(&layout, resolver, &mut anchors);
             children.push(layout);
         }
     }
@@ -6938,6 +6939,20 @@ fn layout_positioned_child_mode(
             outer_y = area_y;
         }
     }
+    if let Some(anchor) = resolved_position_anchor(style, anchors) {
+        if left.is_none()
+            && right.is_none()
+            && matches!(style.get("justify-self"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("anchor-center"))
+        {
+            outer_x = anchor.rect.x + (anchor.rect.width - outer_width) / 2.0;
+        }
+        if top.is_none()
+            && bottom.is_none()
+            && matches!(style.get("align-self"), Some(ComputedValue::Keyword(value)) if value.eq_ignore_ascii_case("anchor-center"))
+        {
+            outer_y = anchor.rect.y + (anchor.rect.height - outer_height) / 2.0;
+        }
+    }
     let overflows = outer_x < origin.x
         || outer_y < origin.y
         || outer_x + outer_width > origin.x + origin.width
@@ -7026,6 +7041,19 @@ fn resolved_anchor_size(
         "height" | "block" | "self-block" => Some(anchor.rect.height),
         _ => None,
     }
+}
+
+fn resolved_position_anchor<'a>(
+    style: &ComputedStyle,
+    anchors: &'a [AnchorGeometry],
+) -> Option<&'a AnchorGeometry> {
+    let ComputedValue::Keyword(name) = style.get_by_id(PropertyId::PositionAnchor)? else {
+        return None;
+    };
+    anchors
+        .iter()
+        .rev()
+        .find(|anchor| anchor.names.iter().any(|candidate| candidate == name))
 }
 
 fn position_area_origin(

@@ -1145,6 +1145,7 @@ let omoikaneUserActivationState;
     name === "initial-letter" || name === "text-box-edge" ||
     logicalBoxStyleProperties.has(name) ||
     name === "position-area" || name === "position-try-fallbacks" ||
+    name === "position-visibility" ||
     (!name.startsWith("--") && /anchor-size\s*\(/i.test(value)) ||
     validatesSpecialStyleProperties.has(name) ||
     (!name.startsWith("--") && numericMathFunctionPattern.test(value)) ||

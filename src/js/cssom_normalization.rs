@@ -130,8 +130,10 @@ const VALIDATED_PROPERTIES: &[&str] = &[
 ];
 
 pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
-    if matches!(property, "position-area" | "position-try-fallbacks")
-        || (!property.starts_with("--") && value.to_ascii_lowercase().contains("anchor-size("))
+    if matches!(
+        property,
+        "position-area" | "position-try-fallbacks" | "position-visibility"
+    ) || (!property.starts_with("--") && value.to_ascii_lowercase().contains("anchor-size("))
     {
         return crate::css::style::normalize_anchor_position_specified(property, value);
     }

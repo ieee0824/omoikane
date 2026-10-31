@@ -8202,6 +8202,7 @@ fn validate_anchor_position_declaration(
                 "most-inline-size",
             ],
         ),
+        "position-visibility" => valid_position_visibility(value),
         "position-area" => valid_position_area(value, css_wide),
         "position-try-fallbacks" => valid_position_try_fallbacks(value, css_wide),
         _ => return None,
@@ -8214,12 +8215,57 @@ fn validate_anchor_position_declaration(
             "position-try-fallbacks" => {
                 normalize_position_try_fallbacks(value).unwrap_or_else(|| render_value(value))
             }
+            "position-visibility" => normalize_position_visibility(value)
+                .unwrap_or_else(|| render_value(value).trim().to_string()),
             _ => render_value(value).trim().to_string(),
         };
         DeclarationValidation::Valid(ComputedValue::Keyword(normalized.to_ascii_lowercase()))
     } else {
         DeclarationValidation::Invalid
     })
+}
+
+fn position_visibility_keywords(value: &Value) -> Option<Vec<&'static str>> {
+    let rendered = render_value(value);
+    let mut keywords = rendered
+        .split_ascii_whitespace()
+        .map(|keyword| match keyword.to_ascii_lowercase().as_str() {
+            "anchor-valid" => Some("anchor-valid"),
+            "anchor-visible" => Some("anchor-visible"),
+            "no-overflow" => Some("no-overflow"),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    keywords.sort_unstable_by_key(|keyword| match *keyword {
+        "anchor-valid" => 0,
+        "anchor-visible" => 1,
+        "no-overflow" => 2,
+        _ => unreachable!(),
+    });
+    keywords.dedup();
+    Some(keywords)
+}
+
+fn valid_position_visibility(value: &Value) -> bool {
+    if matches!(value, Value::Keyword(keyword)
+        if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+            || keyword.eq_ignore_ascii_case("always"))
+    {
+        return true;
+    }
+    position_visibility_keywords(value).is_some_and(|keywords| {
+        !keywords.is_empty()
+            && keywords.len() == render_value(value).split_ascii_whitespace().count()
+    })
+}
+
+fn normalize_position_visibility(value: &Value) -> Option<String> {
+    if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("always")) {
+        return Some("always".into());
+    }
+    let keywords = position_visibility_keywords(value)?;
+    (keywords.len() == render_value(value).split_ascii_whitespace().count())
+        .then(|| keywords.join(" "))
 }
 
 fn is_dashed_ident(value: &Value) -> bool {
@@ -10162,6 +10208,9 @@ pub(crate) fn normalize_anchor_position_specified(property: &str, text: &str) ->
     }
     if property == "position-try-fallbacks" {
         return normalize_position_try_fallbacks(&declaration.value);
+    }
+    if property == "position-visibility" {
+        return normalize_position_visibility(&declaration.value);
     }
     if contains_valid_anchor_size_function(&declaration.value)
         && supports_declaration(property, text)
@@ -17624,6 +17673,10 @@ impl InitialValue {
 /// depends on another property's resolved value or on the number of layers
 /// in a shorthand — those stay as explicit code in `apply_initial_values`.
 const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
+    (
+        PropertyId::PositionVisibility,
+        InitialValue::Keyword("anchor-visible"),
+    ),
     (PropertyId::AccentColor, InitialValue::Keyword("auto")),
     (PropertyId::Appearance, InitialValue::Keyword("none")),
     (PropertyId::CaretColor, InitialValue::Keyword("auto")),

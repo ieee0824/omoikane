@@ -127,6 +127,9 @@ fn anchor_position_properties_share_strict_cssom_and_supports_grammar() {
             ['position-area', 'block-end span-inline-end'],
             ['position-try-fallbacks', '--below flip-inline, top'],
             ['position-try-order', 'most-block-size'],
+            ['position-visibility', 'no-overflow anchor-valid'],
+            ['justify-self', 'anchor-center'],
+            ['align-self', 'anchor-center'],
             ['width', 'anchor-size(--menu width, anchor-size(--fallback block))'],
             ['left', 'anchor-size(--menu inline, 10px)'],
         ];
@@ -137,6 +140,7 @@ fn anchor_position_properties_share_strict_cssom_and_supports_grammar() {
             ['position-area', 'top bottom left'],
             ['position-try-fallbacks', 'unknown'],
             ['position-try-order', 'largest'],
+            ['position-visibility', 'always no-overflow'],
         ];
         for (const [name, value] of valid) {
             if (!CSS.supports(name, value)) return `unsupported:${name}:${value}`;

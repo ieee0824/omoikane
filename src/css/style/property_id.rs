@@ -321,6 +321,7 @@ define_properties! {
         "position-area" => PositionArea,
         "position-try-fallbacks" => PositionTryFallbacks,
         "position-try-order" => PositionTryOrder,
+        "position-visibility" => PositionVisibility,
         "print-color-adjust" => PrintColorAdjust,
         "quotes" => Quotes,
         "resize" => Resize,
