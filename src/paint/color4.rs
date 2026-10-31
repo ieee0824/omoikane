@@ -35,6 +35,7 @@ pub(crate) struct CssColor {
     pub channels: [Option<f64>; 3],
     pub alpha: Option<f64>,
     expressions: [Option<String>; 4],
+    specified: Option<String>,
 }
 
 impl CssColor {
@@ -44,6 +45,9 @@ impl CssColor {
 
     pub fn parse_with_context(text: &str, context: Option<ColorContext>) -> Option<Self> {
         let lower = text.trim().to_ascii_lowercase();
+        if lower.starts_with("color-mix(") {
+            return parse_color_mix(&lower, context);
+        }
         let (name, body) = lower.split_once('(')?;
         let body = body.strip_suffix(')')?;
         let pieces = math::tokens(body)?;
@@ -81,6 +85,7 @@ impl CssColor {
             channels,
             alpha,
             expressions,
+            specified: None,
         })
     }
 
@@ -97,6 +102,9 @@ impl CssColor {
     }
 
     pub fn serialize(&self) -> String {
+        if let Some(specified) = &self.specified {
+            return specified.clone();
+        }
         self.serialize_mode(false)
     }
 
@@ -188,6 +196,320 @@ impl CssColor {
     }
 }
 
+#[derive(Debug)]
+struct MixComponent {
+    color: CssColor,
+    percentage: Option<f64>,
+    percentage_was_specified: bool,
+    specified_color: String,
+}
+
+fn parse_color_mix(text: &str, context: Option<ColorContext>) -> Option<CssColor> {
+    let body = text.strip_prefix("color-mix(")?.strip_suffix(')')?;
+    let parts = crate::css::split_top_level_commas(body);
+    if parts.len() < 2 {
+        return None;
+    }
+    let (space, is_hsl, hue_method, first_color) = parse_interpolation_method(parts[0])?;
+    let color_parts = if first_color.is_empty() {
+        &parts[1..]
+    } else {
+        &parts[..]
+    };
+    if color_parts.len() < 2 {
+        return None;
+    }
+    let mut components = color_parts
+        .iter()
+        .enumerate()
+        .map(|(index, part)| {
+            let text = if index == 0 && !first_color.is_empty() {
+                first_color
+            } else {
+                part.trim()
+            };
+            parse_mix_component(text, context)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    normalize_mix_percentages(&mut components)?;
+    let specified = serialize_specified_mix(parts[0], &components);
+    let mut color = mix_css_colors(space, is_hsl, hue_method, &components)?;
+    color.specified = Some(specified);
+    Some(color)
+}
+
+fn parse_interpolation_method(first: &str) -> Option<(Space, bool, &str, &str)> {
+    let first = first.trim();
+    if !first.starts_with("in ") {
+        return Some((Space::Oklab, false, "shorter", first));
+    }
+    let words = first.split_ascii_whitespace().collect::<Vec<_>>();
+    let space_name = *words.get(1)?;
+    let is_hsl = space_name == "hsl";
+    let space = match space_name {
+        "hsl" | "hwb" => Space::Hwb,
+        "lab" => Space::Lab,
+        "lch" => Space::Lch,
+        "oklab" => Space::Oklab,
+        "oklch" => Space::Oklch,
+        name => parse_space(name)?,
+    };
+    let hue_method = match words.get(2..) {
+        Some([]) => "shorter",
+        Some([method, "hue"])
+            if matches!(*method, "shorter" | "longer" | "increasing" | "decreasing") =>
+        {
+            method
+        }
+        _ => return None,
+    };
+    Some((space, is_hsl, hue_method, ""))
+}
+
+fn parse_mix_component(text: &str, context: Option<ColorContext>) -> Option<MixComponent> {
+    let words = crate::css::split_top_level_whitespace_strict(text)?;
+    if words.is_empty() {
+        return None;
+    }
+    let percentage_at_start = parse_mix_percentage(words[0], context);
+    let percentage_at_end = words
+        .last()
+        .filter(|_| words.len() > 1)
+        .and_then(|word| parse_mix_percentage(word, context));
+    if percentage_at_start.is_some() && percentage_at_end.is_some() {
+        return None;
+    }
+    let (color_words, percentage) = if let Some(value) = percentage_at_start {
+        (&words[1..], Some(value))
+    } else if let Some(value) = percentage_at_end {
+        (&words[..words.len() - 1], Some(value))
+    } else {
+        (&words[..], None)
+    };
+    if color_words.len() != 1 {
+        return None;
+    }
+    let color = parse_absolute_mix_color(color_words[0], context)?;
+    let specified_color = specified_mix_color(color_words[0], &color);
+    Some(MixComponent {
+        color,
+        percentage,
+        percentage_was_specified: percentage.is_some(),
+        specified_color,
+    })
+}
+
+fn specified_mix_color(input: &str, color: &CssColor) -> String {
+    let lower = input.to_ascii_lowercase();
+    if lower.starts_with("hsl(") || lower.starts_with("hsla(") {
+        let rgba = color.to_color();
+        return if rgba.a == 255 {
+            format!("rgb({}, {}, {})", rgba.r, rgba.g, rgba.b)
+        } else {
+            format!(
+                "rgba({}, {}, {}, {})",
+                rgba.r,
+                rgba.g,
+                rgba.b,
+                css_number(f64::from(rgba.a) / 255.0)
+            )
+        };
+    }
+    if lower.starts_with("color-mix(")
+        || matches!(
+            lower.split_once('(').map(|(name, _)| name),
+            Some("hwb" | "lab" | "lch" | "oklab" | "oklch" | "color")
+        )
+    {
+        color.serialize()
+    } else {
+        lower
+    }
+}
+
+fn serialize_specified_mix(method_or_color: &str, components: &[MixComponent]) -> String {
+    let method = method_or_color.trim();
+    let method = if method.starts_with("in ") {
+        method.strip_suffix(" shorter hue").unwrap_or(method)
+    } else {
+        ""
+    };
+    let omit_percentages = components.len() == 2
+        && components
+            .iter()
+            .all(|component| component.percentage == Some(50.0));
+    let any_percentage = components
+        .iter()
+        .any(|component| component.percentage_was_specified);
+    let colors = components
+        .iter()
+        .map(|component| {
+            if omit_percentages || !any_percentage {
+                component.specified_color.clone()
+            } else {
+                format!(
+                    "{} {}%",
+                    component.specified_color,
+                    css_number(component.percentage.unwrap())
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    if method.is_empty() {
+        format!("color-mix({})", colors.join(", "))
+    } else {
+        format!("color-mix({method}, {})", colors.join(", "))
+    }
+}
+
+fn parse_mix_percentage(text: &str, context: Option<ColorContext>) -> Option<f64> {
+    if !text.ends_with('%') && !text.starts_with("calc(") {
+        return None;
+    }
+    let value = number(text, 100.0, context)??;
+    (value.is_finite() && (0.0..=100.0).contains(&value)).then_some(value)
+}
+
+fn parse_absolute_mix_color(text: &str, context: Option<ColorContext>) -> Option<CssColor> {
+    if text.starts_with("color-mix(")
+        || matches!(
+            text.split_once('(').map(|(name, _)| name),
+            Some("hwb" | "lab" | "lch" | "oklab" | "oklch" | "color")
+        )
+    {
+        return CssColor::parse_with_context(text, context);
+    }
+    let color = super::color::parse_color(text)?;
+    Some(CssColor {
+        space: Space::Srgb,
+        channels: [color.r, color.g, color.b].map(|value| Some(f64::from(value) / 255.0)),
+        alpha: Some(f64::from(color.a) / 255.0),
+        expressions: std::array::from_fn(|_| None),
+        specified: None,
+    })
+}
+
+fn normalize_mix_percentages(components: &mut [MixComponent]) -> Option<()> {
+    let specified = components
+        .iter()
+        .filter_map(|item| item.percentage)
+        .sum::<f64>();
+    let missing = components
+        .iter()
+        .filter(|item| item.percentage.is_none())
+        .count();
+    if specified > 100.0 && missing > 0 {
+        return None;
+    }
+    let default = if missing == 0 {
+        0.0
+    } else {
+        (100.0 - specified) / missing as f64
+    };
+    for component in components {
+        component.percentage.get_or_insert(default);
+    }
+    Some(())
+}
+
+fn mix_css_colors(
+    space: Space,
+    is_hsl: bool,
+    hue_method: &str,
+    components: &[MixComponent],
+) -> Option<CssColor> {
+    let sum = components
+        .iter()
+        .map(|item| item.percentage.unwrap())
+        .sum::<f64>();
+    let alpha_multiplier = (sum / 100.0).min(1.0);
+    let hue_index = match space {
+        Space::Hwb => Some(0),
+        Space::Lch | Space::Oklch => Some(2),
+        _ => None,
+    };
+    let converted = components
+        .iter()
+        .map(|item| {
+            let rgb = convert::to_srgb(
+                item.color.space,
+                item.color.channels.map(|value| value.unwrap_or(0.0)),
+            );
+            let channels = if is_hsl {
+                rgb_to_hsl(rgb)
+            } else {
+                convert::from_srgb(space, rgb)
+            };
+            (
+                channels,
+                item.color.alpha.unwrap_or(0.0),
+                item.percentage.unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let reference_hue = hue_index.and_then(|index| {
+        converted
+            .iter()
+            .find(|(channels, _, _)| !powerless_hue(space, is_hsl, channels))
+            .map(|(channels, _, _)| channels[index])
+    });
+    let mut premultiplied = [0.0; 3];
+    let mut alpha = 0.0;
+    let mut hue_total = 0.0;
+    for (component_index, (mut channels, source_alpha, percentage)) in
+        converted.into_iter().enumerate()
+    {
+        let normalized = if sum == 0.0 {
+            1.0 / components.len() as f64
+        } else {
+            percentage / sum
+        };
+        if let (Some(index), Some(reference)) = (hue_index, reference_hue) {
+            channels[index] = if powerless_hue(space, is_hsl, &channels) {
+                reference
+            } else if component_index == 0 {
+                reference
+            } else {
+                adjusted_hue(reference, channels[index], hue_method)?
+            };
+            hue_total += channels[index] * normalized;
+        }
+        alpha += source_alpha * normalized;
+        for index in 0..3 {
+            if Some(index) != hue_index {
+                premultiplied[index] += channels[index] * source_alpha * normalized;
+            }
+        }
+    }
+    let mut channels = [0.0; 3];
+    if alpha > 0.0 {
+        for index in 0..3 {
+            channels[index] = if Some(index) == hue_index {
+                hue_total
+            } else {
+                premultiplied[index] / alpha
+            };
+        }
+    }
+    if let Some(index) = hue_index {
+        channels[index] = channels[index].rem_euclid(360.0);
+    }
+    let (space, channels) = if is_hsl {
+        (Space::Srgb, hsl_to_rgb(channels))
+    } else if space == Space::Hwb {
+        (Space::Srgb, convert::to_srgb(space, channels))
+    } else {
+        (space, channels)
+    };
+    Some(CssColor {
+        space,
+        channels: channels.map(Some),
+        alpha: Some(alpha * alpha_multiplier),
+        expressions: std::array::from_fn(|_| None),
+        specified: None,
+    })
+}
+
 /// Mixes concrete CPAL colors in the CSS `palette-mix()` interpolation space.
 pub(crate) fn mix_palette_colors(method: &str, colors: &[([u8; 4], f32)]) -> Option<[u8; 4]> {
     let mut words = method.split_ascii_whitespace();
@@ -258,15 +580,18 @@ pub(crate) fn mix_palette_colors(method: &str, colors: &[([u8; 4], f32)]) -> Opt
     let mut premultiplied = [0.0; 3];
     let mut alpha = 0.0;
     let mut hue_total = 0.0;
-    for (mut channels, source_alpha, weight) in converted {
+    for (component_index, (mut channels, source_alpha, weight)) in converted.into_iter().enumerate()
+    {
         let normalized = weight / sum;
         if let (Some(index), Some(reference)) = (hue_index, reference_hue) {
             channels[index] = if powerless_hue(space, is_hsl, &channels) {
                 reference
+            } else if component_index == 0 {
+                reference
             } else {
                 adjusted_hue(reference, channels[index], hue_method)?
             };
-            hue_total += channels[index] * source_alpha * normalized;
+            hue_total += channels[index] * normalized;
         }
         alpha += source_alpha * normalized;
         for index in 0..3 {
@@ -279,7 +604,7 @@ pub(crate) fn mix_palette_colors(method: &str, colors: &[([u8; 4], f32)]) -> Opt
     if alpha > 0.0 {
         for index in 0..3 {
             channels[index] = if Some(index) == hue_index {
-                hue_total / alpha
+                hue_total
             } else {
                 premultiplied[index] / alpha
             };
@@ -528,6 +853,53 @@ fn angle(text: &str, context: Option<ColorContext>) -> Option<Option<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_mix_normalizes_percentages_and_premultiplies_alpha() {
+        for (input, expected, pixel) in [
+            (
+                "color-mix(in srgb, red, blue)",
+                "color(srgb 0.5 0 0.5)",
+                Color::rgb(128, 0, 128),
+            ),
+            (
+                "color-mix(in srgb, red 20%, blue)",
+                "color(srgb 0.2 0 0.8)",
+                Color::rgb(51, 0, 204),
+            ),
+            (
+                "color-mix(in srgb, red 20%, transparent 20%)",
+                "color(srgb 1 0 0 / 0.2)",
+                Color::rgba(255, 0, 0, 51),
+            ),
+        ] {
+            let color = CssColor::parse(input).unwrap();
+            assert_eq!(color.serialize_computed(), expected, "{input}");
+            assert_eq!(color.to_color(), pixel, "{input}");
+        }
+    }
+
+    #[test]
+    fn color_mix_supports_hue_methods_and_rejects_invalid_percentages() {
+        let shorter =
+            CssColor::parse("color-mix(in hsl shorter hue, hsl(10 100% 50%), hsl(350 100% 50%))")
+                .unwrap()
+                .to_color();
+        let longer =
+            CssColor::parse("color-mix(in hsl longer hue, hsl(10 100% 50%), hsl(350 100% 50%))")
+                .unwrap()
+                .to_color();
+        assert_eq!(shorter, Color::rgb(255, 0, 0));
+        assert_eq!(longer, Color::rgb(0, 255, 255));
+        for invalid in [
+            "color-mix(in srgb, red)",
+            "color-mix(in unknown, red, blue)",
+            "color-mix(in srgb, red -1%, blue)",
+            "color-mix(in srgb, red 120%, blue)",
+        ] {
+            assert!(CssColor::parse(invalid).is_none(), "{invalid}");
+        }
+    }
 
     #[test]
     fn font_palette_colors_mix_in_the_requested_space_and_premultiplied_alpha() {

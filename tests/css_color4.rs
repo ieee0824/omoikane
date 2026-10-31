@@ -50,6 +50,56 @@ fn color4_is_valid_in_registered_custom_properties_and_stylesheet_cssom() {
     ).unwrap().to_boolean());
 }
 
+#[test]
+fn color_mix_is_shared_by_supports_cssom_computed_style_and_paint() {
+    let document = TreeBuilder::parse(
+        "<div id='target' style='color:color-mix(in srgb, red 20%, blue)'></div>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let actual = runtime
+        .eval(
+            "(() => { const e=document.getElementById('target'); return JSON.stringify([\
+             CSS.supports('color','color-mix(in srgb, red, blue)'), e.style.color,\
+             getComputedStyle(e).color]); })()",
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        actual,
+        "[true,\"color-mix(in srgb, red 20%, blue 80%)\",\"color(srgb 0.2 0 0.8)\"]"
+    );
+
+    use omoikane::layout::Rect;
+    let viewport = Rect {
+        width: 200.0,
+        height: 180.0,
+        ..Rect::default()
+    };
+    let actual = render_color4_fixture("color-mix(in srgb, red, blue)", viewport);
+    let expected = render_color4_fixture("rgb(128, 0, 128)", viewport);
+    let differences = actual
+        .pixels()
+        .iter()
+        .zip(expected.pixels())
+        .enumerate()
+        .filter(|(_, (actual, expected))| actual != expected)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert!(
+        differences.is_empty(),
+        "{} differing channels, first {:?}",
+        differences.len(),
+        (
+            differences.first(),
+            actual.pixel(20, 20),
+            expected.pixel(20, 20)
+        )
+    );
+}
+
 fn color4_paint_cases() -> Vec<(String, String)> {
     let mut colors = vec![
         ("hwb(0 0% 0%)".to_owned(), "red".to_owned()),

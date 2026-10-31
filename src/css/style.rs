@@ -10265,6 +10265,9 @@ fn is_position_offset_property(name: &str) -> bool {
 }
 
 fn validate_color_scheme_declaration(value: &Value) -> DeclarationValidation {
+    if matches!(value, Value::CommaList(_)) {
+        return DeclarationValidation::Invalid;
+    }
     let rendered = render_value(value);
     let words = rendered.split_ascii_whitespace().collect::<Vec<_>>();
     if words.len() == 1
@@ -10278,15 +10281,19 @@ fn validate_color_scheme_declaration(value: &Value) -> DeclarationValidation {
     }
     let mut schemes = Vec::new();
     let mut only = false;
-    for word in words {
+    let word_count = words.len();
+    for (index, word) in words.into_iter().enumerate() {
         if word.eq_ignore_ascii_case("only") {
-            if only {
+            if only || (index != 0 && index + 1 != word_count) {
                 return DeclarationValidation::Invalid;
             }
             only = true;
             continue;
         }
-        if is_css_wide_keyword(&word.to_ascii_lowercase()) || word.eq_ignore_ascii_case("normal") {
+        if is_css_wide_keyword(&word.to_ascii_lowercase())
+            || word.eq_ignore_ascii_case("normal")
+            || word.eq_ignore_ascii_case("default")
+        {
             return DeclarationValidation::Invalid;
         }
         schemes.push(word.to_ascii_lowercase());
@@ -14995,7 +15002,7 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
         Value::Function { name, .. }
             if matches!(
                 name.to_ascii_lowercase().as_str(),
-                "hwb" | "lab" | "lch" | "oklab" | "oklch" | "color"
+                "hwb" | "lab" | "lch" | "oklab" | "oklch" | "color" | "color-mix"
             ) =>
         {
             compute_color4_value(value, ctx)

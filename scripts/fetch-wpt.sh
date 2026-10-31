@@ -56,6 +56,19 @@ collect_pattern \
   "/css/css-color/parsing/color-valid-color-function.html" \
   "/css/css-color/parsing/color-valid-hwb.html" \
   "/css/css-color/parsing/color-valid-lab.html"
+# CSS Color 5 (#1277).
+collect_pattern \
+  "/css/css-color/parsing/color-computed-color-mix-function.html" \
+  "/css/css-color/parsing/color-invalid-color-mix-function.html" \
+  "/css/css-color/parsing/color-valid-color-mix-function.html" \
+  "/css/css-color/parsing/color-computed-relative-color.html" \
+  "/css/css-color/parsing/color-invalid-relative-color.html" \
+  "/css/css-color/parsing/color-valid-relative-color.html" \
+  "/css/css-color/light-dark-basic.html" \
+  "/css/css-color/light-dark-currentcolor-in-color.html" \
+  "/css/css-color-adjust/parsing/color-scheme-computed.html" \
+  "/css/css-color-adjust/parsing/color-scheme-invalid.html" \
+  "/css/css-color-adjust/parsing/color-scheme-valid.html"
 collect_pattern "/css/css-logical/"
 collect_pattern "/css/css-fonts/parsing/" "/css/css-fonts/font-variant-alternates-parsing.html" "/css/css-fonts/test_font_feature_values_parsing.html"
 collect_pattern "/reporting/" "/content-security-policy/securitypolicyviolation/constructor-required-fields.html"
