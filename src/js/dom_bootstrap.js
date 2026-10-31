@@ -12380,6 +12380,8 @@ let omoikaneUserActivationState;
   }
   globalThis.__omoikane_flush_stylesheets = flushStyleSheets;
 
+  const registeredTypedProperties = new Map();
+
   // Minimal CSS namespace used for feature detection and selector escaping.
   // Unsupported declarations conservatively report false so sites choose their
   // fallback path instead of aborting while probing browser capabilities.
@@ -12408,6 +12410,7 @@ let omoikaneUserActivationState;
       if (status !== "ok") {
         throw new DOMException("The custom property descriptor is invalid.", "SyntaxError");
       }
+      registeredTypedProperties.set(name, { syntax, inherits, initialValue });
     },
     escape(value) {
       const input = String(value);
@@ -29262,14 +29265,591 @@ let omoikaneUserActivationState;
     get currentTime() { return 0; }
   }
 
-  class CSSUnitValue {
+  const cssNumericUnits = new Map([
+    ["number", ["number", 1, ""]], ["percent", ["percent", 1, "%"]],
+    ["px", ["length", 1, "px"]], ["cm", ["length", 96 / 2.54, "cm"]],
+    ["mm", ["length", 96 / 25.4, "mm"]], ["q", ["length", 96 / 101.6, "Q"]],
+    ["in", ["length", 96, "in"]], ["pt", ["length", 96 / 72, "pt"]],
+    ["pc", ["length", 16, "pc"]], ["em", ["relative-length", 1, "em"]],
+    ["ex", ["relative-length-ex", 1, "ex"]], ["ch", ["relative-length-ch", 1, "ch"]],
+    ["ic", ["relative-length-ic", 1, "ic"]],
+    ["rem", ["relative-length-rem", 1, "rem"]], ["lh", ["relative-length-lh", 1, "lh"]],
+    ["rlh", ["relative-length-rlh", 1, "rlh"]], ["vw", ["viewport-width", 1, "vw"]],
+    ["vh", ["viewport-height", 1, "vh"]], ["vi", ["viewport-inline", 1, "vi"]],
+    ["vb", ["viewport-block", 1, "vb"]], ["vmin", ["viewport-min", 1, "vmin"]],
+    ["vmax", ["viewport-max", 1, "vmax"]], ["deg", ["angle", Math.PI / 180, "deg"]],
+    ["grad", ["angle", Math.PI / 200, "grad"]], ["rad", ["angle", 1, "rad"]],
+    ["turn", ["angle", 2 * Math.PI, "turn"]], ["s", ["time", 1, "s"]],
+    ["ms", ["time", 0.001, "ms"]], ["hz", ["frequency", 1, "Hz"]],
+    ["khz", ["frequency", 1000, "kHz"]], ["dpi", ["resolution", 1 / 96, "dpi"]],
+    ["dpcm", ["resolution", 2.54 / 96, "dpcm"]], ["dppx", ["resolution", 1, "dppx"]],
+    ["fr", ["flex", 1, "fr"]],
+  ]);
+
+  function normalizeCssNumericUnit(unit) {
+    const source = String(unit);
+    const key = source === "%" ? "percent" : source.toLowerCase();
+    if (!cssNumericUnits.has(key)) throw new TypeError("Invalid CSS numeric unit");
+    return key;
+  }
+
+  function cssNumericDimension(unit) {
+    const dimension = cssNumericUnits.get(unit)[0];
+    return dimension.includes("length") || dimension.startsWith("viewport-") ? "length" : dimension;
+  }
+
+  function cssNumericInput(value) {
+    if (value instanceof CSSNumericValue) return value;
+    const number = Number(value);
+    if (!Number.isFinite(number)) throw new TypeError("Expected a finite CSS numeric value");
+    return new CSSUnitValue(number, "number");
+  }
+
+  function parseCssUnitValue(value) {
+    const source = String(value).trim();
+    const match = source.match(/^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)\s*([a-z]+|%)?$/i);
+    if (!match) throw new DOMException("The value is not a simple numeric value.", "SyntaxError");
+    try { return new CSSUnitValue(Number(match[1]), match[2] || "number"); }
+    catch (_) { throw new DOMException("The numeric unit is invalid.", "SyntaxError"); }
+  }
+
+  const cssStyleValueConstruction = {};
+  class CSSStyleValue {
+    constructor(token = null, property = null, cssText = "") {
+      if (new.target === CSSStyleValue && token !== cssStyleValueConstruction) {
+        throw new TypeError("Illegal constructor");
+      }
+      if (token === cssStyleValueConstruction) {
+        this.__associatedProperty = property;
+        this.__cssText = cssText;
+      }
+    }
+    static parse(property, cssText) {
+      const name = String(property);
+      const value = String(cssText).trim();
+      if (!name.startsWith("--") && !CSS.supports(name, value)) {
+        throw new DOMException("The value is not valid for the property.", "SyntaxError");
+      }
+      try { return parseCssUnitValue(value); } catch (_) {}
+      return new CSSKeywordValue(value);
+    }
+    static parseAll(property, cssText) { return [this.parse(property, cssText)]; }
+    toString() { return this.__cssText || ""; }
+  }
+
+  class CSSNumericValue extends CSSStyleValue {
+    constructor() {
+      super();
+      if (new.target === CSSNumericValue) throw new TypeError("Illegal constructor");
+    }
+    static parse(cssText) { return parseCssNumericValue(cssText); }
+    type() {
+      const result = {
+        length: null, angle: null, time: null, frequency: null,
+        resolution: null, flex: null, percent: null, percentHint: null,
+      };
+      if (this instanceof CSSUnitValue) {
+        const dimension = cssNumericUnits.get(this.unit)[0];
+        if (dimension.includes("length")) result.length = 1;
+        else if (dimension === "angle" || dimension === "time" || dimension === "frequency" ||
+                 dimension === "resolution" || dimension === "flex" || dimension === "percent") {
+          result[dimension] = 1;
+        }
+      } else if (this.value instanceof CSSNumericValue) {
+        return this.value.type();
+      } else if (this.values && this.values[0] instanceof CSSNumericValue) {
+        return this.values[0].type();
+      }
+      return result;
+    }
+    add(...values) { return values.length === 0 ? this : cssNumericAdd([this, ...values], 1); }
+    sub(...values) { return values.length === 0 ? this : cssNumericAdd([this, ...values], -1); }
+    mul(...values) { return values.length === 0 ? this : cssNumericMultiply([this, ...values]); }
+    div(...values) {
+      if (values.length === 0) return this;
+      return cssNumericMultiply([this, ...values.map(value => {
+        const numeric = cssNumericInput(value);
+        if (numeric instanceof CSSUnitValue && numeric.unit === "number") {
+          if (numeric.value === 0) throw new RangeError("Division by zero");
+          return new CSSUnitValue(1 / numeric.value, "number");
+        }
+        return new CSSMathInvert(numeric);
+      })]);
+    }
+    min(...values) { return values.length === 0 ? this : cssNumericExtremum("min", [this, ...values]); }
+    max(...values) { return values.length === 0 ? this : cssNumericExtremum("max", [this, ...values]); }
+    equals(...values) { return values.every(value => this.toString() === cssNumericInput(value).toString()); }
+    to(unit) {
+      let target;
+      try { target = normalizeCssNumericUnit(unit); }
+      catch (_) { throw new DOMException("The numeric unit is invalid.", "SyntaxError"); }
+      return cssNumericToUnit(this, target);
+    }
+    toSum(...units) {
+      if (units.length === 0) return this instanceof CSSMathSum ? this : new CSSMathSum(this);
+      const normalized = units.map(unit => {
+        try { return normalizeCssNumericUnit(unit); }
+        catch (_) { throw new DOMException("The numeric unit is invalid.", "SyntaxError"); }
+      });
+      const first = this.to(normalized[0]);
+      for (const unit of normalized.slice(1)) {
+        const firstDimension = cssNumericDimension(normalized[0]);
+        if (cssNumericDimension(unit) !== firstDimension) {
+          throw new TypeError("Incompatible CSS numeric units");
+        }
+      }
+      return new CSSMathSum(first, ...normalized.slice(1).map(unit => new CSSUnitValue(0, unit)));
+    }
+  }
+
+  class CSSUnitValue extends CSSNumericValue {
     constructor(value, unit) {
+      super();
       const number = Number(value);
       if (!Number.isFinite(number)) throw new TypeError("CSSUnitValue requires a finite value");
       this.value = number;
-      this.unit = String(unit);
+      this.unit = normalizeCssNumericUnit(unit);
     }
-    toString() { return String(this.value) + (this.unit === "percent" ? "%" : this.unit); }
+    __convert(unit) {
+      const target = normalizeCssNumericUnit(unit);
+      const sourceInfo = cssNumericUnits.get(this.unit), targetInfo = cssNumericUnits.get(target);
+      if (sourceInfo[0] !== targetInfo[0]) throw new TypeError("Incompatible CSS numeric units");
+      return new CSSUnitValue(this.value * sourceInfo[1] / targetInfo[1], target);
+    }
+    toString() { return String(this.value) + cssNumericUnits.get(this.unit)[2]; }
+  }
+
+  class CSSMathValue extends CSSNumericValue {
+    constructor(operator) { super(); this.operator = operator; }
+  }
+
+  class CSSMathVariadic extends CSSMathValue {
+    constructor(operator, values) {
+      super(operator);
+      if (values.length === 0) throw new TypeError("At least one numeric value is required");
+      this.values = Object.freeze(values.map(cssNumericInput));
+    }
+  }
+
+  class CSSMathSum extends CSSMathVariadic {
+    constructor(...values) { super("sum", values); }
+    toString() { return "calc(" + this.values.map(String).join(" + ") + ")"; }
+  }
+
+  class CSSMathProduct extends CSSMathVariadic {
+    constructor(...values) { super("product", values); }
+    toString() { return "calc(" + this.values.map(String).join(" * ") + ")"; }
+  }
+
+  class CSSMathMin extends CSSMathVariadic {
+    constructor(...values) { super("min", values); }
+    toString() { return "min(" + this.values.map(String).join(", ") + ")"; }
+  }
+
+  class CSSMathMax extends CSSMathVariadic {
+    constructor(...values) { super("max", values); }
+    toString() { return "max(" + this.values.map(String).join(", ") + ")"; }
+  }
+
+  class CSSMathClamp extends CSSMathValue {
+    constructor(lower, value, upper) {
+      super("clamp");
+      this.lower = cssNumericInput(lower);
+      this.value = cssNumericInput(value);
+      this.upper = cssNumericInput(upper);
+    }
+    toString() { return "clamp(" + this.lower + ", " + this.value + ", " + this.upper + ")"; }
+  }
+
+  class CSSMathNegate extends CSSMathValue {
+    constructor(value) { super("negate"); this.value = cssNumericInput(value); }
+    toString() { return "calc(-1 * " + this.value + ")"; }
+  }
+
+  class CSSMathInvert extends CSSMathValue {
+    constructor(value) { super("invert"); this.value = cssNumericInput(value); }
+    toString() { return "calc(1 / " + this.value + ")"; }
+  }
+
+  class CSSKeywordValue extends CSSStyleValue {
+    constructor(value) {
+      super();
+      const keyword = String(value);
+      if (!keyword) throw new TypeError("CSSKeywordValue requires a non-empty value");
+      this.value = keyword;
+    }
+    toString() { return this.value; }
+  }
+
+  function tokenizeCssNumericExpression(source) {
+    const tokens = [];
+    const pattern = /\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?(?:[a-z]+|%)?|[a-z]+|[()+*\/,\-])\s*/igy;
+    let offset = 0, match;
+    while (offset < source.length && (match = pattern.exec(source)) && match.index === offset) {
+      tokens.push(match[1]);
+      offset = pattern.lastIndex;
+    }
+    if (offset !== source.length) throw new DOMException("Invalid numeric expression", "SyntaxError");
+    return tokens;
+  }
+
+  function parseCssNumericValue(cssText) {
+    const source = String(cssText).trim();
+    if (!/^(?:calc|min|max|clamp)\(/i.test(source)) return parseCssUnitValue(source);
+    const tokens = tokenizeCssNumericExpression(source);
+    let position = 0;
+    const syntaxError = () => new DOMException("Invalid numeric expression", "SyntaxError");
+    const parsePrimary = () => {
+      const token = tokens[position++];
+      if (token === "(") {
+        const value = parseSum();
+        if (tokens[position++] !== ")") throw syntaxError();
+        return value;
+      }
+      if (/^(?:calc|min|max|clamp)$/i.test(token || "") && tokens[position++] === "(") {
+        const name = token.toLowerCase(), values = [parseSum()];
+        while (tokens[position] === ",") { position++; values.push(parseSum()); }
+        if (tokens[position++] !== ")") throw syntaxError();
+        if (name === "min") return new CSSMathMin(...values);
+        if (name === "max") return new CSSMathMax(...values);
+        if (name === "clamp" && values.length === 3) return new CSSMathClamp(...values);
+        if (name === "calc") {
+          return values[0] instanceof CSSMathValue ? values[0] : new CSSMathSum(values[0]);
+        }
+        throw syntaxError();
+      }
+      try { return parseCssUnitValue(token); } catch (_) { throw syntaxError(); }
+    };
+    const parseProduct = () => {
+      const values = [parsePrimary()];
+      while (tokens[position] === "*") { position++; values.push(parsePrimary()); }
+      if (tokens[position] === "/") throw syntaxError();
+      if (values.length === 1) return values[0];
+      const dimensional = values.filter(value =>
+        value instanceof CSSUnitValue && value.unit !== "number");
+      if (dimensional.length > 1) throw syntaxError();
+      return new CSSMathProduct(...values);
+    };
+    const parseSum = () => {
+      const values = [parseProduct()];
+      while (tokens[position] === "+" || tokens[position] === "-") {
+        const operator = tokens[position++], value = parseProduct();
+        values.push(operator === "-" ? new CSSMathNegate(value) : value);
+      }
+      if (values.length === 1) return values[0];
+      const simple = values.every(value => value instanceof CSSUnitValue);
+      if (simple) {
+        try { return cssNumericAdd(values, 1); } catch (_) {}
+      }
+      return new CSSMathSum(...values);
+    };
+    const result = parsePrimary();
+    if (position !== tokens.length) throw syntaxError();
+    return result;
+  }
+
+  class CSSVariableReferenceValue {
+    constructor(variable, fallback = null) {
+      const name = String(variable);
+      if (!/^--/.test(name)) throw new TypeError("A variable reference requires a custom property name");
+      if (fallback !== null && !(fallback instanceof CSSUnparsedValue)) {
+        throw new TypeError("Variable fallback must be a CSSUnparsedValue");
+      }
+      this.variable = name;
+      this.fallback = fallback;
+    }
+    toString() {
+      return "var(" + this.variable + (this.fallback ? ", " + this.fallback : "") + ")";
+    }
+  }
+
+  class CSSUnparsedValue extends CSSStyleValue {
+    constructor(members) {
+      super();
+      const values = Array.from(members, member => {
+        if (member instanceof CSSVariableReferenceValue) return member;
+        return String(member);
+      });
+      this.__values = values;
+      return new Proxy(this, {
+        get(target, property) {
+          if (typeof property === "string" && /^(0|[1-9][0-9]*)$/.test(property)) {
+            return target.__values[Number(property)];
+          }
+          return target[property];
+        },
+        set(target, property, value) {
+          if (typeof property !== "string" || !/^(0|[1-9][0-9]*)$/.test(property)) {
+            target[property] = value;
+            return true;
+          }
+          const index = Number(property);
+          if (index > target.__values.length) throw new RangeError("Index is out of range");
+          if (!(value instanceof CSSVariableReferenceValue)) value = String(value);
+          target.__values[index] = value;
+          return true;
+        },
+      });
+    }
+    get length() { return this.__values.length; }
+    [Symbol.iterator]() { return this.__values[Symbol.iterator](); }
+    toString() { return this.__values.join(""); }
+  }
+
+  function typedStylePropertyName(property) {
+    const name = String(property);
+    return name.startsWith("--") ? name : name.toLowerCase();
+  }
+
+  function requireTypedStyleProperty(property) {
+    const name = typedStylePropertyName(property);
+    if (!name.startsWith("--") && !CSS.supports(name, "initial")) {
+      throw new TypeError("Unsupported CSS property");
+    }
+    return name;
+  }
+
+  function splitTypedStyleValues(value) {
+    const values = [];
+    let depth = 0, start = 0;
+    for (let index = 0; index < value.length; index++) {
+      if (value[index] === "(") depth++;
+      else if (value[index] === ")") depth = Math.max(0, depth - 1);
+      else if (value[index] === "," && depth === 0) {
+        values.push(value.slice(start, index).trim());
+        start = index + 1;
+      }
+    }
+    values.push(value.slice(start).trim());
+    return values;
+  }
+
+  function reifyTypedStyleValue(property, cssText) {
+    const name = typedStylePropertyName(property);
+    const value = String(cssText).trim();
+    if (!value) return null;
+    if (name.startsWith("--") && !registeredTypedProperties.has(name)) {
+      return new CSSUnparsedValue([value]);
+    }
+    const firstValue = splitTypedStyleValues(value)[0];
+    const registration = registeredTypedProperties.get(name);
+    if (registration && registration.syntax === "*") return new CSSUnparsedValue([value]);
+    if (["margin", "padding", "border", "background", "font"].includes(name)) {
+      return new CSSStyleValue(cssStyleValueConstruction, name, value);
+    }
+    try { return parseCssUnitValue(firstValue); } catch (_) {}
+    return new CSSKeywordValue(firstValue);
+  }
+
+  const stylePropertyMapConstruction = {};
+  class StylePropertyMapReadOnly {
+    constructor(token, declaration) {
+      if (token !== stylePropertyMapConstruction) throw new TypeError("Illegal constructor");
+      this.__declaration = declaration;
+    }
+    get(property) {
+      const name = requireTypedStyleProperty(property);
+      return reifyTypedStyleValue(name, this.__declaration.getPropertyValue(name)) ?? undefined;
+    }
+    getAll(property) {
+      const name = requireTypedStyleProperty(property);
+      const source = this.__declaration.getPropertyValue(name);
+      if (!source) return [];
+      if (name.startsWith("--")) return [reifyTypedStyleValue(name, source)];
+      return splitTypedStyleValues(source).map(value => reifyTypedStyleValue(name, value));
+    }
+    has(property) {
+      const name = requireTypedStyleProperty(property);
+      return this.__declaration.getPropertyValue(name) !== "";
+    }
+    get size() { return this.__declaration.length; }
+    *keys() {
+      for (let index = 0; index < this.__declaration.length; index++) {
+        yield this.__declaration.item(index);
+      }
+    }
+    *values() { for (const key of this.keys()) yield this.getAll(key); }
+    *entries() { for (const key of this.keys()) yield [key, this.getAll(key)]; }
+    [Symbol.iterator]() { return this.entries(); }
+    forEach(callback, thisArg = undefined) {
+      for (const [key, value] of this) callback.call(thisArg, value, key, this);
+    }
+  }
+
+  function serializeTypedStyleValue(value) {
+    if (value instanceof CSSStyleValue) return value.toString();
+    return String(value);
+  }
+
+  class StylePropertyMap extends StylePropertyMapReadOnly {
+    set(property, ...values) {
+      const name = requireTypedStyleProperty(property);
+      const listValued = name === "transition-duration" || name === "transition-delay" ||
+        name === "animation-duration" || name === "animation-delay" ||
+        name === "animation-name" || name === "background-image";
+      if (values.length === 0 || (!listValued && values.length !== 1)) {
+        throw new TypeError("StylePropertyMap.set received the wrong number of values");
+      }
+      if (values.length > 1 && values.some(value =>
+        value instanceof CSSUnparsedValue || String(value).includes("var("))) {
+        throw new TypeError("Variable references cannot be mixed with list values");
+      }
+      if (values.some(value => value && value.constructor === CSSStyleValue &&
+          value.__associatedProperty !== name)) {
+        throw new TypeError("The CSSStyleValue is associated with a different property");
+      }
+      const value = values.map(serializeTypedStyleValue).join(", ");
+      if (!name.startsWith("--") && !CSS.supports(name, value)) {
+        throw new TypeError("The value is not valid for the property");
+      }
+      this.__declaration.setProperty(name, value);
+    }
+    append(property, ...values) {
+      const name = requireTypedStyleProperty(property);
+      const listValued = name === "transition-duration" || name === "transition-delay" ||
+        name === "animation-duration" || name === "animation-delay" ||
+        name === "animation-name" || name === "background-image";
+      if (!listValued || name.startsWith("--")) {
+        throw new TypeError("The property is not list-valued");
+      }
+      if (values.length === 0) throw new TypeError("StylePropertyMap.append requires a value");
+      if (values.some(value => value instanceof CSSUnparsedValue ||
+          value instanceof CSSVariableReferenceValue || String(value).includes("var("))) {
+        throw new TypeError("Variable references cannot be appended");
+      }
+      const addition = values.map(serializeTypedStyleValue).join(", ");
+      const current = this.__declaration.getPropertyValue(name);
+      if (/^(?:initial|inherit|unset|revert|revert-layer)$/i.test(current.trim())) {
+        throw new TypeError("Cannot append to a CSS-wide keyword");
+      }
+      const value = current ? current + ", " + addition : addition;
+      if (!name.startsWith("--") && !CSS.supports(name, value)) {
+        throw new TypeError("The value is not valid for the property");
+      }
+      this.__declaration.setProperty(name, value);
+    }
+    delete(property) { this.__declaration.removeProperty(typedStylePropertyName(property)); }
+    clear() {
+      for (const property of Array.from(this.keys())) this.__declaration.removeProperty(property);
+    }
+  }
+
+  const attributeStyleMapCache = new WeakMap();
+  const computedStyleMapCache = new WeakMap();
+  const ruleStyleMapCache = new WeakMap();
+  function mutableStyleMapFor(owner, declaration) {
+    const cache = owner instanceof CSSStyleRule ? ruleStyleMapCache : attributeStyleMapCache;
+    if (!cache.has(owner)) {
+      cache.set(owner, new StylePropertyMap(stylePropertyMapConstruction, declaration));
+    }
+    return cache.get(owner);
+  }
+
+  Object.defineProperty(Element.prototype, "attributeStyleMap", {
+    get() { return mutableStyleMapFor(this, this.style); }, enumerable: true, configurable: true,
+  });
+  Element.prototype.computedStyleMap = function() {
+    if (!computedStyleMapCache.has(this)) {
+      computedStyleMapCache.set(this, new StylePropertyMapReadOnly(
+        stylePropertyMapConstruction, getComputedStyle(this)
+      ));
+    }
+    return computedStyleMapCache.get(this);
+  };
+  Object.defineProperty(CSSStyleRule.prototype, "styleMap", {
+    get() { return mutableStyleMapFor(this, this.style); }, enumerable: true, configurable: true,
+  });
+
+  function cssNumericToUnit(value, unit) {
+    if (value instanceof CSSUnitValue) return value.__convert(unit);
+    if (value instanceof CSSMathSum) {
+      return new CSSUnitValue(value.values.reduce((sum, item) =>
+        sum + cssNumericToUnit(item, unit).value, 0), unit);
+    }
+    if (value instanceof CSSMathProduct) {
+      let dimensional = null, scalar = 1;
+      for (const item of value.values) {
+        try {
+          const converted = cssNumericToUnit(item, unit);
+          if (dimensional !== null) throw new TypeError("Compound numeric unit");
+          dimensional = converted.value;
+        } catch (error) {
+          const number = cssNumericToUnit(item, "number");
+          scalar *= number.value;
+        }
+      }
+      if (dimensional === null) throw new TypeError("Incompatible CSS numeric units");
+      return new CSSUnitValue(dimensional * scalar, unit);
+    }
+    if (value instanceof CSSMathMin || value instanceof CSSMathMax) {
+      const converted = value.values.map(item => cssNumericToUnit(item, unit).value);
+      return new CSSUnitValue((value instanceof CSSMathMin ? Math.min : Math.max)(...converted), unit);
+    }
+    if (value instanceof CSSMathClamp) {
+      const lower = cssNumericToUnit(value.lower, unit).value;
+      const middle = cssNumericToUnit(value.value, unit).value;
+      const upper = cssNumericToUnit(value.upper, unit).value;
+      return new CSSUnitValue(Math.max(lower, Math.min(middle, upper)), unit);
+    }
+    if (value instanceof CSSMathNegate) {
+      const converted = cssNumericToUnit(value.value, unit);
+      return new CSSUnitValue(-converted.value, unit);
+    }
+    if (value instanceof CSSMathInvert && unit === "number") {
+      const converted = cssNumericToUnit(value.value, "number");
+      if (converted.value === 0) throw new RangeError("Division by zero");
+      return new CSSUnitValue(1 / converted.value, "number");
+    }
+    throw new TypeError("Incompatible CSS numeric units");
+  }
+
+  function cssNumericExtremum(operator, inputs) {
+    const values = inputs.map(cssNumericInput);
+    const dimensions = new Set(values.map(value => {
+      if (value instanceof CSSUnitValue) return cssNumericDimension(value.unit);
+      const type = value.type();
+      return Object.keys(type).find(key => type[key] !== null) || "number";
+    }));
+    if (dimensions.size > 1 && !dimensions.has("percent")) {
+      throw new TypeError("Incompatible CSS numeric units");
+    }
+    if (values.every(value => value instanceof CSSUnitValue)) {
+      try {
+        const first = values[0];
+        const converted = values.map(value => value.__convert(first.unit).value);
+        return new CSSUnitValue((operator === "min" ? Math.min : Math.max)(...converted), first.unit);
+      } catch (_) {}
+    }
+    return operator === "min" ? new CSSMathMin(...values) : new CSSMathMax(...values);
+  }
+
+  function cssNumericAdd(inputs, direction) {
+    const values = inputs.map(cssNumericInput);
+    const first = values[0];
+    if (first instanceof CSSUnitValue && values.every(value => value instanceof CSSUnitValue)) {
+      try {
+        const total = values.slice(1).reduce((sum, value) =>
+          sum + direction * value.__convert(first.unit).value, first.value);
+        return new CSSUnitValue(total, first.unit);
+      } catch (_) {
+        const dimensions = new Set(values.map(value => cssNumericUnits.get(value.unit)[0]));
+        if (!dimensions.has("percent") || dimensions.size > 2) {
+          throw new TypeError("Incompatible CSS numeric units");
+        }
+      }
+    }
+    const terms = direction === 1 ? values : [values[0], ...values.slice(1).map(value => new CSSMathNegate(value))];
+    return new CSSMathSum(...terms);
+  }
+
+  function cssNumericMultiply(inputs) {
+    const values = inputs.map(cssNumericInput);
+    const unitValues = values.filter(value => value instanceof CSSUnitValue && value.unit !== "number");
+    if (unitValues.length <= 1 && values.every(value => value instanceof CSSUnitValue)) {
+      const product = values.reduce((result, value) => result * value.value, 1);
+      return new CSSUnitValue(product, unitValues[0]?.unit || "number");
+    }
+    return new CSSMathProduct(...values);
   }
 
   function timelineAxis(value) {
@@ -29572,7 +30152,17 @@ let omoikaneUserActivationState;
   globalThis.KeyframeEffect = KeyframeEffect;
   globalThis.AnimationTimeline = AnimationTimeline;
   globalThis.DocumentTimeline = DocumentTimeline;
-  if (globalThis.CSSUnitValue === undefined) globalThis.CSSUnitValue = CSSUnitValue;
+  Object.assign(globalThis, {
+    CSSStyleValue, CSSNumericValue, CSSUnitValue, CSSKeywordValue, CSSUnparsedValue,
+    CSSVariableReferenceValue, StylePropertyMapReadOnly, StylePropertyMap,
+    CSSMathValue, CSSMathSum, CSSMathProduct, CSSMathMin, CSSMathMax, CSSMathClamp,
+    CSSMathNegate, CSSMathInvert,
+  });
+  for (const unit of cssNumericUnits.keys()) {
+    const factoryName = unit === "q" ? "Q" : unit === "hz" ? "Hz" :
+      unit === "khz" ? "kHz" : unit;
+    CSS[factoryName] = value => new CSSUnitValue(value, unit);
+  }
   globalThis.ScrollTimeline = ScrollTimeline;
   globalThis.ViewTimeline = ViewTimeline;
   globalThis.Animation = Animation;

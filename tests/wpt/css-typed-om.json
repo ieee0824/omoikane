@@ -1,0 +1,12 @@
+{
+  "tests": [
+    { "path": "css/css-typed-om/factory-absolute-length.html" },
+    { "path": "css/css-typed-om/factory-duration.html" },
+    { "path": "css/css-typed-om/factory-frequency.html" },
+    { "path": "css/css-typed-om/stylevalue-subclasses/numeric-objects/cssUnitValue.html" },
+    { "path": "css/css-typed-om/stylevalue-subclasses/numeric-objects/parse.tentative.html" },
+    { "path": "css/css-typed-om/the-stylepropertymap/inline/get.html" },
+    { "path": "css/css-typed-om/the-stylepropertymap/inline/set.tentative.html" },
+    { "path": "css/css-typed-om/the-stylepropertymap/computed/get.html" }
+  ]
+}
