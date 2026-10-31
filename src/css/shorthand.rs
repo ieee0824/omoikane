@@ -1902,8 +1902,45 @@ fn is_background_image_function(name: &str) -> bool {
 fn is_color_function(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "rgb" | "rgba" | "hsl" | "hsla" | "hwb" | "lab" | "lch" | "oklab" | "oklch" | "color"
+        "rgb"
+            | "rgba"
+            | "hsl"
+            | "hsla"
+            | "hwb"
+            | "lab"
+            | "lch"
+            | "oklab"
+            | "oklch"
+            | "color"
+            | "color-mix"
+            | "light-dark"
+            | "contrast-color"
     )
+}
+
+#[cfg(test)]
+mod background_color_function_tests {
+    use super::*;
+
+    #[test]
+    fn color_five_functions_expand_from_background_shorthand() {
+        for function in ["light-dark", "contrast-color"] {
+            let declarations = expand_background_shorthand(
+                Value::Function {
+                    name: function.to_string(),
+                    arguments: Vec::new(),
+                },
+                false,
+            );
+            assert!(declarations.iter().any(|declaration| {
+                declaration.name == "background-color"
+                    && matches!(
+                        &declaration.value,
+                        Value::Function { name, .. } if name == function
+                    )
+            }));
+        }
+    }
 }
 
 fn expand_mask_shorthand(value: Value, important: bool) -> Vec<Declaration> {

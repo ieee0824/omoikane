@@ -3817,6 +3817,9 @@ pub(crate) fn paint_list_marker(
     fonts: &[Arc<Font>],
     offset: super::PaintOffset,
 ) {
+    if paint_list_marker_image(canvas, layout, style, clip, offset) {
+        return;
+    }
     let color = text_color(style).unwrap_or(Color::rgb(0, 0, 0));
     let shadows = shadow::style_shadows(style);
     if !shadows.is_empty() {
@@ -3845,6 +3848,55 @@ pub(crate) fn paint_list_marker(
         }
     }
     paint_list_marker_glyphs(canvas, layout, color, clip, fonts, offset);
+}
+
+/// Paints `list-style-image` through the same decoded-image and sampling path
+/// as other CSS images. A failed image remains eligible for the textual
+/// `list-style-type` fallback.
+fn paint_list_marker_image(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    style: &ComputedStyle,
+    clip: Option<Rect>,
+    offset: super::PaintOffset,
+) -> bool {
+    let Some(marker) = &layout.marker else {
+        return false;
+    };
+    let Some(source) = style
+        .get_by_id(PropertyId::ListStyleImage)
+        .map(ComputedValue::css_text)
+        .filter(|source| !source.eq_ignore_ascii_case("none"))
+    else {
+        return false;
+    };
+    let Some(image) = super::image::parse_background_image_value(&source) else {
+        return false;
+    };
+    let width = image.width as f32;
+    let height = image.height as f32;
+    if width <= 0.0 || height <= 0.0 {
+        return false;
+    }
+    let x = if marker.outside {
+        // `marker.x + font_size` is the principal content edge used by layout.
+        marker.x + marker.font_size - width
+    } else {
+        marker.x
+    };
+    let destination = Rect {
+        x: x + offset.x,
+        y: marker.y + offset.y,
+        width,
+        height,
+    };
+    canvas.draw_image_scaled_clipped_with_sampling(
+        &image,
+        destination,
+        clip,
+        image_sampling(style),
+    );
+    true
 }
 
 fn paint_list_marker_glyphs(

@@ -18,6 +18,7 @@ pub(crate) mod grid_properties;
 pub(crate) mod individual_transform;
 mod leaf_paint;
 mod page;
+mod print_color_adjust;
 mod property_id;
 mod sibling_functions;
 mod specified_math;
@@ -26,6 +27,7 @@ pub(crate) mod text_shadow;
 mod tree_mutation_invalidation;
 mod typed_math;
 mod will_change;
+mod zoom;
 
 pub use page::{
     PageBoxGeometry, PageMarginContent, PageSelectorContext, PageSide, ResolvedPageStyle,
@@ -159,6 +161,30 @@ pub enum NineSliceComputedValue {
 }
 
 impl NineSliceComputedValue {
+    fn scaled_absolute(&self, zoom: f32) -> Self {
+        let scale = |values: &[NineSliceLength]| {
+            values
+                .iter()
+                .map(|value| match value {
+                    NineSliceLength::Px(value) => NineSliceLength::Px(value * zoom),
+                    NineSliceLength::Math(value) => {
+                        NineSliceLength::Math(value.scaled_absolute(zoom))
+                    }
+                    _ => value.clone(),
+                })
+                .collect()
+        };
+        match self {
+            Self::Slice { values, fill } => Self::Slice {
+                values: scale(values),
+                fill: *fill,
+            },
+            Self::Width(values) => Self::Width(scale(values)),
+            Self::Outset(values) => Self::Outset(scale(values)),
+            Self::Repeat(values) => Self::Repeat(values.clone()),
+        }
+    }
+
     fn css_text(&self) -> String {
         match self {
             Self::Slice { values, fill } => {
@@ -230,6 +256,58 @@ impl ComputedValue {
             Self::Position { x, y } => format!("{} {}", x.css_text(), y.css_text()),
             Self::NineSlice(value) => value.css_text(),
         }
+    }
+}
+
+fn zoom_keyword_lengths(text: &str, zoom: f32) -> String {
+    fn scale(value: &Value, zoom: f32) -> Value {
+        match value {
+            Value::Length(number, unit) if is_css_length_unit(unit) => {
+                Value::Length(number * zoom, unit.clone())
+            }
+            Value::Function { name, arguments } => Value::Function {
+                name: name.clone(),
+                arguments: arguments.iter().map(|value| scale(value, zoom)).collect(),
+            },
+            Value::List(values) => {
+                Value::List(values.iter().map(|value| scale(value, zoom)).collect())
+            }
+            Value::CommaList(values) => {
+                Value::CommaList(values.iter().map(|value| scale(value, zoom)).collect())
+            }
+            _ => value.clone(),
+        }
+    }
+
+    let declarations = super::parse_style_attribute(&format!("--zoom-used-value:{text}"));
+    declarations
+        .first()
+        .map(|declaration| render_value(&scale(&declaration.value, zoom)))
+        .unwrap_or_else(|| text.to_string())
+}
+
+fn zoom_computed_value(value: &ComputedValue, zoom: f32) -> ComputedValue {
+    match value {
+        ComputedValue::Keyword(value) => ComputedValue::Keyword(zoom_keyword_lengths(value, zoom)),
+        ComputedValue::Px(value) => ComputedValue::Px(value * zoom),
+        ComputedValue::LengthPercentage(value) => {
+            ComputedValue::LengthPercentage(value.scaled_absolute(zoom))
+        }
+        ComputedValue::TextIndent {
+            value,
+            hanging,
+            each_line,
+        } => ComputedValue::TextIndent {
+            value: Box::new(zoom_computed_value(value, zoom)),
+            hanging: *hanging,
+            each_line: *each_line,
+        },
+        ComputedValue::Position { x, y } => ComputedValue::Position {
+            x: Box::new(zoom_computed_value(x, zoom)),
+            y: Box::new(zoom_computed_value(y, zoom)),
+        },
+        ComputedValue::NineSlice(value) => ComputedValue::NineSlice(value.scaled_absolute(zoom)),
+        _ => value.clone(),
     }
 }
 
@@ -333,6 +411,71 @@ pub enum LengthPercentageMath {
 }
 
 impl LengthPercentageMath {
+    fn scaled_absolute(&self, zoom: f32) -> Self {
+        match self {
+            Self::Linear { px, percentage } => Self::Linear {
+                px: px * zoom,
+                percentage: *percentage,
+            },
+            Self::Sum(values) => Self::Sum(
+                values
+                    .iter()
+                    .map(|value| value.scaled_absolute(zoom))
+                    .collect(),
+            ),
+            Self::Scale { factor, value } => Self::Scale {
+                factor: *factor,
+                value: Box::new(value.scaled_absolute(zoom)),
+            },
+            Self::Min(values) => Self::Min(
+                values
+                    .iter()
+                    .map(|value| value.scaled_absolute(zoom))
+                    .collect(),
+            ),
+            Self::Max(values) => Self::Max(
+                values
+                    .iter()
+                    .map(|value| value.scaled_absolute(zoom))
+                    .collect(),
+            ),
+            Self::Abs(value) => Self::Abs(Box::new(value.scaled_absolute(zoom))),
+            Self::Hypot(values) => Self::Hypot(
+                values
+                    .iter()
+                    .map(|value| value.scaled_absolute(zoom))
+                    .collect(),
+            ),
+            Self::Modulo {
+                dividend,
+                divisor,
+                remainder,
+            } => Self::Modulo {
+                dividend: Box::new(dividend.scaled_absolute(zoom)),
+                divisor: Box::new(divisor.scaled_absolute(zoom)),
+                remainder: *remainder,
+            },
+            Self::Round {
+                strategy,
+                value,
+                step,
+            } => Self::Round {
+                strategy: *strategy,
+                value: Box::new(value.scaled_absolute(zoom)),
+                step: Box::new(step.scaled_absolute(zoom)),
+            },
+            Self::Clamp {
+                minimum,
+                preferred,
+                maximum,
+            } => Self::Clamp {
+                minimum: Box::new(minimum.scaled_absolute(zoom)),
+                preferred: Box::new(preferred.scaled_absolute(zoom)),
+                maximum: Box::new(maximum.scaled_absolute(zoom)),
+            },
+        }
+    }
+
     /// Resolves this expression using `basis` as the value represented by
     /// `100%`.
     #[must_use]
@@ -617,6 +760,8 @@ pub(crate) struct PropagatedTextDecoration {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ComputedStyle {
     properties: PropertyMap,
+    /// Product of this element's computed `zoom` and its flat-tree ancestors.
+    effective_zoom: f32,
     /// Resolved component values for properties whose used value cannot be
     /// recovered from their CSSOM serialization alone (for example generated
     /// content containing strings and counter functions).
@@ -644,6 +789,43 @@ pub(crate) struct ViewportPaintStyle {
 }
 
 impl ComputedStyle {
+    /// Effective CSS zoom used when resolving lengths for layout and paint.
+    pub(crate) fn effective_zoom(&self) -> f32 {
+        if self.effective_zoom > 0.0 {
+            self.effective_zoom
+        } else {
+            1.0
+        }
+    }
+
+    /// Returns a private used-value snapshot with absolute lengths zoomed.
+    pub(crate) fn zoomed_used_values(&self) -> Self {
+        let effective_zoom = self.effective_zoom();
+        if effective_zoom == 1.0 {
+            return self.clone();
+        }
+        let mut used = self.clone();
+        let replacements = used
+            .properties
+            .iter()
+            .map(|(name, value)| (name.to_string(), zoom_computed_value(value, effective_zoom)))
+            .collect::<Vec<_>>();
+        for (name, value) in replacements {
+            used.properties.insert(&name, value);
+        }
+        used
+    }
+
+    /// Projects absolute lengths for layout and paint while preserving the
+    /// cached snapshot when zoom does not change any used values.
+    fn zoomed_used_values_shared(style: Arc<Self>) -> Arc<Self> {
+        if style.effective_zoom() == 1.0 {
+            style
+        } else {
+            Arc::new(style.zoomed_used_values())
+        }
+    }
+
     pub(crate) fn shaping_options(&self) -> &Arc<crate::font::ShapingOptions> {
         &self.shaping_options
     }
@@ -1085,6 +1267,8 @@ pub struct StyleResolver {
     /// Output medium used for `@media` evaluation.
     media_type: MediaType,
     media_environment: MediaEnvironment,
+    /// Layout-only projection flag; ordinary computed style remains unscaled.
+    zoomed_used_values: bool,
     /// Cache of parsed media query lists keyed by the normalized (trimmed) prelude string.
     ///
     /// Avoids re-parsing the same `@media` prelude string for every node that
@@ -2631,6 +2815,78 @@ fn invalidation_subtrees(roots: impl IntoIterator<Item = NodeHandle>) -> Option<
 }
 
 impl StyleResolver {
+    /// Projects the accepted declarations of the last matching document
+    /// `@position-try` rule onto an already-computed style. The returned value
+    /// is owned and only lives for one fallback layout attempt.
+    pub(crate) fn position_try_style(
+        &self,
+        base: &ComputedStyle,
+        name: &str,
+    ) -> Option<ComputedStyle> {
+        fn find<'a>(rules: &'a [Rule], name: &str, found: &mut Option<&'a [Declaration]>) {
+            for rule in rules {
+                let Rule::At(rule) = rule else {
+                    continue;
+                };
+                if rule.name.eq_ignore_ascii_case("position-try") && rule.prelude.trim() == name {
+                    *found = Some(&rule.declarations);
+                }
+                if let Some(children) = &rule.block {
+                    find(children, name, found);
+                }
+            }
+        }
+
+        let mut declarations = None;
+        for input in &self.stylesheets {
+            find(&input.stylesheet.rules, name, &mut declarations);
+        }
+        let declarations = declarations?;
+        let mut style = base.clone();
+        let flow = logical_flow_from_properties(&style.properties);
+        for declaration in declarations {
+            let property = canonical_property_name(&declaration.name);
+            if declaration.important
+                || !matches!(
+                    property,
+                    "top"
+                        | "right"
+                        | "bottom"
+                        | "left"
+                        | "margin-top"
+                        | "margin-right"
+                        | "margin-bottom"
+                        | "margin-left"
+                        | "width"
+                        | "height"
+                        | "min-width"
+                        | "min-height"
+                        | "max-width"
+                        | "max-height"
+                        | "align-self"
+                        | "justify-self"
+                        | "position-anchor"
+                        | "position-area"
+                )
+            {
+                continue;
+            }
+            let computed = match validate_declaration(property, &declaration.value) {
+                DeclarationValidation::Invalid => continue,
+                DeclarationValidation::Valid(value) => value,
+                DeclarationValidation::Unvalidated => {
+                    compute_value(&declaration.value, property, ResolutionContext::default())
+                }
+            };
+            insert_computed_property(&mut style.properties, property, computed, flow);
+        }
+        style.properties.insert(
+            PropertyId::PositionTryFallbacks,
+            ComputedValue::Keyword("none".into()),
+        );
+        Some(style)
+    }
+
     pub(crate) fn replace_counter_values(
         &mut self,
         values: HashMap<(usize, Option<PseudoElement>), HashMap<String, Vec<i32>>>,
@@ -3061,7 +3317,7 @@ impl StyleResolver {
                 dependency
             };
         stylesheet_dependency
-            || parsed_inline_style(node.get_attribute("style").as_deref())
+            || parsed_inline_style(node.inline_style_source().as_deref())
                 .iter()
                 .any(|declaration| value_reads_data_attribute(&declaration.value, &attribute_name))
     }
@@ -3805,7 +4061,22 @@ impl StyleResolver {
 
     /// Resolves computed style for `node`, using the cache when possible.
     pub fn computed_style(&mut self, node: &NodeHandle) -> ComputedStyle {
-        self.computed_style_shared(node).as_ref().clone()
+        let style = self.computed_style_shared(node);
+        if self.zoomed_used_values {
+            style.zoomed_used_values()
+        } else {
+            style.as_ref().clone()
+        }
+    }
+
+    /// Runs one layout operation with absolute computed lengths projected to
+    /// their zoomed used values. Nested calls restore the previous mode.
+    pub(crate) fn with_zoomed_used_values<T>(&mut self, action: impl FnOnce(&mut Self) -> T) -> T {
+        let previous = self.zoomed_used_values;
+        self.zoomed_used_values = true;
+        let result = action(self);
+        self.zoomed_used_values = previous;
+        result
     }
 
     /// Shares an immutable cached style with layout and paint readers. Invalidation
@@ -3904,7 +4175,12 @@ impl StyleResolver {
         let style = self
             .with_visited_paint_pass(|pass| pass.style(node))
             .unwrap_or_else(|| self.computed_style_shared(node));
-        forced_colors::paint_style(node, style, &self.media_environment)
+        let style = print_color_adjust::paint_style(style, &self.media_environment);
+        ComputedStyle::zoomed_used_values_shared(forced_colors::paint_style(
+            node,
+            style,
+            &self.media_environment,
+        ))
     }
 
     /// Propagates background values without propagating the body's opt-out.
@@ -3933,6 +4209,9 @@ impl StyleResolver {
         viewport
             .properties
             .insert_from("forced-color-adjust", &root_style.properties);
+        viewport
+            .properties
+            .insert_from("print-color-adjust", &root_style.properties);
         let canvas_color = root_style
             .get("forced-color-adjust")
             .is_some_and(|value| value.css_text().eq_ignore_ascii_case("auto"))
@@ -3942,8 +4221,13 @@ impl StyleResolver {
                     .map(|palette| palette.canvas)
             })
             .flatten();
+        let viewport = print_color_adjust::paint_style(Arc::new(viewport), &self.media_environment);
         ViewportPaintStyle {
-            style: forced_colors::paint_style(root, Arc::new(viewport), &self.media_environment),
+            style: ComputedStyle::zoomed_used_values_shared(forced_colors::paint_style(
+                root,
+                viewport,
+                &self.media_environment,
+            )),
             canvas_color,
         }
     }
@@ -3956,7 +4240,14 @@ impl StyleResolver {
         let style = self
             .with_visited_paint_pass(|pass| pass.pseudo_style(node, pseudo))
             .unwrap_or_else(|| self.computed_pseudo_style_shared(node, pseudo));
-        style.map(|style| forced_colors::paint_style(node, style, &self.media_environment))
+        style.map(|style| {
+            let style = print_color_adjust::paint_style(style, &self.media_environment);
+            ComputedStyle::zoomed_used_values_shared(forced_colors::paint_style(
+                node,
+                style,
+                &self.media_environment,
+            ))
+        })
     }
 
     /// Resolves computed style for a pseudo-element attached to `node`.
@@ -3966,7 +4257,13 @@ impl StyleResolver {
         pseudo: PseudoElement,
     ) -> Option<ComputedStyle> {
         self.computed_pseudo_style_shared(node, pseudo)
-            .map(|style| style.as_ref().clone())
+            .map(|style| {
+                if self.zoomed_used_values {
+                    style.zoomed_used_values()
+                } else {
+                    style.as_ref().clone()
+                }
+            })
     }
 
     /// Shares an immutable cached pseudo style without cloning its property maps.
@@ -4161,7 +4458,7 @@ impl StyleResolver {
         if pseudo.is_none()
             && node.node_type() == NodeType::Element
             && !self.blocked_inline_style_nodes.contains(&node.identity())
-            && let Some(inline_style) = node.get_attribute("style")
+            && let Some(inline_style) = node.inline_style_source()
         {
             let layer_context = LayerContextKey {
                 origin: Origin::Author,
@@ -4565,6 +4862,8 @@ impl StyleResolver {
             &self.media_environment,
         );
         apply_initial_values(&mut properties);
+        resolve_light_dark_colors(&mut properties, self.color_scheme_dark);
+        resolve_dependent_color_functions(&mut properties, parent_style);
         resolve_accent_current_color(&mut properties);
         resolve_text_emphasis_style(&mut properties);
         properties.insert(
@@ -4644,8 +4943,15 @@ impl StyleResolver {
         let font_synthesis = computed_font_synthesis(&properties);
         let font_palette =
             Arc::new(self.computed_font_palette(&properties, font_family_scope_root));
+        let own_zoom = match properties.get(&PropertyId::Zoom) {
+            Some(ComputedValue::Number(value)) if *value > 0.0 => *value,
+            _ => 1.0,
+        };
+        let effective_zoom =
+            parent_style.map_or(own_zoom, |parent| parent.effective_zoom() * own_zoom);
         ComputedStyle {
             properties,
+            effective_zoom,
             component_values,
             transform_animation_context,
             custom_properties,
@@ -5910,8 +6216,26 @@ fn is_valid_css_color_text(text: &str) -> bool {
     crate::css::ForcedColorPalette::for_color_scheme(false)
         .system_color(text)
         .is_some()
+        || valid_light_dark_color(text)
         || crate::paint::color4::CssColor::parse(text).is_some()
+        || (text.to_ascii_lowercase().contains("currentcolor")
+            && crate::paint::color4::CssColor::parse(
+                &text.to_ascii_lowercase().replace("currentcolor", "black"),
+            )
+            .is_some())
         || crate::paint::color::parse_color(text).is_some()
+}
+
+fn valid_light_dark_color(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    let Some(body) = lower
+        .strip_prefix("light-dark(")
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let colors = super::split_top_level_commas(body);
+    colors.len() == 2 && colors.into_iter().all(is_valid_css_color_text)
 }
 
 pub(super) fn is_valid_color_value(value: &Value) -> bool {
@@ -6121,13 +6445,53 @@ pub(crate) fn normalize_tree_counting_numeric(property: &str, text: &str) -> Opt
 
 /// Folds context-free number math for specified-value CSSOM serialization.
 pub(crate) fn normalize_numeric_math_specified(property: &str, text: &str) -> Option<String> {
+    let deferred_color_mix = is_color_property(property)
+        && text
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("color-mix(")
+        && crate::paint::color4::CssColor::parse(text).is_none()
+        && crate::paint::color4::CssColor::parse_with_context(
+            text,
+            Some(crate::paint::color4::ColorContext {
+                font: 16.0,
+                root_font: 16.0,
+                viewport: [800.0, 600.0],
+                container: [800.0, 600.0],
+            }),
+        )
+        .is_some();
+    if deferred_color_mix {
+        return Some(text.trim().to_ascii_lowercase());
+    }
     if !supports_declaration(property, text) {
         return None;
+    }
+    if is_color_property(property) && text.to_ascii_lowercase().contains("currentcolor") {
+        let mut canonical = text.trim().to_ascii_lowercase();
+        for (alias, name) in [("rgba(from ", "rgb(from "), ("hsla(from ", "hsl(from ")] {
+            if canonical.starts_with(alias) {
+                canonical.replace_range(..alias.len(), name);
+                break;
+            }
+        }
+        if canonical.starts_with("color(from ") {
+            canonical = canonical.replacen(" xyz ", " xyz-d65 ", 1);
+        }
+        return Some(canonical);
     }
     if is_color_property(property)
         && let Some(color) = crate::paint::color4::CssColor::parse(text)
     {
         return Some(color.serialize());
+    }
+    if is_color_property(property)
+        && text
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("color-mix(")
+    {
+        return Some(text.trim().to_ascii_lowercase());
     }
     let value = super::parse_style_attribute(&format!("{property}: {text}"))
         .into_iter()
@@ -6894,7 +7258,13 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if let Some(validation) = forced_colors::validate(name, value) {
         return validation;
     }
+    if let Some(validation) = print_color_adjust::validate(name, value) {
+        return validation;
+    }
     if let Some(validation) = will_change::validate(name, value) {
+        return validation;
+    }
+    if let Some(validation) = zoom::validate(name, value) {
         return validation;
     }
     if let Some(validation) = individual_transform::validate(name, value) {
@@ -6986,6 +7356,10 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     // this lowercase key instead of re-deriving it with `to_ascii_lowercase()`
     // or `eq_ignore_ascii_case()` per branch.
     let key = name.to_ascii_lowercase();
+
+    if let Some(validation) = validate_anchor_position_declaration(&key, value) {
+        return validation;
+    }
 
     // The following checks recognize properties whose value can itself be a
     // top-level `Value::CommaList` (handled generically further down), so
@@ -7827,6 +8201,9 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if is_non_negative_sizing_property(name) {
         return validate_sizing_value(name, value);
     }
+    if is_position_offset_property(name) && valid_anchor_size_expression(value) {
+        return DeclarationValidation::Unvalidated;
+    }
     if is_position_offset_property(name)
         && matches!(value, Value::Function { name: function, .. } if is_length_percentage_math_function(function))
     {
@@ -7838,6 +8215,320 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     DeclarationValidation::Unvalidated
+}
+
+fn validate_anchor_position_declaration(
+    name: &str,
+    value: &Value,
+) -> Option<DeclarationValidation> {
+    let css_wide = |value: &Value| {
+        matches!(value, Value::Keyword(keyword)
+            if is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+    };
+    let keyword = |value: &Value, allowed: &[&str]| {
+        matches!(value, Value::Keyword(word)
+            if css_wide(value) || allowed.contains(&word.to_ascii_lowercase().as_str()))
+    };
+    let comma_separated_dashed_idents = |value: &Value| {
+        if let Value::List(values) | Value::CommaList(values) = value {
+            return !values.is_empty() && values.iter().all(is_dashed_ident);
+        }
+        let rendered = render_value(value);
+        let names = super::split_top_level_commas(&rendered);
+        !names.is_empty()
+            && names.iter().all(|name| {
+                name.starts_with("--") && name.len() > 2 && !name.contains(char::is_whitespace)
+            })
+    };
+    let valid = match name {
+        "anchor-name" => keyword(value, &["none"]) || comma_separated_dashed_idents(value),
+        "anchor-scope" => {
+            keyword(value, &["none", "all"])
+                || match value {
+                    Value::CommaList(values) => {
+                        !values.is_empty() && values.iter().all(is_dashed_ident)
+                    }
+                    value => is_dashed_ident(value),
+                }
+        }
+        "position-anchor" => keyword(value, &["auto"]) || is_dashed_ident(value),
+        "position-try-order" => keyword(
+            value,
+            &[
+                "normal",
+                "most-width",
+                "most-height",
+                "most-block-size",
+                "most-inline-size",
+            ],
+        ),
+        "position-visibility" => valid_position_visibility(value),
+        "position-area" => valid_position_area(value, css_wide),
+        "position-try-fallbacks" => valid_position_try_fallbacks(value, css_wide),
+        _ => return None,
+    };
+    Some(if valid {
+        let normalized = match name {
+            "position-area" => {
+                normalize_position_area(value).unwrap_or_else(|| render_value(value))
+            }
+            "position-try-fallbacks" => {
+                normalize_position_try_fallbacks(value).unwrap_or_else(|| render_value(value))
+            }
+            "position-visibility" => normalize_position_visibility(value)
+                .unwrap_or_else(|| render_value(value).trim().to_string()),
+            _ => render_value(value).trim().to_string(),
+        };
+        DeclarationValidation::Valid(ComputedValue::Keyword(normalized.to_ascii_lowercase()))
+    } else {
+        DeclarationValidation::Invalid
+    })
+}
+
+fn position_visibility_keywords(value: &Value) -> Option<Vec<&'static str>> {
+    let rendered = render_value(value);
+    let mut keywords = rendered
+        .split_ascii_whitespace()
+        .map(|keyword| match keyword.to_ascii_lowercase().as_str() {
+            "anchor-valid" => Some("anchor-valid"),
+            "anchor-visible" => Some("anchor-visible"),
+            "no-overflow" => Some("no-overflow"),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    keywords.sort_unstable_by_key(|keyword| match *keyword {
+        "anchor-valid" => 0,
+        "anchor-visible" => 1,
+        "no-overflow" => 2,
+        _ => unreachable!(),
+    });
+    keywords.dedup();
+    Some(keywords)
+}
+
+fn valid_position_visibility(value: &Value) -> bool {
+    if matches!(value, Value::Keyword(keyword)
+        if is_css_wide_keyword(&keyword.to_ascii_lowercase())
+            || keyword.eq_ignore_ascii_case("always"))
+    {
+        return true;
+    }
+    position_visibility_keywords(value).is_some_and(|keywords| {
+        !keywords.is_empty()
+            && keywords.len() == render_value(value).split_ascii_whitespace().count()
+    })
+}
+
+fn normalize_position_visibility(value: &Value) -> Option<String> {
+    if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("always")) {
+        return Some("always".into());
+    }
+    let keywords = position_visibility_keywords(value)?;
+    (keywords.len() == render_value(value).split_ascii_whitespace().count())
+        .then(|| keywords.join(" "))
+}
+
+fn is_dashed_ident(value: &Value) -> bool {
+    match value {
+        Value::Keyword(ident) => ident.starts_with("--") && ident.len() > 2,
+        Value::List(values) => matches!(values.as_slice(), [value] if is_dashed_ident(value)),
+        _ => false,
+    }
+}
+
+fn valid_position_area(value: &Value, css_wide: impl Fn(&Value) -> bool) -> bool {
+    css_wide(value) || normalize_position_area(value).is_some()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PositionAreaAxis {
+    Horizontal,
+    Vertical,
+    Inline,
+    Block,
+    SelfInline,
+    SelfBlock,
+    StartEnd,
+    SelfStartEnd,
+    Universal,
+}
+
+fn position_area_axis(keyword: &str) -> Option<PositionAreaAxis> {
+    let keyword = keyword.trim_start_matches("span-");
+    Some(match keyword {
+        "center" | "all" => PositionAreaAxis::Universal,
+        "left" | "right" | "x-start" | "x-end" | "self-x-start" | "self-x-end" => {
+            PositionAreaAxis::Horizontal
+        }
+        "top" | "bottom" | "y-start" | "y-end" | "self-y-start" | "self-y-end" => {
+            PositionAreaAxis::Vertical
+        }
+        "inline-start" | "inline-end" => PositionAreaAxis::Inline,
+        "block-start" | "block-end" => PositionAreaAxis::Block,
+        "self-inline-start" | "self-inline-end" => PositionAreaAxis::SelfInline,
+        "self-block-start" | "self-block-end" => PositionAreaAxis::SelfBlock,
+        "start" | "end" => PositionAreaAxis::StartEnd,
+        "self-start" | "self-end" => PositionAreaAxis::SelfStartEnd,
+        _ => return None,
+    })
+}
+
+fn normalize_position_area(value: &Value) -> Option<String> {
+    let values = match value {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    if values.is_empty() || values.len() > 2 {
+        return None;
+    }
+    let words = values
+        .iter()
+        .map(|value| match value {
+            Value::Keyword(keyword) => Some(keyword.to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if words.len() == 1 {
+        return (words[0] == "none" || position_area_axis(&words[0]).is_some())
+            .then(|| words[0].clone());
+    }
+    if words.iter().any(|word| word == "none") {
+        return None;
+    }
+    let first = position_area_axis(&words[0])?;
+    let second = position_area_axis(&words[1])?;
+    if first == PositionAreaAxis::Universal && second == PositionAreaAxis::Universal {
+        return Some(if words[0] != words[1] {
+            format!("{} {}", words[0], words[1])
+        } else if words[0] == "center" {
+            "center".into()
+        } else {
+            "span-all".into()
+        });
+    }
+    if first == PositionAreaAxis::Universal || second == PositionAreaAxis::Universal {
+        let (specific, universal, specific_first) = if first == PositionAreaAxis::Universal {
+            (&words[1], &words[0], false)
+        } else {
+            (&words[0], &words[1], true)
+        };
+        let axis = position_area_axis(specific)?;
+        if universal == "span-all"
+            && !matches!(
+                axis,
+                PositionAreaAxis::StartEnd | PositionAreaAxis::SelfStartEnd
+            )
+        {
+            return Some(specific.clone());
+        }
+        return Some(match axis {
+            PositionAreaAxis::Horizontal
+            | PositionAreaAxis::Block
+            | PositionAreaAxis::SelfBlock => format!("{specific} {universal}"),
+            PositionAreaAxis::Vertical
+            | PositionAreaAxis::Inline
+            | PositionAreaAxis::SelfInline => format!("{universal} {specific}"),
+            PositionAreaAxis::StartEnd | PositionAreaAxis::SelfStartEnd if specific_first => {
+                format!("{specific} {universal}")
+            }
+            PositionAreaAxis::StartEnd | PositionAreaAxis::SelfStartEnd => {
+                format!("{universal} {specific}")
+            }
+            PositionAreaAxis::Universal => unreachable!(),
+        });
+    }
+    let valid = matches!(
+        (first, second),
+        (PositionAreaAxis::Horizontal, PositionAreaAxis::Vertical)
+            | (PositionAreaAxis::Vertical, PositionAreaAxis::Horizontal)
+            | (PositionAreaAxis::Block, PositionAreaAxis::Inline)
+            | (PositionAreaAxis::Inline, PositionAreaAxis::Block)
+            | (PositionAreaAxis::SelfBlock, PositionAreaAxis::SelfInline)
+            | (PositionAreaAxis::SelfInline, PositionAreaAxis::SelfBlock)
+            | (PositionAreaAxis::StartEnd, PositionAreaAxis::StartEnd)
+            | (
+                PositionAreaAxis::SelfStartEnd,
+                PositionAreaAxis::SelfStartEnd
+            )
+    );
+    if !valid {
+        return None;
+    }
+    if words[0] == words[1] {
+        return Some(words[0].clone());
+    }
+    Some(match (first, second) {
+        (PositionAreaAxis::Vertical, PositionAreaAxis::Horizontal)
+        | (PositionAreaAxis::Inline, PositionAreaAxis::Block)
+        | (PositionAreaAxis::SelfInline, PositionAreaAxis::SelfBlock) => {
+            format!("{} {}", words[1], words[0])
+        }
+        _ => format!("{} {}", words[0], words[1]),
+    })
+}
+
+fn valid_position_try_fallbacks(value: &Value, css_wide: impl Fn(&Value) -> bool) -> bool {
+    css_wide(value) || normalize_position_try_fallbacks(value).is_some()
+}
+
+fn normalize_position_try_fallbacks(value: &Value) -> Option<String> {
+    if matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("none")) {
+        return Some("none".into());
+    }
+    let entries = match value {
+        Value::CommaList(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    if entries.is_empty() {
+        return None;
+    }
+    let tactic = |value: &str| {
+        matches!(
+            value,
+            "flip-block" | "flip-inline" | "flip-start" | "flip-x" | "flip-y"
+        )
+    };
+    entries
+        .iter()
+        .map(|entry| {
+            let parts = match entry {
+                Value::List(values) => values.as_slice(),
+                value => std::slice::from_ref(value),
+            };
+            let words = parts
+                .iter()
+                .map(|part| match part {
+                    Value::Keyword(word) => Some(word.to_ascii_lowercase()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let names = words
+                .iter()
+                .filter(|word| word.starts_with("--") && word.len() > 2)
+                .collect::<Vec<_>>();
+            let tactics = words.iter().filter(|word| tactic(word)).collect::<Vec<_>>();
+            if names.len() <= 1
+                && !tactics.is_empty()
+                && names.len() + tactics.len() == words.len()
+                && names
+                    .first()
+                    .is_none_or(|name| words.first() == Some(name) || words.last() == Some(name))
+                && tactics
+                    .iter()
+                    .enumerate()
+                    .all(|(index, tactic)| !tactics[..index].contains(tactic))
+            {
+                let mut canonical = names.into_iter().cloned().collect::<Vec<_>>();
+                canonical.extend(tactics.into_iter().cloned());
+                return Some(canonical.join(" "));
+            }
+            if names.len() == 1 && words.len() == 1 {
+                return Some(words[0].clone());
+            }
+            normalize_position_area(entry).filter(|area| area != "none")
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(|entries| entries.join(", "))
 }
 
 fn canonical_paint_order(parts: &[&str]) -> String {
@@ -8885,6 +9576,7 @@ fn validate_box_spacing_declaration(name: &str, value: &Value) -> Option<Declara
 pub(super) fn box_spacing_component_is_valid(name: &str, value: &Value) -> bool {
     let margin = name.starts_with("margin-");
     match value {
+        Value::Function { .. } if margin && valid_anchor_size_expression(value) => true,
         Value::Keyword(keyword) => {
             is_css_wide_keyword(&keyword.to_ascii_lowercase())
                 || (margin && keyword.eq_ignore_ascii_case("auto"))
@@ -8937,6 +9629,8 @@ fn validate_logical_box_declaration(name: &str, value: &Value) -> Option<Declara
     );
     if is_offset {
         let valid = matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("auto") || is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+            || valid_anchor_function(value)
+            || valid_anchor_size_expression(value)
             || valid_logical_length(value, true, true);
         return Some(if valid {
             DeclarationValidation::Unvalidated
@@ -8996,6 +9690,51 @@ fn validate_logical_box_declaration(name: &str, value: &Value) -> Option<Declara
         return Some(DeclarationValidation::Invalid);
     }
     None
+}
+
+fn valid_anchor_function(value: &Value) -> bool {
+    let Value::Function { name, arguments } = value else {
+        return false;
+    };
+    if !name.eq_ignore_ascii_case("anchor") || arguments.is_empty() {
+        return false;
+    }
+    let components = arguments
+        .iter()
+        .flat_map(|argument| match argument {
+            Value::List(values) => values.iter().collect::<Vec<_>>(),
+            value => vec![value],
+        })
+        .collect::<Vec<_>>();
+    let mut index = 0;
+    if components
+        .get(index)
+        .is_some_and(|value| is_dashed_ident(value))
+    {
+        index += 1;
+    }
+    let Some(Value::Keyword(side)) = components.get(index) else {
+        return false;
+    };
+    if !matches!(
+        side.to_ascii_lowercase().as_str(),
+        "top"
+            | "right"
+            | "bottom"
+            | "left"
+            | "center"
+            | "start"
+            | "end"
+            | "self-start"
+            | "self-end"
+            | "inside"
+            | "outside"
+    ) && !side.ends_with('%')
+    {
+        return false;
+    }
+    index += 1;
+    index == components.len()
 }
 
 fn valid_logical_length(value: &Value, allow_negative: bool, allow_percentage: bool) -> bool {
@@ -9257,6 +9996,9 @@ fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
             || (name.starts_with("max-") && keyword == "none")
     };
     match value {
+        Value::Function { .. } if valid_anchor_size_function(value) => {
+            DeclarationValidation::Unvalidated
+        }
         Value::Keyword(keyword) if valid_keyword(keyword) => DeclarationValidation::Unvalidated,
         Value::Length(number, unit)
             if *number >= 0.0
@@ -9266,6 +10008,12 @@ fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
         }
         Value::Percentage(number) if *number >= 0.0 => DeclarationValidation::Unvalidated,
         Value::Number(number) if *number == 0.0 => DeclarationValidation::Unvalidated,
+        Value::Function { name: function, .. }
+            if is_length_percentage_math_function(function)
+                && valid_anchor_size_expression(value) =>
+        {
+            DeclarationValidation::Unvalidated
+        }
         Value::Function { name: function, .. } if is_length_percentage_math_function(function) => {
             if typed_math::infer(value, Some(typed_math::NumericType::LENGTH))
                 == Some(typed_math::NumericType::LENGTH)
@@ -9277,6 +10025,259 @@ fn validate_sizing_value(name: &str, value: &Value) -> DeclarationValidation {
         }
         _ => DeclarationValidation::Invalid,
     }
+}
+
+fn valid_anchor_size_function(value: &Value) -> bool {
+    let Value::Function { name, arguments } = value else {
+        return false;
+    };
+    if !name.eq_ignore_ascii_case("anchor-size") || arguments.len() > 2 {
+        return false;
+    }
+    let Some(first) = arguments.first() else {
+        return true;
+    };
+    let components = match first {
+        Value::List(values) => values.as_slice(),
+        value => std::slice::from_ref(value),
+    };
+    let size = |value: &Value| {
+        matches!(value, Value::Keyword(size) if matches!(
+            size.to_ascii_lowercase().as_str(),
+            "width" | "height" | "block" | "inline" | "self-block" | "self-inline"
+        ))
+    };
+    let descriptor = match components {
+        [] => true,
+        [value] => is_dashed_ident(value) || size(value) || valid_anchor_size_fallback(value),
+        [first, second] => {
+            (is_dashed_ident(first) && size(second)) || (size(first) && is_dashed_ident(second))
+        }
+        _ => false,
+    };
+    descriptor && arguments.get(1).is_none_or(valid_anchor_size_fallback)
+}
+
+fn valid_anchor_size_fallback(value: &Value) -> bool {
+    match value {
+        Value::Length(number, unit) => {
+            number.is_finite()
+                && resolve_length_to_px(*number, unit, ResolutionContext::default()).is_some()
+        }
+        Value::Percentage(number) => number.is_finite(),
+        Value::Number(number) => *number == 0.0,
+        Value::Function { name, .. } if name.eq_ignore_ascii_case("anchor-size") => {
+            valid_anchor_size_function(value)
+        }
+        Value::Function { name, arguments } if is_length_percentage_math_function(name) => {
+            !arguments.is_empty() && arguments.iter().all(valid_anchor_size_math_component)
+        }
+        _ => false,
+    }
+}
+
+fn valid_anchor_size_math_component(value: &Value) -> bool {
+    match value {
+        Value::List(values) | Value::CommaList(values) => {
+            values.iter().all(valid_anchor_size_math_component)
+        }
+        Value::Number(number) => number.is_finite(),
+        Value::Keyword(operator) => matches!(operator.as_str(), "+" | "-" | "*" | "/"),
+        value => valid_anchor_size_fallback(value),
+    }
+}
+
+fn contains_valid_anchor_size_function(value: &Value) -> bool {
+    match value {
+        Value::Function { name, arguments } => {
+            (name.eq_ignore_ascii_case("anchor-size") && valid_anchor_size_function(value))
+                || arguments.iter().any(contains_valid_anchor_size_function)
+        }
+        Value::List(values) | Value::CommaList(values) => {
+            values.iter().any(contains_valid_anchor_size_function)
+        }
+        _ => false,
+    }
+}
+
+fn valid_anchor_size_expression(value: &Value) -> bool {
+    match value {
+        Value::Function { name, .. } if name.eq_ignore_ascii_case("anchor-size") => {
+            valid_anchor_size_function(value)
+        }
+        Value::Function { name, arguments } if is_length_percentage_math_function(name) => {
+            arguments.iter().all(valid_anchor_size_expression_component)
+                && contains_valid_anchor_size_function(value)
+        }
+        _ => false,
+    }
+}
+
+fn valid_anchor_size_expression_component(value: &Value) -> bool {
+    match value {
+        Value::Function { name, .. } if name.eq_ignore_ascii_case("anchor-size") => {
+            valid_anchor_size_function(value)
+        }
+        Value::Function { name, arguments } if is_length_percentage_math_function(name) => {
+            arguments.iter().all(valid_anchor_size_expression_component)
+        }
+        Value::List(values) | Value::CommaList(values) => {
+            values.iter().all(valid_anchor_size_expression_component)
+        }
+        Value::Length(..) | Value::Percentage(_) | Value::Number(_) => true,
+        Value::Keyword(operator) => matches!(operator.as_str(), "+" | "-" | "*" | "/"),
+        _ => false,
+    }
+}
+
+fn canonical_anchor_size_tree(value: &Value) -> Value {
+    match value {
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("anchor-size") => {
+            let mut arguments = arguments
+                .iter()
+                .map(canonical_anchor_size_tree)
+                .collect::<Vec<_>>();
+            if let Some(Value::List(parts)) = arguments.first_mut()
+                && matches!(parts.as_slice(), [Value::Keyword(size), name]
+                    if matches!(size.to_ascii_lowercase().as_str(),
+                        "width" | "height" | "block" | "inline" | "self-block" | "self-inline")
+                    && is_dashed_ident(name))
+            {
+                parts.swap(0, 1);
+            }
+            if let Some(Value::Number(number)) = arguments.get_mut(1)
+                && *number == 0.0
+            {
+                arguments[1] = Value::Length(0.0, "px".into());
+            }
+            Value::Function {
+                name: name.to_ascii_lowercase(),
+                arguments,
+            }
+        }
+        Value::Function { name, arguments } => Value::Function {
+            name: name.clone(),
+            arguments: arguments.iter().map(canonical_anchor_size_tree).collect(),
+        },
+        Value::List(values) => Value::List(values.iter().map(canonical_anchor_size_tree).collect()),
+        Value::CommaList(values) => {
+            Value::CommaList(values.iter().map(canonical_anchor_size_tree).collect())
+        }
+        value => value.clone(),
+    }
+}
+
+fn render_canonical_anchor_size(value: &Value) -> String {
+    let value = canonical_anchor_size_tree(value);
+    render_anchor_size_value(&value, false)
+}
+
+fn render_anchor_size_value(value: &Value, nested_calc: bool) -> String {
+    match value {
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+            let parts = arguments
+                .first()
+                .and_then(|argument| match argument {
+                    Value::List(parts) => Some(parts.as_slice()),
+                    _ => None,
+                })
+                .unwrap_or(arguments.as_slice());
+            if matches!(parts, [Value::Function { name, .. }] if name.eq_ignore_ascii_case("anchor-size"))
+            {
+                return render_anchor_size_value(&parts[0], false);
+            }
+            let body = if let [
+                Value::Function {
+                    name,
+                    arguments: inner,
+                },
+                Value::Keyword(operator),
+                Value::Number(divisor),
+            ] = parts
+                && name.eq_ignore_ascii_case("calc")
+                && operator == "/"
+                && *divisor == 2.0
+            {
+                let inner = inner
+                    .iter()
+                    .map(|value| render_anchor_size_value(value, true))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("0.5 * ({inner})")
+            } else if let [
+                anchor @ Value::Function { name, .. },
+                Value::Keyword(operator),
+                percentage @ Value::Percentage(_),
+            ] = parts
+                && name.eq_ignore_ascii_case("anchor-size")
+                && operator == "+"
+            {
+                format!(
+                    "{} + {}",
+                    render_anchor_size_value(percentage, false),
+                    render_anchor_size_value(anchor, false)
+                )
+            } else {
+                parts
+                    .iter()
+                    .map(|value| render_anchor_size_value(value, true))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            if nested_calc {
+                format!("({body})")
+            } else {
+                format!("calc({body})")
+            }
+        }
+        Value::Function { name, arguments } => format!(
+            "{name}({})",
+            arguments
+                .iter()
+                .map(|value| render_anchor_size_value(value, false))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::List(values) => values
+            .iter()
+            .map(|value| render_anchor_size_value(value, nested_calc))
+            .collect::<Vec<_>>()
+            .join(" "),
+        Value::CommaList(values) => values
+            .iter()
+            .map(|value| render_anchor_size_value(value, nested_calc))
+            .collect::<Vec<_>>()
+            .join(", "),
+        value => render_value(value),
+    }
+}
+
+pub(crate) fn normalize_anchor_position_specified(property: &str, text: &str) -> Option<String> {
+    let keyword = text.trim().to_ascii_lowercase();
+    if is_css_wide_keyword(&keyword) {
+        return Some(keyword);
+    }
+    // Parse through a custom property so shorthand expansion does not discard
+    // the original component-value tree that needs CSSOM canonicalization.
+    // `supports_declaration` below remains the property-specific grammar
+    // boundary.
+    let declarations = super::parse_style_attribute(&format!("--omoikane-anchor-value: {text}"));
+    let declaration = declarations.first()?;
+    if property == "position-area" {
+        return normalize_position_area(&declaration.value);
+    }
+    if property == "position-try-fallbacks" {
+        return normalize_position_try_fallbacks(&declaration.value);
+    }
+    if property == "position-visibility" {
+        return normalize_position_visibility(&declaration.value);
+    }
+    if contains_valid_anchor_size_function(&declaration.value)
+        && supports_declaration(property, text)
+    {
+        return Some(render_canonical_anchor_size(&declaration.value));
+    }
+    None
 }
 
 fn is_length_percentage_math_function(name: &str) -> bool {
@@ -9324,6 +10325,9 @@ fn is_position_offset_property(name: &str) -> bool {
 }
 
 fn validate_color_scheme_declaration(value: &Value) -> DeclarationValidation {
+    if matches!(value, Value::CommaList(_)) {
+        return DeclarationValidation::Invalid;
+    }
     let rendered = render_value(value);
     let words = rendered.split_ascii_whitespace().collect::<Vec<_>>();
     if words.len() == 1
@@ -9337,15 +10341,19 @@ fn validate_color_scheme_declaration(value: &Value) -> DeclarationValidation {
     }
     let mut schemes = Vec::new();
     let mut only = false;
-    for word in words {
+    let word_count = words.len();
+    for (index, word) in words.into_iter().enumerate() {
         if word.eq_ignore_ascii_case("only") {
-            if only {
+            if only || (index != 0 && index + 1 != word_count) {
                 return DeclarationValidation::Invalid;
             }
             only = true;
             continue;
         }
-        if is_css_wide_keyword(&word.to_ascii_lowercase()) || word.eq_ignore_ascii_case("normal") {
+        if is_css_wide_keyword(&word.to_ascii_lowercase())
+            || word.eq_ignore_ascii_case("normal")
+            || word.eq_ignore_ascii_case("default")
+        {
             return DeclarationValidation::Invalid;
         }
         schemes.push(word.to_ascii_lowercase());
@@ -12330,6 +13338,11 @@ pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
     ) {
         return normalize_counter_specified(property, value).is_some();
     }
+    if property.eq_ignore_ascii_case("color-scheme")
+        && super::split_top_level_commas(value).len() != 1
+    {
+        return false;
+    }
     if (property.starts_with("inset")
         || property.starts_with("margin-")
         || property.starts_with("padding-")
@@ -14051,10 +15064,38 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
             ComputedValue::Number(normalize_numeric_property(property_name, *value))
         }
         Value::TreeCounting { .. } => ComputedValue::Keyword(render_value(value)),
+        Value::Function { name, .. } if name.eq_ignore_ascii_case("light-dark") => {
+            ComputedValue::Color(render_value(value))
+        }
         Value::Function { name, .. }
             if matches!(
                 name.to_ascii_lowercase().as_str(),
-                "hwb" | "lab" | "lch" | "oklab" | "oklch" | "color"
+                "rgb" | "rgba" | "hsl" | "hsla"
+            ) && {
+                let rendered = render_value(value);
+                rendered
+                    .split_once('(')
+                    .is_some_and(|(_, body)| body.trim_start().starts_with("from "))
+                    || rendered
+                        .split(|character: char| {
+                            !character.is_ascii_alphanumeric() && character != '-'
+                        })
+                        .any(|token| token.eq_ignore_ascii_case("none"))
+            } =>
+        {
+            compute_color4_value(value, ctx)
+        }
+        Value::Function { name, .. }
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "hwb"
+                    | "lab"
+                    | "lch"
+                    | "oklab"
+                    | "oklch"
+                    | "color"
+                    | "color-mix"
+                    | "contrast-color"
             ) =>
         {
             compute_color4_value(value, ctx)
@@ -14437,6 +15478,10 @@ fn canonical_property_name(name: &str) -> &str {
         "mask-mode"
     } else if name.eq_ignore_ascii_case("-webkit-mask-composite") {
         "mask-composite"
+    } else if name.eq_ignore_ascii_case("-webkit-print-color-adjust")
+        || name.eq_ignore_ascii_case("color-adjust")
+    {
+        "print-color-adjust"
     } else {
         name
     }
@@ -16728,6 +17773,10 @@ impl InitialValue {
 /// depends on another property's resolved value or on the number of layers
 /// in a shorthand — those stay as explicit code in `apply_initial_values`.
 const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
+    (
+        PropertyId::PositionVisibility,
+        InitialValue::Keyword("anchor-visible"),
+    ),
     (PropertyId::AccentColor, InitialValue::Keyword("auto")),
     (PropertyId::Appearance, InitialValue::Keyword("none")),
     (PropertyId::CaretColor, InitialValue::Keyword("auto")),
@@ -16910,7 +17959,12 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     // present lets a dropped/absent `cursor` declaration serialize as `auto`
     // in getComputedStyle (Acid3 test 47).
     (PropertyId::ForcedColorAdjust, InitialValue::Keyword("auto")),
+    (
+        PropertyId::PrintColorAdjust,
+        InitialValue::Keyword("economy"),
+    ),
     (PropertyId::WillChange, InitialValue::Keyword("auto")),
+    (PropertyId::Zoom, InitialValue::Number(1.0)),
     (PropertyId::Cursor, InitialValue::Keyword("auto")),
     (PropertyId::PointerEvents, InitialValue::Keyword("auto")),
     (PropertyId::ScrollBehavior, InitialValue::Keyword("auto")),
@@ -17209,6 +18263,83 @@ fn zero_border_width_for_none_style(properties: &mut PropertyMap) {
     }
 }
 
+fn resolve_light_dark_colors(properties: &mut PropertyMap, preferred_dark: bool) {
+    let scheme = properties
+        .get(&PropertyId::ColorScheme)
+        .map(ComputedValue::css_text)
+        .unwrap_or_else(|| "normal".to_string());
+    let words = scheme.split_ascii_whitespace().collect::<Vec<_>>();
+    let supports_light = words.iter().any(|word| word.eq_ignore_ascii_case("light"));
+    let supports_dark = words.iter().any(|word| word.eq_ignore_ascii_case("dark"));
+    let dark = match (supports_light, supports_dark) {
+        (false, true) => true,
+        (true, false) => false,
+        (true, true) => preferred_dark,
+        (false, false) => false,
+    };
+    let replacements = properties
+        .iter()
+        .filter_map(|(name, value)| match value {
+            ComputedValue::Color(text) => {
+                resolve_light_dark_color(text, dark).map(|color| (name.to_string(), color))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (name, color) in replacements {
+        properties.insert(name, ComputedValue::Color(color));
+    }
+}
+
+fn resolve_light_dark_color(text: &str, dark: bool) -> Option<String> {
+    let trimmed = text.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let body = lower.strip_prefix("light-dark(")?.strip_suffix(')')?;
+    let colors = super::split_top_level_commas(body);
+    let [light, dark_color] = colors.as_slice() else {
+        return None;
+    };
+    let selected = if dark { dark_color } else { light }.trim();
+    resolve_light_dark_color(selected, dark).or_else(|| Some(selected.to_string()))
+}
+
+fn resolve_dependent_color_functions(
+    properties: &mut PropertyMap,
+    parent_style: Option<&ComputedStyle>,
+) {
+    let parent_color = parent_style
+        .and_then(|style| style.get("color"))
+        .map(ComputedValue::css_text)
+        .unwrap_or_else(|| "black".to_string());
+    if let Some(value) = properties.get(&PropertyId::Color).cloned()
+        && let Some(resolved) = resolve_current_color_function(&value.css_text(), &parent_color)
+    {
+        properties.insert(PropertyId::Color, ComputedValue::Color(resolved));
+    }
+    let own_color = properties
+        .get(&PropertyId::Color)
+        .map(ComputedValue::css_text)
+        .unwrap_or(parent_color);
+    let replacements = properties
+        .iter()
+        .filter(|(name, _)| *name != "color")
+        .filter_map(|(name, value)| {
+            resolve_current_color_function(&value.css_text(), &own_color)
+                .map(|resolved| (name.to_string(), resolved))
+        })
+        .collect::<Vec<_>>();
+    for (name, resolved) in replacements {
+        properties.insert(name, ComputedValue::Color(resolved));
+    }
+}
+
+fn resolve_current_color_function(text: &str, current_color: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("currentcolor").then_some(())?;
+    let substituted = lower.replace("currentcolor", current_color);
+    crate::paint::color4::CssColor::parse(&substituted).map(|color| color.serialize_computed())
+}
+
 /// `color: currentColor` is equivalent to `color: inherit` per CSS Color Level 4.
 /// Resolve it before general inherit resolution so other properties that reference
 /// currentColor can see the resolved color value.
@@ -17327,6 +18458,7 @@ const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
     PropertyId::CaretColor,
     PropertyId::ColorScheme,
     PropertyId::ForcedColorAdjust,
+    PropertyId::PrintColorAdjust,
     PropertyId::BorderCollapse,
     PropertyId::BorderSpacing,
     PropertyId::Color,

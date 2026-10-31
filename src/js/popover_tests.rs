@@ -255,6 +255,46 @@ fn popover_top_layer_backdrop_paints_and_hit_tests_above_maximum_z_index() {
 }
 
 #[test]
+fn top_layer_popover_resolves_an_anchor_from_a_prior_popover() {
+    let document = TreeBuilder::parse(
+        r#"<html><head><style>
+          * { margin: 0; padding: 0; border: 0 }
+          #anchor1 { position:absolute; left:25px; top:25px; width:50px; height:50px;
+                     anchor-name:--anchor1 }
+          #popover1 { position:absolute; position-anchor:--anchor1; position-area:bottom right;
+                      width:100px; height:100px }
+          #anchor2 { position:absolute; left:25px; top:25px; width:50px; height:50px;
+                     anchor-name:--anchor2 }
+          #popover2 { position:absolute; position-anchor:--anchor2; position-area:bottom right;
+                      width:100px; height:100px }
+        </style></head><body>
+          <div id="anchor1"></div>
+          <div id="popover1" popover="manual"><div id="anchor2"></div></div>
+          <div id="popover2" popover="manual"></div>
+        </body></html>"#,
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    runtime.set_viewport(400.0, 400.0);
+    let positions = runtime
+        .eval(
+            r#"(() => {
+          const popover1 = document.getElementById("popover1");
+          const popover2 = document.getElementById("popover2");
+          popover1.showPopover();
+          popover2.showPopover();
+          const second = popover2.getBoundingClientRect();
+          return [second.x, second.y].join(",");
+        })()"#,
+        )
+        .unwrap()
+        .to_string(&mut runtime.context)
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(positions, "150,150");
+}
+
+#[test]
 fn popover_top_layer_fixture_matches_local_baseline_png() {
     let actual = render_popover_fixture();
     assert_eq!((actual.width(), actual.height()), (160, 120));

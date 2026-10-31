@@ -367,6 +367,8 @@ let omoikaneUserActivationState;
   const nativeCreateCdataSection = globalThis.__omoikane_create_cdata_section;
   const nativeSerializeXml = globalThis.__omoikane_serialize_xml;
   const nativeSetAttributeNS = globalThis.__omoikane_set_attribute_ns;
+  const nativeSetStyleComputationSource =
+    globalThis.__omoikane_set_style_computation_source;
   const nativeRemoveAttributeNS = globalThis.__omoikane_remove_attribute_ns;
   const nativeIframeContentDocument = globalThis.__omoikane_iframe_content_document;
   const nativeWindowNamedSnapshot = globalThis.__omoikane_window_named_snapshot;
@@ -465,6 +467,7 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_create_cdata_section;
   delete globalThis.__omoikane_serialize_xml;
   delete globalThis.__omoikane_set_attribute_ns;
+  delete globalThis.__omoikane_set_style_computation_source;
   delete globalThis.__omoikane_remove_attribute_ns;
   delete globalThis.__omoikane_iframe_content_document;
   delete globalThis.__omoikane_iframe_global;
@@ -912,6 +915,7 @@ let omoikaneUserActivationState;
       oldValue = __omoikane_get_attribute(element.__id, attr);
       if (guard) guard();
       __omoikane_set_attribute(element.__id, attr, newValue);
+      if (attr === "style") safeWeakMapDelete(elementStyleDeclarationCache, element);
       refreshMaterializedAttribute(element, [attr, null, attr, newValue]);
       callbackName = attr;
       callbackNamespace = null;
@@ -1144,6 +1148,9 @@ let omoikaneUserActivationState;
     name === "hyphenate-character" ||
     name === "initial-letter" || name === "text-box-edge" ||
     logicalBoxStyleProperties.has(name) ||
+    name === "position-area" || name === "position-try-fallbacks" ||
+    name === "position-visibility" ||
+    (!name.startsWith("--") && /anchor-size\s*\(/i.test(value)) ||
     validatesSpecialStyleProperties.has(name) ||
     (!name.startsWith("--") && numericMathFunctionPattern.test(value)) ||
     (!name.startsWith("--") && /sibling-(?:index|count)\s*\(/i.test(value));
@@ -1197,9 +1204,13 @@ let omoikaneUserActivationState;
     "scroll-margin-inline": ["scroll-margin-inline-start", "scroll-margin-inline-end"],
     "scroll-margin-block": ["scroll-margin-block-start", "scroll-margin-block-end"],
   });
+  const physicalBoxShorthandLonghands = Object.freeze({
+    "margin": ["margin-top", "margin-right", "margin-bottom", "margin-left"],
+    "padding": ["padding-top", "padding-right", "padding-bottom", "padding-left"],
+  });
 
   function logicalShorthandValue(kebab, declarations) {
-    const longhands = styleShorthandLonghands[kebab];
+    const longhands = styleShorthandLonghands[kebab] || physicalBoxShorthandLonghands[kebab];
     if (!longhands) return null;
     const values = new Map();
     const priorities = new Map();
@@ -1312,7 +1323,7 @@ let omoikaneUserActivationState;
       return parts.filter(Boolean).join(" ");
     }
     if (parts.some(value => !value)) return "";
-    if (kebab === "inset") {
+    if (kebab === "inset" || kebab === "margin" || kebab === "padding") {
       const [top, right, bottom, left] = parts;
       if (top === right && top === bottom && top === left) return top;
       if (top === bottom && right === left) return top + " " + right;
@@ -4377,6 +4388,7 @@ let omoikaneUserActivationState;
       const normalizeDecls = (declarations) => {
         const normalized = [];
         for (const declaration of declarations) {
+          const computationValue = declaration.computationValue || declaration.value;
           if (needsStyleValueNormalization(declaration.name, declaration.value)) {
             const value = __omoikane_normalize_style_value(
               declaration.name, declaration.value
@@ -4392,6 +4404,7 @@ let omoikaneUserActivationState;
               declaration.name, declaration.value
             ))) normalized.push({ name, value, priority: declaration.priority });
           } else {
+            declaration.computationValue = computationValue;
             normalized.push(declaration);
           }
         }
@@ -4400,6 +4413,7 @@ let omoikaneUserActivationState;
       const cloneDecls = declarations => declarations.map(declaration => ({
         name: declaration.name,
         value: declaration.value,
+        computationValue: declaration.computationValue,
         priority: declaration.priority,
       }));
       const parseDecls = () => {
@@ -4409,6 +4423,7 @@ let omoikaneUserActivationState;
         const declarations = normalizeDecls(parseDeclText(source));
         safeWeakMapSet(elementStyleDeclarationCache, node, {
           source,
+          computationSource: source,
           declarations: cloneDecls(declarations),
         });
         return declarations;
@@ -4419,10 +4434,20 @@ let omoikaneUserActivationState;
           .join(" ");
       const writeDecls = (decls, skipUnchanged = false) => {
         const source = serializeDecls(decls);
-        if (skipUnchanged && __omoikane_get_attribute(node.__id, "style") === source) return;
+        const computationSource = serializeDecls(decls.map(declaration => ({
+          ...declaration,
+          value: declaration.computationValue || declaration.value,
+        })));
+        const cached = safeWeakMapGet(elementStyleDeclarationCache, node);
+        if (skipUnchanged && __omoikane_get_attribute(node.__id, "style") === source &&
+            cached && cached.computationSource === computationSource) return;
         node.setAttribute("style", source);
+        if (computationSource !== source) {
+          nativeSetStyleComputationSource(node.__id, computationSource);
+        }
         safeWeakMapSet(elementStyleDeclarationCache, node, {
           source,
+          computationSource,
           declarations: cloneDecls(decls),
         });
       };
@@ -4483,6 +4508,7 @@ let omoikaneUserActivationState;
       // retains remove/append precedence for logical and shorthand groups.
       const setValue = (kebab, value, priority) => {
         value = String(value);
+        const computationValue = value;
         if (needsStyleValueNormalization(kebab, value)) {
           const normalized = __omoikane_normalize_style_value(kebab, value);
           if (normalized === null) return;
@@ -4513,12 +4539,12 @@ let omoikaneUserActivationState;
           const previous = decls[existing];
           const nextPriority = priority || "";
           if (previous.value === value && previous.priority === nextPriority) return;
-          decls[existing] = { name: kebab, value, priority: nextPriority };
+          decls[existing] = { name: kebab, value, computationValue, priority: nextPriority };
           writeDecls(decls, true);
           return;
         }
         const remaining = decls.filter(d => d.name !== kebab);
-        remaining.push({ name: kebab, value, priority: priority || "" });
+        remaining.push({ name: kebab, value, computationValue, priority: priority || "" });
         writeDecls(remaining, true);
       };
       // Removes a kebab-case property and returns its previous value ("" if it
@@ -10289,12 +10315,21 @@ let omoikaneUserActivationState;
     return text;
   }
 
+  function cssomRuleIsRecognized(source) {
+    const text = cssRuleWithoutLeadingComments(source);
+    if (!text.startsWith("@")) return true;
+    return /^@(?:font-face|font-palette-values|counter-style|font-feature-values|property|position-try|import|layer|container|media|scope|supports|(?:-webkit-)?keyframes|page|namespace|starting-style|view-transition)(?=\s|\/\*|\(|\{|;)/i.test(text);
+  }
+
   function splitCssRules(source) {
     const css = String(source || "");
     try {
       return JSON.parse(__omoikane_css_rule_sources(css)).filter(rule =>
-        ((!/^@property(?=\s|\/\*|\{)/i.test(cssRuleWithoutLeadingComments(rule)) ||
-          __omoikane_css_property_rule(rule) !== null) && fontAtRulePreludeValid(rule))
+        (cssomRuleIsRecognized(rule) &&
+          (!/^@property(?=\s|\/\*|\{)/i.test(cssRuleWithoutLeadingComments(rule)) ||
+          __omoikane_css_property_rule(rule) !== null) && fontAtRulePreludeValid(rule) &&
+          (!/^@view-transition(?=\s|\/\*|\{)/i.test(cssRuleWithoutLeadingComments(rule)) ||
+            viewTransitionRuleSource(rule) !== null))
       );
     } catch (error) {
       throw new DOMException(error.message || "Invalid CSS rule.", "SyntaxError");
@@ -10343,6 +10378,12 @@ let omoikaneUserActivationState;
         .replace(/\/\*[\s\S]*?\*\//g, " ").trim();
       return validFontFeatureFamilyList(raw);
     }
+    if (/^@position-try(?=\s|\/\*|\{)/i.test(text)) {
+      const raw = text.slice(0, open).replace(/^@position-try/i, "")
+        .replace(/\/\*[\s\S]*?\*\//g, " ").trim();
+      const name = cssIdentifierValue(raw);
+      return name !== null && name.startsWith("--");
+    }
     return true;
   }
 
@@ -10351,19 +10392,39 @@ let omoikaneUserActivationState;
     catch (_) { return false; }
   }
 
-  function declarationView(block, onChange = null, validateProperties = true, elementContext = true) {
+  function declarationView(block, onChange = null, validateProperties = true, elementContext = true,
+                           allowedProperties = null, expandInitialShorthands = false) {
     let source = String(block || "");
     let cachedSource = null;
     let cachedDeclarations = [];
     const accepts = (name, value) =>
+      (!allowedProperties || allowedProperties.has(name)) &&
       (elementContext || JSON.parse(__omoikane_css_declarations(name + ": " + value, true)).length > 0) &&
       (!validateProperties || name.startsWith("--") ||
        nativeStyleSupports(name, value.replace(/\s*!\s*important\s*$/i, "")));
     const declarations = () => {
       if (cachedSource !== source) {
-        const parsed = JSON.parse(__omoikane_css_declarations(source)).map(
-          ([name, value]) => ({ name, value })
-        ).filter(declaration => accepts(declaration.name, declaration.value));
+        let entries = JSON.parse(__omoikane_css_declarations(source));
+        if (expandInitialShorthands && !allowedProperties) {
+          entries = entries.flatMap(([name, value]) => {
+            if (!styleShorthandLonghands[name] && !physicalBoxShorthandLonghands[name])
+              return [[name, value]];
+            const expanded = JSON.parse(__omoikane_expand_style_shorthand(name, value));
+            return expanded.length ? expanded : [];
+          });
+        }
+        let parsed = entries.map(([name, value]) => {
+          if (needsStyleValueNormalization(name, value)) {
+            const normalized = __omoikane_normalize_style_value(name, value);
+            if (normalized !== null) value = normalized;
+          }
+          return { name, value };
+        }).filter(declaration => accepts(declaration.name, declaration.value));
+        if (expandInitialShorthands) {
+          parsed = parsed.filter((declaration, index) =>
+            parsed.findLastIndex(later => later.name === declaration.name) === index
+          );
+        }
         cachedDeclarations = parsed;
         cachedSource = source;
       }
@@ -10384,6 +10445,9 @@ let omoikaneUserActivationState;
       if (key === "contain-intrinsic-size") {
         return containIntrinsicSizeShorthand(values);
       }
+      if (expandInitialShorthands && (key === "margin" || key === "padding")) {
+        return logicalShorthandValue(key, values) || "";
+      }
       const found = values.filter(declaration => declaration.name === key);
       return found.length ? found[found.length - 1].value : "";
     };
@@ -10397,8 +10461,9 @@ let omoikaneUserActivationState;
         value = normalized;
       }
       if (!accepts(key, value)) return;
-      const longhands = styleShorthandLonghands[key];
-      if (longhands) {
+      const longhands = styleShorthandLonghands[key] ||
+        (expandInitialShorthands ? physicalBoxShorthandLonghands[key] : null);
+      if (longhands && !allowedProperties) {
         const expanded = JSON.parse(__omoikane_expand_style_shorthand(key, value));
         if (expanded.length === 0) return;
         const replaced = new Set([key, ...longhands]);
@@ -10423,7 +10488,8 @@ let omoikaneUserActivationState;
       for (let index = values.length - 1; index >= 0; index--) {
         if (values[index].name === key) { previous = values[index].value; break; }
       }
-      const longhands = styleShorthandLonghands[key] || [];
+      const longhands = styleShorthandLonghands[key] ||
+        (expandInitialShorthands ? physicalBoxShorthandLonghands[key] : null) || [];
       const removed = new Set([key, ...longhands]);
       const remaining = values.filter(declaration => !removed.has(declaration.name));
       if (remaining.length !== values.length) write(remaining, key);
@@ -10453,11 +10519,17 @@ let omoikaneUserActivationState;
     return new Proxy(target, {
       get(object, prop) {
         if (typeof prop === "symbol" || prop in object) return object[prop];
+        if (allowedProperties && !allowedProperties.has(propertyName(prop))) return undefined;
         return object.getPropertyValue(prop);
       },
       set(object, prop, value) {
         if (typeof prop !== "string") return true;
         if (prop === "cssText") { object.cssText = value; return true; }
+        if (allowedProperties && allowedProperties.has(propertyName(prop))) {
+          if (value === null || value === undefined || value === "") removeValue(prop);
+          else setValue(prop, value);
+          return true;
+        }
         if (prop in object) return true;
         if (value === null || value === undefined || value === "") removeValue(prop);
         else setValue(prop, value);
@@ -10798,7 +10870,7 @@ let omoikaneUserActivationState;
 
   // Descriptor rules have no originating element for tree-dependent values.
   class CSSDescriptorRule {
-    constructor(text, sheet, index) {
+    constructor(text, sheet, index, allowedProperties = null) {
       this.__sheet = sheet;
       this.__index = index;
       const open = cssRuleBlockStart(text), close = text.lastIndexOf("}");
@@ -10806,11 +10878,14 @@ let omoikaneUserActivationState;
       this.__style = declarationView(text.slice(open + 1, close), () => {
         this.__text = this.cssText;
         if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
-      }, false, false);
+      }, false, false, allowedProperties);
       this.__text = text;
       if (sheet) sheet.__registerRuleView(this);
     }
-    get cssText() { return this.__prelude + " { " + this.__style.cssText + " }"; }
+    get cssText() {
+      const declarations = this.__style.cssText;
+      return this.__prelude + (declarations ? " { " + declarations + " }" : " { }");
+    }
     get parentRule() { return this.__sheet ? this.__sheet.__parentRule : null; }
     get parentStyleSheet() { return this.__sheet; }
   }
@@ -10832,6 +10907,53 @@ let omoikaneUserActivationState;
     get fontFamily() { return this.__style.getPropertyValue("font-family"); }
     get basePalette() { return this.__style.getPropertyValue("base-palette"); }
     get overrideColors() { return this.__style.getPropertyValue("override-colors"); }
+  }
+
+  const positionTryDescriptorProperties = new Set([
+    "margin", "margin-top", "margin-right", "margin-bottom", "margin-left",
+    "margin-block", "margin-block-start", "margin-block-end",
+    "margin-inline", "margin-inline-start", "margin-inline-end",
+    "inset", "top", "left", "right", "bottom", "inset-block",
+    "inset-block-start", "inset-block-end", "inset-inline",
+    "inset-inline-start", "inset-inline-end", "width", "height",
+    "min-width", "max-width", "min-height", "max-height", "block-size",
+    "min-block-size", "max-block-size", "inline-size", "min-inline-size",
+    "max-inline-size", "place-self", "align-self", "justify-self",
+    "position-anchor", "position-area"
+  ]);
+
+  class CSSPositionTryDescriptors {}
+  for (const property of positionTryDescriptorProperties) {
+    const camel = property.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+    for (const attribute of new Set([property, camel])) {
+      Object.defineProperty(CSSPositionTryDescriptors.prototype, attribute, {
+        configurable: true,
+        enumerable: true,
+        get() { return this.getPropertyValue(property); },
+        set(value) { this.setProperty(property, value); },
+      });
+    }
+  }
+
+  class CSSPositionTryRule extends CSSDescriptorRule {
+    constructor(text, sheet = null, index = -1) {
+      const source = cssRuleWithoutLeadingComments(text);
+      const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
+      const rawName = source.slice(0, open).replace(/^@position-try/i, "")
+        .replace(/\/\*[\s\S]*?\*\//g, " ").trim();
+      const name = cssIdentifierValue(rawName);
+      if (open < 0 || close <= open || name === null || !name.startsWith("--")) {
+        throw new DOMException("Invalid @position-try rule.", "SyntaxError");
+      }
+      super("@position-try " + cssIdentifierText(name) + " { " +
+        source.slice(open + 1, close) + " }", sheet, index, positionTryDescriptorProperties);
+      this.__name = name;
+      Object.setPrototypeOf(this.__style, CSSPositionTryDescriptors.prototype);
+      this.__prelude = "@position-try " + cssIdentifierText(name);
+    }
+    get type() { return 0; }
+    get name() { return cssIdentifierText(this.__name); }
+    get style() { return this.__style; }
   }
 
   function splitFontPaletteItems(value) {
@@ -11462,6 +11584,268 @@ let omoikaneUserActivationState;
     get cssText() { return this.__serializeCssText(); }
   }
 
+  function splitKeyframeRules(body) {
+    const rules = [];
+    const text = String(body);
+    let start = 0, depth = 0, quote = "", comment = false, escaped = false;
+    for (let index = 0; index < text.length; index++) {
+      const ch = text[index], next = text[index + 1];
+      if (comment) {
+        if (ch === "*" && next === "/") { comment = false; index++; }
+        continue;
+      }
+      if (escaped) { escaped = false; continue; }
+      if (ch === "\\") { escaped = true; continue; }
+      if (quote) { if (ch === quote) quote = ""; continue; }
+      if (ch === "/" && next === "*") { comment = true; index++; continue; }
+      if (ch === "'" || ch === '"') { quote = ch; continue; }
+      if (ch === "{") depth++;
+      else if (ch === "}" && depth > 0 && --depth === 0) {
+        const rule = text.slice(start, index + 1).trim();
+        if (rule) rules.push(rule);
+        start = index + 1;
+      }
+    }
+    return rules;
+  }
+
+  function normalizeKeyframeSelector(input) {
+    const selectors = String(input).split(",").map(selector => {
+      const value = selector.trim().toLowerCase();
+      if (value === "from") return "0%";
+      if (value === "to") return "100%";
+      const match = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))%$/.exec(value);
+      if (!match) return null;
+      const percentage = Number(match[1]);
+      if (!Number.isFinite(percentage) || percentage < 0 || percentage > 100) return null;
+      return String(percentage).replace(/\.0+$/, "") + "%";
+    });
+    return selectors.length && selectors.every(selector => selector !== null)
+      ? selectors.join(", ") : null;
+  }
+
+  class CSSKeyframeRule {
+    constructor(text, owner) {
+      this.__owner = owner;
+      const open = cssRuleBlockStart(text), close = text.lastIndexOf("}");
+      this.__keyText = normalizeKeyframeSelector(text.slice(0, open)) || "";
+      this.__style = declarationView(text.slice(open + 1, close), () => owner.__sync());
+    }
+    get type() { return 8; }
+    get parentRule() { return this.__owner; }
+    get parentStyleSheet() { return this.__owner.parentStyleSheet; }
+    get keyText() { return this.__keyText; }
+    set keyText(value) {
+      const normalized = normalizeKeyframeSelector(value);
+      if (normalized === null) return;
+      this.__keyText = normalized;
+      this.__owner.__sync();
+    }
+    get style() { return this.__style; }
+    set style(value) { this.__style.cssText = value; }
+    get cssText() { return this.keyText + " { " + this.style.cssText + " }"; }
+  }
+
+  function keyframeRuleList(owner) {
+    const list = {
+      item(index) { return owner.__rules[Number(index) >>> 0] || null; },
+      get length() { return owner.__rules.length; },
+      [Symbol.iterator]() { return owner.__rules[Symbol.iterator](); },
+    };
+    return new Proxy(list, {
+      get(target, property, receiver) {
+        if (typeof property === "string" && /^(?:0|[1-9]\d*)$/.test(property))
+          return owner.__rules[Number(property)];
+        return Reflect.get(target, property, receiver);
+      },
+    });
+  }
+
+  class CSSKeyframesRule {
+    constructor(text, sheet = null, index = -1) {
+      this.__sheet = sheet;
+      this.__index = index;
+      const source = cssRuleWithoutLeadingComments(text);
+      const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
+      let name = source.slice(0, open).replace(/^@(?:-webkit-)?keyframes\s+/i, "").trim();
+      if ((name[0] === '"' || name[0] === "'") && name.at(-1) === name[0]) name = name.slice(1, -1);
+      this.__name = name;
+      this.__rules = splitKeyframeRules(source.slice(open + 1, close))
+        .map(rule => new CSSKeyframeRule(rule, this));
+      this.__cssRules = keyframeRuleList(this);
+      if (sheet) sheet.__registerRuleView(this);
+    }
+    get type() { return 7; }
+    get name() { return this.__name; }
+    set name(value) { this.__name = String(value); this.__sync(); }
+    get cssRules() { return this.__cssRules; }
+    appendRule(rule) {
+      const source = String(rule).trim();
+      const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
+      if (open < 0 || close <= open || normalizeKeyframeSelector(source.slice(0, open)) === null) return;
+      this.__rules.push(new CSSKeyframeRule(source, this));
+      this.__sync();
+    }
+    findRule(selector) {
+      const key = normalizeKeyframeSelector(selector);
+      if (key === null) return null;
+      return this.__rules.findLast(rule => rule.keyText === key) || null;
+    }
+    deleteRule(selector) {
+      const rule = this.findRule(selector);
+      if (!rule) return;
+      this.__rules.splice(this.__rules.lastIndexOf(rule), 1);
+      this.__sync();
+    }
+    __sync() {
+      if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.cssText);
+    }
+    get cssText() {
+      const children = this.__rules.map(rule => "  " + rule.cssText).join("\n");
+      return "@keyframes " + this.name + " {" + (children ? "\n" + children + "\n" : " ") + "}";
+    }
+  }
+
+  class CSSMarginRule {
+    constructor(text, sheet = null, index = -1) {
+      this.__sheet = sheet;
+      this.__index = index;
+      const source = cssRuleWithoutLeadingComments(text);
+      const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
+      this.__name = source.slice(1, open).trim().toLowerCase();
+      this.__style = declarationView(source.slice(open + 1, close), () => {
+        if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.cssText);
+      }, false, false, null, true);
+      if (sheet) sheet.__registerRuleView(this);
+    }
+    get type() { return 9; }
+    get name() { return this.__name; }
+    get style() { return this.__style; }
+    set style(value) { this.__style.cssText = value; }
+    get cssText() { return "@" + this.name + " { " + this.style.cssText + " }"; }
+  }
+
+  function isCssMarginRuleSource(source) {
+    return /^@(?:top-(?:left-corner|left|center|right|right-corner)|right-(?:top|middle|bottom)|bottom-(?:right-corner|right|center|left|left-corner)|left-(?:bottom|middle|top))(?=\s|\{)/i
+      .test(cssRuleWithoutLeadingComments(source));
+  }
+
+  class CSSPageRule extends CSSGroupingRule {
+    constructor(text, sheet = null, index = -1) {
+      super();
+      this.__sheet = sheet;
+      this.__index = index;
+      const source = cssRuleWithoutLeadingComments(text);
+      const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
+      this.__selectorText = source.slice("@page".length, open).trim();
+      const contents = splitNestedStyleBody(source.slice(open + 1, close));
+      let declarations = contents.leading;
+      const rules = [];
+      for (const rule of contents.rules) {
+        if (/^@-omoikane-nested-declarations(?=\s|\{)/i.test(rule)) {
+          const ruleOpen = cssRuleBlockStart(rule), ruleClose = rule.lastIndexOf("}");
+          declarations += " " + rule.slice(ruleOpen + 1, ruleClose);
+        } else if (isCssMarginRuleSource(rule)) {
+          rules.push(rule);
+        }
+      }
+      this.__style = declarationView(
+        declarations, () => this.__syncFromInner(), false, false, null, true
+      );
+      this.__innerSheet = new CSSStyleSheet(null, { rules });
+      this.__innerSheet.__parentRule = this;
+      if (sheet) sheet.__registerRuleView(this);
+    }
+    get type() { return 6; }
+    get selectorText() { return this.__selectorText; }
+    set selectorText(value) { this.__selectorText = String(value).trim(); this.__syncFromInner(); }
+    get style() { return this.__style; }
+    set style(value) { this.__style.cssText = value; }
+    get cssRules() { return this.__innerSheet.cssRules; }
+    __syncFromInner() {
+      if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.cssText);
+    }
+    get cssText() {
+      const prelude = "@page" + (this.selectorText ? " " + this.selectorText : "");
+      const parts = [];
+      if (this.style.cssText) parts.push("  " + this.style.cssText);
+      for (const rule of this.cssRules) parts.push("  " + rule.cssText);
+      return prelude + " {" + (parts.length ? "\n" + parts.join("\n") + "\n" : " ") + "}";
+    }
+  }
+
+  class CSSNamespaceRule {
+    constructor(text, sheet = null, index = -1) {
+      this.__sheet = sheet;
+      this.__index = index;
+      const source = cssRuleWithoutLeadingComments(text).replace(/;\s*$/, "");
+      const body = source.replace(/^@namespace\s+/i, "").trim();
+      const match = /^(?:(\S+)\s+)?(?:url\(\s*([^)]+?)\s*\)|(["'])(.*?)\3)$/i.exec(body);
+      this.__prefix = match && match[1] ? cssIdentifierValue(match[1]) : null;
+      const uri = match ? (match[2] === undefined ? match[4] : match[2]) : "";
+      this.__namespaceURI = String(uri).trim().replace(/^(?:["'])(.*)(?:["'])$/, "$1");
+      if (sheet) sheet.__registerRuleView(this);
+    }
+    get type() { return 10; }
+    get prefix() { return this.__prefix; }
+    get namespaceURI() { return this.__namespaceURI; }
+    get cssText() {
+      return "@namespace " + (this.prefix === null ? "" : cssIdentifierText(this.prefix) + " ") +
+        'url("' + this.namespaceURI.replace(/(["\\])/g, "\\$1") + '");';
+    }
+  }
+
+  class CSSStartingStyleRule extends CSSGroupingRule {
+    constructor(text, sheet = null, index = -1) {
+      super();
+      this.__sheet = sheet;
+      this.__index = index;
+      const source = cssRuleWithoutLeadingComments(text);
+      const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
+      this.__innerSheet = childGroupingSheet(source.slice(open + 1, close), sheet, this);
+      if (sheet) sheet.__registerRuleView(this);
+    }
+    get type() { return 0; }
+    get cssRules() { return this.__innerSheet.cssRules; }
+    __serializeCssText() {
+      const children = serializeChildRules(this.cssRules);
+      return "@starting-style {" + (children ? "\n" + children + "\n" : " ") + "}";
+    }
+    get cssText() { return this.__serializeCssText(); }
+  }
+
+  const viewTransitionDescriptors = new Set(["navigation", "types"]);
+  function viewTransitionRuleSource(text) {
+    const source = cssRuleWithoutLeadingComments(text);
+    const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
+    if (open < 0 || close <= open ||
+        source.slice(0, open).replace(/\/\*[\s\S]*?\*\//g, " ").trim() !== "@view-transition") {
+      return null;
+    }
+    const declarations = JSON.parse(__omoikane_css_declarations(source.slice(open + 1, close)));
+    const accepted = declarations.filter(([name, value]) => {
+      if (/!\s*important\s*$/i.test(value)) return false;
+      if (name === "navigation") return /^(?:auto|none)$/i.test(value.trim());
+      if (name === "types") return /^[-_a-z][-_a-z0-9]*(?:\s+[-_a-z][-_a-z0-9]*)*$/i.test(value.trim());
+      return false;
+    });
+    const body = accepted.map(([name, value]) => name + ": " + value + ";").join(" ");
+    return "@view-transition" + (body ? " { " + body + " }" : " { }");
+  }
+  class CSSViewTransitionRule extends CSSDescriptorRule {
+    constructor(text, sheet = null, index = -1) {
+      super(viewTransitionRuleSource(text) || "@view-transition { }", sheet, index,
+        viewTransitionDescriptors);
+      this.__prelude = "@view-transition";
+    }
+    get type() { return 0; }
+    get navigation() { return this.__style.getPropertyValue("navigation"); }
+    get types() {
+      const value = this.__style.getPropertyValue("types");
+      return value ? Object.freeze(value.trim().split(/\s+/)) : Object.freeze([]);
+    }
+  }
+
   function createCssRule(text, sheet = null, index = -1) {
     const ruleSource = cssRuleWithoutLeadingComments(text);
     return /^@-omoikane-nested-declarations(?=\s|\{)/i.test(ruleSource)
@@ -11476,6 +11860,8 @@ let omoikaneUserActivationState;
       ? new CSSFontFeatureValuesRule(text, sheet, index)
       : /^@property(?=\s|\/\*|\{)/i.test(ruleSource)
       ? new CSSPropertyRule(text, sheet, index)
+      : /^@position-try(?=\s|\/\*|\{)/i.test(ruleSource)
+      ? new CSSPositionTryRule(text, sheet, index)
       : /^@import(?=\s|\/\*)/i.test(ruleSource)
       ? new CSSImportRule(text, sheet, index)
       : /^@layer(?=\s|\/\*|\{|;)/i.test(ruleSource)
@@ -11490,10 +11876,60 @@ let omoikaneUserActivationState;
       ? new CSSScopeRule(text, sheet, index)
       : /^@supports(?=\s|\/\*|\()/i.test(ruleSource)
       ? new CSSSupportsRule(text, sheet, index)
+      : /^@(?:-webkit-)?keyframes(?=\s|\/\*|\{)/i.test(ruleSource)
+      ? new CSSKeyframesRule(text, sheet, index)
+      : /^@page(?=\s|\/\*|\{)/i.test(ruleSource)
+      ? new CSSPageRule(text, sheet, index)
+      : isCssMarginRuleSource(ruleSource)
+      ? new CSSMarginRule(text, sheet, index)
+      : /^@namespace(?=\s|\/\*|;)/i.test(ruleSource)
+      ? new CSSNamespaceRule(text, sheet, index)
+      : /^@starting-style(?=\s|\/\*|\{)/i.test(ruleSource)
+      ? new CSSStartingStyleRule(text, sheet, index)
+      : /^@view-transition(?=\s|\/\*|\{)/i.test(ruleSource)
+      ? new CSSViewTransitionRule(text, sheet, index)
       : new CSSStyleRule(text, sheet, index);
   }
 
-  class CSSRule {}
+  class CSSRule {
+    get parentRule() { return this.__sheet ? this.__sheet.__parentRule : null; }
+    get parentStyleSheet() { return this.__sheet || null; }
+  }
+  for (const [name, value] of Object.entries({
+    STYLE_RULE: 1,
+    CHARSET_RULE: 2,
+    IMPORT_RULE: 3,
+    MEDIA_RULE: 4,
+    FONT_FACE_RULE: 5,
+    PAGE_RULE: 6,
+    KEYFRAMES_RULE: 7,
+    KEYFRAME_RULE: 8,
+    MARGIN_RULE: 9,
+    NAMESPACE_RULE: 10,
+    COUNTER_STYLE_RULE: 11,
+    SUPPORTS_RULE: 12,
+    FONT_FEATURE_VALUES_RULE: 14,
+  })) {
+    Object.defineProperty(CSSRule, name, { value, enumerable: true });
+    Object.defineProperty(CSSRule.prototype, name, { value, enumerable: true });
+  }
+  for (const constructor of [
+    CSSGroupingRule,
+    CSSNestedDeclarations,
+    CSSFontFaceRule,
+    CSSDescriptorRule,
+    CSSFontFeatureValuesRule,
+    CSSPropertyRule,
+    CSSLayerStatementRule,
+    CSSImportRule,
+    CSSKeyframesRule,
+    CSSKeyframeRule,
+    CSSMarginRule,
+    CSSNamespaceRule,
+  ]) {
+    Object.setPrototypeOf(constructor.prototype, CSSRule.prototype);
+    Object.setPrototypeOf(constructor, CSSRule);
+  }
 
   class CSSRuleList {
     constructor(sheet) { this.__sheet = sheet; }
@@ -11835,8 +12271,16 @@ let omoikaneUserActivationState;
       if (/^\s*@import(?=\s|\/\*)/i.test(text) && cssImportParts(text) === null) {
         throw new DOMException("Invalid @import rule.", "SyntaxError");
       }
+      if (/^\s*@view-transition(?=\s|\/\*|\{)/i.test(text) &&
+          viewTransitionRuleSource(source) === null) {
+        throw new DOMException("Invalid @view-transition rule.", "SyntaxError");
+      }
       let count;
       const fontFeatureRule = /^\s*@font-feature-values(?=\s|\/\*|;|\{)/i.test(text);
+      const positionTryRule = /^\s*@position-try(?=\s|\/\*|\{)/i.test(text);
+      if (positionTryRule && (blockStart < 0 || !fontAtRulePreludeValid(source))) {
+        throw new DOMException("Invalid @position-try rule.", "SyntaxError");
+      }
       if (fontFeatureRule) {
         if (blockStart < 0 || !fontAtRulePreludeValid(source))
           throw new DOMException("Invalid @font-feature-values rule.", "SyntaxError");
@@ -21328,6 +21772,8 @@ let omoikaneUserActivationState;
   globalThis.CSSRule = CSSRule;
   globalThis.CSSFontFeatureValuesMap = CSSFontFeatureValuesMap;
   globalThis.CSSPropertyRule = CSSPropertyRule;
+  globalThis.CSSPositionTryDescriptors = CSSPositionTryDescriptors;
+  globalThis.CSSPositionTryRule = CSSPositionTryRule;
   globalThis.CSSImportRule = CSSImportRule;
   globalThis.CSSLayerBlockRule = CSSLayerBlockRule;
   globalThis.CSSLayerStatementRule = CSSLayerStatementRule;
@@ -21336,6 +21782,13 @@ let omoikaneUserActivationState;
   globalThis.CSSGroupingRule = CSSGroupingRule;
   globalThis.CSSConditionRule = CSSConditionRule;
   globalThis.CSSScopeRule = CSSScopeRule;
+  globalThis.CSSKeyframesRule = CSSKeyframesRule;
+  globalThis.CSSKeyframeRule = CSSKeyframeRule;
+  globalThis.CSSPageRule = CSSPageRule;
+  globalThis.CSSMarginRule = CSSMarginRule;
+  globalThis.CSSNamespaceRule = CSSNamespaceRule;
+  globalThis.CSSStartingStyleRule = CSSStartingStyleRule;
+  globalThis.CSSViewTransitionRule = CSSViewTransitionRule;
   globalThis.NodeFilter = NodeFilter;
   globalThis.NodeIterator = NodeIterator;
   globalThis.TreeWalker = TreeWalker;

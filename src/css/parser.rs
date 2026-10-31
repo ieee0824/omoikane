@@ -848,6 +848,21 @@ impl Parser {
                         }));
                     }
 
+                    // The @position-try body is a descriptor list. Invalid
+                    // descriptors and nested rules are ignored independently
+                    // instead of invalidating the rule itself.
+                    if name.eq_ignore_ascii_case("position-try") {
+                        let raw_block = self.consume_raw_block()?;
+                        return Ok(Rule::At(AtRule {
+                            name,
+                            page_margin_box: None,
+                            prelude: render_tokens(&prelude_tokens).trim().to_string(),
+                            block: None,
+                            declarations: super::parse_style_attribute(&raw_block),
+                            anonymous_layer_id: None,
+                        }));
+                    }
+
                     let declarations = self.parse_declaration_list()?;
 
                     // Produce a structured FontFace rule when possible.
@@ -1712,6 +1727,10 @@ impl Parser {
                     | "will-change"
                     | "transition-duration"
                     | "transition-delay"
+                    | "anchor-name"
+                    | "anchor-scope"
+                    | "position-try-fallbacks"
+                    | "color-scheme"
             )
             || contains_var && matches!(name.as_str(), "font" | "transition"))
             && has_top_level_comma(&value_tokens)
@@ -2253,7 +2272,8 @@ fn parse_value_sequence_with_mode(
                     if ((name.eq_ignore_ascii_case("rgb")
                         || name.eq_ignore_ascii_case("rgba")
                         || name.eq_ignore_ascii_case("hsl")
-                        || name.eq_ignore_ascii_case("hsla"))
+                        || name.eq_ignore_ascii_case("hsla")
+                        || name.eq_ignore_ascii_case("anchor-size"))
                         || is_math_function)
                         && has_empty_top_level_comma_segment(&tokens[start..end])
                     {

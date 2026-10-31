@@ -130,6 +130,13 @@ const VALIDATED_PROPERTIES: &[&str] = &[
 ];
 
 pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
+    if matches!(
+        property,
+        "position-area" | "position-try-fallbacks" | "position-visibility"
+    ) || (!property.starts_with("--") && value.to_ascii_lowercase().contains("anchor-size("))
+    {
+        return crate::css::style::normalize_anchor_position_specified(property, value);
+    }
     if property == "paint-order" {
         return crate::css::style::normalize_paint_order_specified(value);
     }
