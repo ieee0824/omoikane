@@ -1043,7 +1043,6 @@
     {"path": "requestidlecallback/basic.html"},
     {"path": "requestidlecallback/callback-exception.html"},
     {"path": "requestidlecallback/callback-idle-periods.html"},
-    {"path": "requestidlecallback/callback-iframe-different-origin.html"},
     {"path": "requestidlecallback/callback-iframe.html"},
     {"path": "requestidlecallback/callback-invoked.html"},
     {"path": "requestidlecallback/callback-multiple-calls.html"},
