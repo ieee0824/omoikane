@@ -57,7 +57,10 @@ fn print_color_adjust_validates_inherits_and_reaches_print_pixels() {
         ..Default::default()
     };
     let mut resolver = StyleResolver::new();
-    resolver.set_media_type(MediaType::Print);
+    let mut environment = MediaEnvironment::default();
+    environment.media_type = MediaType::Print;
+    environment.print_economy = true;
+    resolver.set_media_environment(environment);
     let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
     let canvas = paint_layout(&layout, &mut resolver, viewport);
 

@@ -26,6 +26,7 @@ pub(super) fn paint_style(
     environment: &MediaEnvironment,
 ) -> Arc<ComputedStyle> {
     if environment.media_type != MediaType::Print
+        || !environment.print_economy
         || ordinary
             .get("print-color-adjust")
             .is_some_and(|value| value.css_text().eq_ignore_ascii_case("exact"))

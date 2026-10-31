@@ -11,6 +11,11 @@ pub struct MediaEnvironment {
     pub forced_color_palette: Option<ForcedColorPalette>,
     /// Output medium selected by the presentation host.
     pub media_type: MediaType,
+    /// Whether the print backend requests economical color adjustment.
+    ///
+    /// Disabled by default so print output remains faithful unless the host
+    /// explicitly chooses ink-saving adjustments.
+    pub print_economy: bool,
     /// Ordinary host color preference, retained while an active forced palette
     /// determines the effective scheme.
     pub color_scheme_dark: bool,
@@ -95,6 +100,7 @@ impl Default for MediaEnvironment {
             device_width: None,
             device_height: None,
             media_type: MediaType::Screen,
+            print_economy: false,
             color_scheme_dark: false,
             scan_available: false,
         }
