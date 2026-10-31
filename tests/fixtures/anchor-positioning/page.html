@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Anchor positioning comparison</title>
+<style>
+  * { box-sizing: border-box }
+  html, body { margin: 0; background: white }
+  #stage { position: relative; width: 420px; height: 260px; background: #eef4ff }
+  #anchor { position: absolute; left: 120px; top: 80px; width: 80px; height: 60px;
+            background: #1565c0; anchor-name: --card }
+  #below { position: absolute; position-anchor: --card; position-area: block-end;
+           width: 100px; height: 50px; background: #ffb300 }
+  #center { position: absolute; position-anchor: --card;
+            justify-self: anchor-center; align-self: anchor-center;
+            width: 30px; height: 20px; background: #d81b60 }
+</style>
+<div id="stage" data-probe>
+  <div id="anchor" data-probe></div>
+  <div id="below" data-probe></div>
+  <div id="center" data-probe></div>
+</div>
