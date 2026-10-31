@@ -105,7 +105,20 @@ impl JsRuntime {
         for document_id in documents {
             let mut method = "start";
             loop {
-                let more = match self.call_idle_period_hook(document_id, method) {
+                let turn = (method == "step").then(|| self.begin_task_turn());
+                let hook_result = self.call_idle_period_hook(document_id, method);
+                let jobs_result = if method == "step" {
+                    self.run_jobs_for_document(Some(document_id))
+                } else {
+                    Ok(())
+                };
+                if let Some(turn) = turn {
+                    self.end_task_turn(turn);
+                }
+                if let Err(error) = jobs_result {
+                    first_error.get_or_insert(error);
+                }
+                let more = match hook_result {
                     Ok(more) => more,
                     Err(error) => {
                         first_error.get_or_insert(error);
@@ -114,9 +127,6 @@ impl JsRuntime {
                 };
                 if method == "step" {
                     ran = true;
-                    if let Err(error) = self.run_jobs_for_document(Some(document_id)) {
-                        first_error.get_or_insert(error);
-                    }
                 }
                 if !more {
                     break;
