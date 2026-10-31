@@ -1,0 +1,6 @@
+{
+  "tests": [
+    { "path": "fetch/fetch-later/basic.https.window.js" },
+    { "path": "fetch/fetch-later/non-secure.window.js", "server": "wptserve-http" }
+  ]
+}

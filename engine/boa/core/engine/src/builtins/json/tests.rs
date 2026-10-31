@@ -15,6 +15,14 @@ fn json_sanity() {
 }
 
 #[test]
+fn json_parse_preserves_isolated_surrogate_escapes() {
+    run_test_actions([TestAction::assert_eq(
+        r#"JSON.parse('"\\uD83D"').charCodeAt(0)"#,
+        JsValue::new(0xD83D),
+    )]);
+}
+
+#[test]
 fn json_stringify_remove_undefined_values_from_objects() {
     run_test_actions([TestAction::assert_eq(
         r#"JSON.stringify({ aaa: undefined, bbb: 'ccc' })"#,

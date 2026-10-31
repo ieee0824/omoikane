@@ -35,6 +35,13 @@ cargo test --locked -p boa_parser -p boa_gc -p boa_engine
 cargo test --locked -p boa_engine --features baseline-jit jit:: -- --nocapture
 ```
 
+Boa's JSON grammar preflight uses `serde::de::IgnoredAny` rather than
+materializing a `serde_json::Value`. ECMA-404 permits isolated UTF-16 surrogate
+escapes, while Rust strings cannot represent them. The preflight therefore
+checks syntax only and leaves value construction to Boa's existing UTF-16 JS
+parser. A focused engine regression and the fixed-revision URLPattern dataset
+cover this local change; the imported origin manifest remains unchanged.
+
 When overriding `CARGO_TARGET_DIR`, use separate directories for the root and
 nested workspaces (for example, a worktree-specific `-root` and `-boa` suffix).
 Their independently locked dependency graphs can differ. Keep each workspace's

@@ -649,6 +649,27 @@ fn retired_realm_references_cannot_restart_network_timers_or_focus() {
 }
 
 #[test]
+fn removing_document_activates_fetch_later_request() {
+    let mut runtime = runtime();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"var frame = document.getElementById('f');
+                   frame.contentWindow.eval("parent.laterResult = fetchLater('http://127.0.0.1:9/later', {method:'POST', body:'payload'})");
+                   laterResult.activated"#,
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(false)
+    );
+    runtime.eval("frame.remove()").unwrap();
+    assert_eq!(
+        runtime.eval("laterResult.activated").unwrap().as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
 fn retained_document_groups_trace_new_wrappers_after_minor_collection() {
     let mut runtime = runtime();
     runtime.eval("var frame = document.getElementById('f'); var oldDoc = frame.contentDocument; void oldDoc.body; frame.remove();").unwrap();

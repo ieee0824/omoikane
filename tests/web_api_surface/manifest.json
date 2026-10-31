@@ -467,6 +467,13 @@
       "baseline_supported": true
     },
     {
+      "id": "network.background-fetch",
+      "area": "network",
+      "description": "Beacon and deferred Fetch APIs expose keepalive request contracts",
+      "probe": "typeof navigator.sendBeacon === 'function' && typeof fetchLater === 'function' && typeof FetchLaterResult === 'function' && (() => { const result = fetchLater('http://127.0.0.1:9/surface'); return result instanceof FetchLaterResult && result.activated === false; })()",
+      "baseline_supported": true
+    },
+    {
       "id": "network.fetch-request-semantics",
       "area": "network",
       "description": "Request preserves non-GET method, headers and body metadata",
@@ -632,6 +639,13 @@
       "area": "data",
       "description": "URL and URLSearchParams handle common query strings",
       "probe": "new URL('https://example.test/?a=1').searchParams.get('a') === '1'",
+      "baseline_supported": true
+    },
+    {
+      "id": "data.url-pattern",
+      "area": "data",
+      "description": "URLPattern exposes component matching and named groups",
+      "probe": "typeof URLPattern === 'function' && (() => { const pattern = new URLPattern('https://:sub.example.test/:page'); const result = pattern.exec('https://www.example.test/home'); return result !== null && result.hostname.groups.sub === 'www' && result.pathname.groups.page === 'home'; })()",
       "baseline_supported": true
     },
     {

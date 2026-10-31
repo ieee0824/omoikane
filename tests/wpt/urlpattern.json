@@ -1,0 +1,7 @@
+{
+  "tests": [
+    { "path": "urlpattern/urlpattern-constructor.any.js" },
+    { "path": "urlpattern/urlpattern-hasregexpgroups.any.js" },
+    { "path": "urlpattern/urlpattern.any.js" }
+  ]
+}

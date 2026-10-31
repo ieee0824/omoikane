@@ -6623,6 +6623,35 @@ fn implements_fetch_api() {
 }
 
 #[test]
+fn send_beacon_posts_body_through_background_queue() {
+    let listener = bind_loopback().unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = FixtureWorker::spawn(move || {
+        let mut stream = accept_with_timeout(&listener, ACCEPT_TIMEOUT).unwrap();
+        let request = String::from_utf8(read_http_request(&mut stream)).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+            .unwrap();
+        request
+    });
+
+    let mut runtime = runtime_at_document_url(&format!("http://{address}/"));
+    assert_eq!(
+        runtime
+            .eval(&format!(
+                "navigator.sendBeacon('http://{address}/beacon', 'payload')"
+            ))
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    runtime.run_jobs().unwrap();
+    let request = handle.join();
+    assert!(request.starts_with("POST /beacon HTTP/1.1\r\n"));
+    assert!(request.ends_with("\r\n\r\npayload"));
+}
+
+#[test]
 fn fetch_body_presence_distinguishes_empty_streams_from_null_bodies() {
     let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();

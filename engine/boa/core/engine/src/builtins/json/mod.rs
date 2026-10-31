@@ -92,7 +92,11 @@ impl Json {
 
         // 2. Parse ! StringToCodePoints(jsonString) as a JSON text as specified in ECMA-404.
         //    Throw a SyntaxError exception if it is not a valid JSON text as defined in that specification.
-        if let Err(e) = serde_json::from_str::<serde_json::Value>(&json_string) {
+        // `serde_json::Value` materializes strings as Rust UTF-8 and rejects
+        // isolated UTF-16 surrogate escapes. ECMA-404 permits those code units,
+        // and the JavaScript parser below retains them in `JsString`. Use serde
+        // only as a grammar validator and leave value construction to Boa.
+        if let Err(e) = serde_json::from_str::<serde::de::IgnoredAny>(&json_string) {
             return Err(JsNativeError::syntax().with_message(e.to_string()).into());
         }
 

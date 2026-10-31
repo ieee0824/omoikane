@@ -1,7 +1,9 @@
 //! Owned Fetch request inputs and response application at the runtime boundary.
 use super::*;
 mod async_fetch;
+mod background;
 pub(super) use async_fetch::FetchLoads;
+pub(super) use background::BackgroundLoads;
 
 pub(super) fn begin_native(
     this: &JsValue,
@@ -21,6 +23,19 @@ pub(super) fn cancel_native(
 
 pub(super) fn poll(runtime: &mut JsRuntime) {
     async_fetch::poll(runtime);
+    background::poll(runtime);
+}
+
+pub(super) fn background_native(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    background::native(this, args, context)
+}
+
+pub(super) fn activate_background_document(state: &mut HostState, document: usize) {
+    background::activate_document(state, document);
 }
 
 pub(super) struct Options {
@@ -33,6 +48,12 @@ pub(super) struct Options {
     redirect_mode: RedirectMode,
     timeout: Option<Duration>,
     csp_source: Option<security_reporting::CspSourceLocation>,
+}
+
+impl Options {
+    fn body_len(&self) -> usize {
+        self.body.as_ref().map_or(0, Vec::len)
+    }
 }
 
 pub(super) struct Prepared {

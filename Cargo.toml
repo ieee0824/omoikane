@@ -100,6 +100,9 @@ sys-locale = "0.3.2"
 winit = { version = "0.30.12", optional = true }
 # HTTP URL authority, IDNA, and request-target normalization use the WHATWG parser.
 url = "2.5.8"
+# URLPattern's component grammar and canonicalization are shared with Deno's
+# pure-Rust implementation; the JS binding below still owns Web IDL behavior.
+urlpattern = "0.6.0"
 # Pure Rust Public Suffix List for rejecting supercookies and computing schemeful sites.
 psl = "2.1.236"
 

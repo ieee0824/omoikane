@@ -45,6 +45,8 @@ collect_pattern "/close-watcher/" "/html/semantics/the-button-element/command-an
   "/html/semantics/popovers/resources/popover-utils.js"
 collect_pattern "/css/css-highlight-api/"
 collect_pattern "/requestidlecallback/" "/scheduler/" "/dom/abort/resources/"
+# Keepalive Fetch APIs (#1294).
+collect_pattern "/beacon/" "/fetch/fetch-later/"
 collect_pattern "/common/performance-timeline-utils.js" "/common/performance-timeline-utils.js.headers"
 collect_pattern "/paint-timing/" "/largest-contentful-paint/" "/server-timing/" "/longtask-timing/" "/event-timing/" "/layout-instability/" "/images/"
 collect_pattern \
@@ -393,7 +395,8 @@ collect_pattern \
   "/FileAPI/blob/Blob-bytes.any.js" \
   "/FileAPI/support/Blob.js" \
   "/url/url-statics-parse.any.js" \
-  "/url/urlsearchparams-size.any.js"
+  "/url/urlsearchparams-size.any.js" \
+  "/urlpattern/"
 collect_pattern "/css/selectors/is-where-error-recovery.html"
 collect_pattern "/css/selectors/child-indexed-pseudo-class.html" "/css/selectors/nth-last-child-invalid.html" "/css/selectors/invalidation/nth-child-whole-subtree.html"
 collect_pattern "/html/semantics/selectors/pseudo-classes/required-optional.html" "/html/semantics/selectors/pseudo-classes/required-optional-hidden.html" "/html/semantics/selectors/pseudo-classes/utils.js"
