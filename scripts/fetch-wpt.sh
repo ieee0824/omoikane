@@ -654,6 +654,8 @@ collect_pattern \
   "/css/css-view-transitions/view-transition-types-one-green-square-ref.html" \
   "/common/reftest-wait.js" \
   "/css/css-view-transitions/support/"
+# Canvas 2D drawing (#1292).
+collect_pattern "/html/canvas/element/" "/html/canvas/resources/" "/images/"
 # A pinned revision alone does not prove that newly requested WPT paths exist.
 if [[ "$current_revision" == "$revision" ]] &&
   diff -q <(printf '%s\n' "${patterns[@]}" | LC_ALL=C sort -u) \
