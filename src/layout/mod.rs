@@ -7244,7 +7244,10 @@ fn build_list_marker(
         _ => "disc".to_string(),
     };
 
-    if list_style_type == "none" {
+    let has_list_style_image = style
+        .get_by_id(PropertyId::ListStyleImage)
+        .is_some_and(|value| !value.css_text().eq_ignore_ascii_case("none"));
+    if list_style_type == "none" && !has_list_style_image {
         return None;
     }
 
