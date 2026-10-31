@@ -28611,6 +28611,94 @@ let omoikaneUserActivationState;
     get currentTime() { return 0; }
   }
 
+  class CSSUnitValue {
+    constructor(value, unit) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) throw new TypeError("CSSUnitValue requires a finite value");
+      this.value = number;
+      this.unit = String(unit);
+    }
+    toString() { return String(this.value) + (this.unit === "percent" ? "%" : this.unit); }
+  }
+
+  function timelineAxis(value) {
+    const axis = value === undefined ? "block" : String(value);
+    if (!["block", "inline", "x", "y"].includes(axis)) throw new TypeError("Invalid timeline axis");
+    return axis;
+  }
+
+  class ScrollTimeline extends AnimationTimeline {
+    constructor(options = {}) {
+      super();
+      if (options === null) options = {};
+      if (typeof options !== "object" && typeof options !== "function") {
+        throw new TypeError("ScrollTimeline options must be a dictionary");
+      }
+      const fallback = globalThis.document &&
+        (globalThis.document.scrollingElement || globalThis.document.documentElement);
+      const source = options.source === undefined ? fallback : options.source;
+      if (source !== null && !(source instanceof Element)) throw new TypeError("Invalid scroll source");
+      this.__source = source || null;
+      this.__axis = timelineAxis(options.axis);
+    }
+    get source() { return this.__source; }
+    get axis() { return this.__axis; }
+    get currentTime() {
+      const source = this.source;
+      if (!source) return null;
+      const horizontal = this.axis === "x" || this.axis === "inline";
+      const position = Number(horizontal ? source.scrollLeft : source.scrollTop) || 0;
+      const extent = Number(horizontal ? source.scrollWidth : source.scrollHeight) || 0;
+      const viewport = Number(horizontal ? source.clientWidth : source.clientHeight) || 0;
+      const range = extent - viewport;
+      return range > 0 ? new CSSUnitValue(position / range * 100, "percent") : null;
+    }
+  }
+
+  class ViewTimeline extends ScrollTimeline {
+    constructor(options) {
+      if (options === null || options === undefined ||
+          (typeof options !== "object" && typeof options !== "function")) {
+        throw new TypeError("ViewTimeline options must be a dictionary");
+      }
+      const subject = options.subject;
+      if (!(subject instanceof Element)) throw new TypeError("ViewTimeline requires a subject");
+      super({ source: options.source === undefined ? subject.parentElement : options.source,
+        axis: options.axis });
+      this.__subject = subject;
+    }
+    get subject() { return this.__subject; }
+    __geometry() {
+      const source = this.source, subject = this.subject;
+      if (!source || !subject || typeof subject.getBoundingClientRect !== "function") return null;
+      const rect = subject.getBoundingClientRect();
+      const sourceRect = source.getBoundingClientRect();
+      const horizontal = this.axis === "x" || this.axis === "inline";
+      const viewportStart = horizontal ? sourceRect.left : sourceRect.top;
+      const viewportSize = horizontal ? source.clientWidth : source.clientHeight;
+      const subjectStart = horizontal ? rect.left : rect.top;
+      const subjectSize = horizontal ? rect.width : rect.height;
+      return { viewportStart, viewportSize, subjectStart, subjectSize };
+    }
+    get startOffset() {
+      const geometry = this.__geometry();
+      return new CSSUnitValue(geometry ? geometry.subjectStart - geometry.viewportStart -
+        geometry.viewportSize : 0, "px");
+    }
+    get endOffset() {
+      const geometry = this.__geometry();
+      return new CSSUnitValue(geometry ? geometry.subjectStart - geometry.viewportStart +
+        geometry.subjectSize : 0, "px");
+    }
+    get currentTime() {
+      const geometry = this.__geometry();
+      if (!geometry || geometry.viewportSize <= 0 || geometry.subjectSize < 0) return null;
+      const progress = (geometry.viewportStart + geometry.viewportSize - geometry.subjectStart) /
+        (geometry.viewportSize + geometry.subjectSize);
+      return new CSSUnitValue(Math.min(1, Math.max(0, progress)) * 100, "percent");
+    }
+  }
+
   class Animation extends EventTarget {
     constructor(effect = null, timeline = undefined) {
       super();
@@ -28726,6 +28814,9 @@ let omoikaneUserActivationState;
   globalThis.KeyframeEffect = KeyframeEffect;
   globalThis.AnimationTimeline = AnimationTimeline;
   globalThis.DocumentTimeline = DocumentTimeline;
+  if (globalThis.CSSUnitValue === undefined) globalThis.CSSUnitValue = CSSUnitValue;
+  globalThis.ScrollTimeline = ScrollTimeline;
+  globalThis.ViewTimeline = ViewTimeline;
   globalThis.Animation = Animation;
   globalThis.CSSAnimation = CSSAnimation;
   globalThis.CSSTransition = CSSTransition;

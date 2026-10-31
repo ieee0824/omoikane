@@ -77,3 +77,30 @@ fn linear_easing_is_exposed_through_cssom_validation() {
         "[true,false,\"linear(0 0%, 0.5 25%, 0.5 75%, 1 100%)\"]"
     );
 }
+
+#[test]
+fn scroll_and_view_timelines_derive_progress_from_current_geometry() {
+    let mut runtime = runtime();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "(() => { const source = document.createElement('div');
+              const subject = document.getElementById('target'); source.appendChild(subject);
+              document.body.appendChild(source);
+              Object.defineProperties(source, {
+                scrollTop: { value: 25, writable: true },
+                scrollHeight: { value: 200 }, clientHeight: { value: 100 }
+              });
+              const scroll = new ScrollTimeline({ source, axis: 'block' });
+              const view = new ViewTimeline({ subject, axis: 'block' });
+              return JSON.stringify([
+                scroll instanceof AnimationTimeline, scroll.source === source, scroll.axis,
+                scroll.currentTime.value, scroll.currentTime.unit,
+                view instanceof ScrollTimeline, view.subject === subject,
+                view.startOffset.unit, view.endOffset.unit,
+                view.currentTime === null ? null : view.currentTime.unit
+              ]); })()",
+        ),
+        "[true,true,\"block\",25,\"percent\",true,true,\"px\",\"px\",\"percent\"]"
+    );
+}
