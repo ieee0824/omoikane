@@ -18,6 +18,7 @@ pub(crate) mod grid_properties;
 pub(crate) mod individual_transform;
 mod leaf_paint;
 mod page;
+mod print_color_adjust;
 mod property_id;
 mod sibling_functions;
 mod specified_math;
@@ -3904,6 +3905,7 @@ impl StyleResolver {
         let style = self
             .with_visited_paint_pass(|pass| pass.style(node))
             .unwrap_or_else(|| self.computed_style_shared(node));
+        let style = print_color_adjust::paint_style(style, &self.media_environment);
         forced_colors::paint_style(node, style, &self.media_environment)
     }
 
@@ -3933,6 +3935,9 @@ impl StyleResolver {
         viewport
             .properties
             .insert_from("forced-color-adjust", &root_style.properties);
+        viewport
+            .properties
+            .insert_from("print-color-adjust", &root_style.properties);
         let canvas_color = root_style
             .get("forced-color-adjust")
             .is_some_and(|value| value.css_text().eq_ignore_ascii_case("auto"))
@@ -3942,8 +3947,9 @@ impl StyleResolver {
                     .map(|palette| palette.canvas)
             })
             .flatten();
+        let viewport = print_color_adjust::paint_style(Arc::new(viewport), &self.media_environment);
         ViewportPaintStyle {
-            style: forced_colors::paint_style(root, Arc::new(viewport), &self.media_environment),
+            style: forced_colors::paint_style(root, viewport, &self.media_environment),
             canvas_color,
         }
     }
@@ -3956,7 +3962,10 @@ impl StyleResolver {
         let style = self
             .with_visited_paint_pass(|pass| pass.pseudo_style(node, pseudo))
             .unwrap_or_else(|| self.computed_pseudo_style_shared(node, pseudo));
-        style.map(|style| forced_colors::paint_style(node, style, &self.media_environment))
+        style.map(|style| {
+            let style = print_color_adjust::paint_style(style, &self.media_environment);
+            forced_colors::paint_style(node, style, &self.media_environment)
+        })
     }
 
     /// Resolves computed style for a pseudo-element attached to `node`.
@@ -6892,6 +6901,9 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         };
     }
     if let Some(validation) = forced_colors::validate(name, value) {
+        return validation;
+    }
+    if let Some(validation) = print_color_adjust::validate(name, value) {
         return validation;
     }
     if let Some(validation) = will_change::validate(name, value) {
@@ -14437,6 +14449,8 @@ fn canonical_property_name(name: &str) -> &str {
         "mask-mode"
     } else if name.eq_ignore_ascii_case("-webkit-mask-composite") {
         "mask-composite"
+    } else if name.eq_ignore_ascii_case("-webkit-print-color-adjust") {
+        "print-color-adjust"
     } else {
         name
     }
@@ -16910,6 +16924,10 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     // present lets a dropped/absent `cursor` declaration serialize as `auto`
     // in getComputedStyle (Acid3 test 47).
     (PropertyId::ForcedColorAdjust, InitialValue::Keyword("auto")),
+    (
+        PropertyId::PrintColorAdjust,
+        InitialValue::Keyword("economy"),
+    ),
     (PropertyId::WillChange, InitialValue::Keyword("auto")),
     (PropertyId::Cursor, InitialValue::Keyword("auto")),
     (PropertyId::PointerEvents, InitialValue::Keyword("auto")),
@@ -17327,6 +17345,7 @@ const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
     PropertyId::CaretColor,
     PropertyId::ColorScheme,
     PropertyId::ForcedColorAdjust,
+    PropertyId::PrintColorAdjust,
     PropertyId::BorderCollapse,
     PropertyId::BorderSpacing,
     PropertyId::Color,

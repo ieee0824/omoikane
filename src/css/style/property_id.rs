@@ -315,6 +315,7 @@ define_properties! {
         "perspective-origin" => PerspectiveOrigin,
         "pointer-events" => PointerEvents,
         "position" => Position,
+        "print-color-adjust" => PrintColorAdjust,
         "quotes" => Quotes,
         "resize" => Resize,
         "right" => Right,
@@ -401,6 +402,7 @@ define_properties! {
     shorthand_or_alias: [
         "-webkit-mask",
         "-webkit-mask-position",
+        "-webkit-print-color-adjust",
         "all",
         "animation",
         "background",
