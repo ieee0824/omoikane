@@ -1,0 +1,14 @@
+{
+  "tests": [
+    { "path": "css/css-viewport/computedStyle-zoom.html" },
+    { "path": "css/css-viewport/zoom/parsing/zoom-valid.html" },
+    { "path": "css/css-viewport/zoom/parsing/zoom-computed.html" },
+    { "path": "css/css-color-adjust/parsing/print-color-adjust.html" },
+    { "path": "css/css-forced-color-adjust/parsing/forced-color-adjust-valid.html" },
+    { "path": "css/css-forced-color-adjust/parsing/forced-color-adjust-invalid.html" },
+    { "path": "css/css-forced-color-adjust/parsing/forced-color-adjust-computed.html" },
+    { "path": "css/css-will-change/parsing/will-change-valid.html" },
+    { "path": "css/css-will-change/parsing/will-change-invalid.html" },
+    { "path": "css/css-will-change/parsing/will-change-computed.html" }
+  ]
+}

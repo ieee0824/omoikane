@@ -1,9 +1,85 @@
 //! Used colors must follow the same forced-colors environment as media queries.
-use omoikane::css::{MediaEnvironment, StyleResolver};
+use omoikane::css::{ComputedValue, MediaEnvironment, MediaType, StyleResolver};
 use omoikane::dom::Node;
 use omoikane::html::TreeBuilder;
 use omoikane::layout::{Rect, layout_tree};
 use omoikane::paint::{Color, paint_layout};
+
+#[test]
+fn print_color_adjust_validates_inherits_and_reaches_print_pixels() {
+    let mut runtime = omoikane::js::JsRuntime::new().unwrap();
+    for value in [
+        "economy",
+        "exact",
+        "inherit",
+        "initial",
+        "unset",
+        "revert",
+        "revert-layer",
+    ] {
+        assert_eq!(
+            runtime
+                .eval(&format!("CSS.supports('print-color-adjust', {value:?})"))
+                .unwrap()
+                .as_boolean(),
+            Some(true),
+            "{value}"
+        );
+    }
+    for value in ["", "auto", "economy exact", "1", "exact,economy"] {
+        assert_eq!(
+            runtime
+                .eval(&format!("CSS.supports('print-color-adjust', {value:?})"))
+                .unwrap()
+                .as_boolean(),
+            Some(false),
+            "{value}"
+        );
+    }
+    assert_eq!(
+        runtime
+            .eval("CSS.supports('-webkit-print-color-adjust', 'exact') && CSS.supports('color-adjust', 'economy')")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+
+    let document = TreeBuilder::parse(
+        "<div style='print-color-adjust:exact'>\
+           <div id='inherited' style='position:absolute;left:20px;top:0;width:20px;height:20px;background:blue'></div>\
+         </div>\
+         <div id='economy' style='position:absolute;left:0;top:0;width:20px;height:20px;background:red'></div>",
+    )
+    .document();
+    let viewport = Rect {
+        width: 60.0,
+        height: 40.0,
+        ..Default::default()
+    };
+    let mut resolver = StyleResolver::new();
+    let mut environment = MediaEnvironment::default();
+    environment.media_type = MediaType::Print;
+    environment.print_economy = true;
+    resolver.set_media_environment(environment);
+    let layout = layout_tree(&document, &mut resolver, viewport).unwrap();
+    let canvas = paint_layout(&layout, &mut resolver, viewport);
+
+    assert_eq!(canvas.pixel(10, 10), Some(Color::rgb(255, 255, 255)));
+    assert_eq!(canvas.pixel(30, 10), Some(Color::rgb(0, 0, 255)));
+
+    let mut pending = vec![document];
+    while let Some(node) = pending.pop() {
+        pending.extend(node.child_nodes());
+        if node.get_attribute("id").as_deref() == Some("inherited") {
+            assert_eq!(
+                resolver.computed_style(&node).get("print-color-adjust"),
+                Some(&ComputedValue::Keyword("exact".into()))
+            );
+            return;
+        }
+    }
+    panic!("inherited test element not found");
+}
 
 #[test]
 fn forced_colors_replace_used_backgrounds_and_respect_opt_out() {

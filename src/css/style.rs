@@ -18,6 +18,7 @@ pub(crate) mod grid_properties;
 pub(crate) mod individual_transform;
 mod leaf_paint;
 mod page;
+mod print_color_adjust;
 mod property_id;
 mod sibling_functions;
 mod specified_math;
@@ -26,6 +27,7 @@ pub(crate) mod text_shadow;
 mod tree_mutation_invalidation;
 mod typed_math;
 mod will_change;
+mod zoom;
 
 pub use page::{
     PageBoxGeometry, PageMarginContent, PageSelectorContext, PageSide, ResolvedPageStyle,
@@ -159,6 +161,30 @@ pub enum NineSliceComputedValue {
 }
 
 impl NineSliceComputedValue {
+    fn scaled_absolute(&self, zoom: f32) -> Self {
+        let scale = |values: &[NineSliceLength]| {
+            values
+                .iter()
+                .map(|value| match value {
+                    NineSliceLength::Px(value) => NineSliceLength::Px(value * zoom),
+                    NineSliceLength::Math(value) => {
+                        NineSliceLength::Math(value.scaled_absolute(zoom))
+                    }
+                    _ => value.clone(),
+                })
+                .collect()
+        };
+        match self {
+            Self::Slice { values, fill } => Self::Slice {
+                values: scale(values),
+                fill: *fill,
+            },
+            Self::Width(values) => Self::Width(scale(values)),
+            Self::Outset(values) => Self::Outset(scale(values)),
+            Self::Repeat(values) => Self::Repeat(values.clone()),
+        }
+    }
+
     fn css_text(&self) -> String {
         match self {
             Self::Slice { values, fill } => {
@@ -230,6 +256,58 @@ impl ComputedValue {
             Self::Position { x, y } => format!("{} {}", x.css_text(), y.css_text()),
             Self::NineSlice(value) => value.css_text(),
         }
+    }
+}
+
+fn zoom_keyword_lengths(text: &str, zoom: f32) -> String {
+    fn scale(value: &Value, zoom: f32) -> Value {
+        match value {
+            Value::Length(number, unit) if is_css_length_unit(unit) => {
+                Value::Length(number * zoom, unit.clone())
+            }
+            Value::Function { name, arguments } => Value::Function {
+                name: name.clone(),
+                arguments: arguments.iter().map(|value| scale(value, zoom)).collect(),
+            },
+            Value::List(values) => {
+                Value::List(values.iter().map(|value| scale(value, zoom)).collect())
+            }
+            Value::CommaList(values) => {
+                Value::CommaList(values.iter().map(|value| scale(value, zoom)).collect())
+            }
+            _ => value.clone(),
+        }
+    }
+
+    let declarations = super::parse_style_attribute(&format!("--zoom-used-value:{text}"));
+    declarations
+        .first()
+        .map(|declaration| render_value(&scale(&declaration.value, zoom)))
+        .unwrap_or_else(|| text.to_string())
+}
+
+fn zoom_computed_value(value: &ComputedValue, zoom: f32) -> ComputedValue {
+    match value {
+        ComputedValue::Keyword(value) => ComputedValue::Keyword(zoom_keyword_lengths(value, zoom)),
+        ComputedValue::Px(value) => ComputedValue::Px(value * zoom),
+        ComputedValue::LengthPercentage(value) => {
+            ComputedValue::LengthPercentage(value.scaled_absolute(zoom))
+        }
+        ComputedValue::TextIndent {
+            value,
+            hanging,
+            each_line,
+        } => ComputedValue::TextIndent {
+            value: Box::new(zoom_computed_value(value, zoom)),
+            hanging: *hanging,
+            each_line: *each_line,
+        },
+        ComputedValue::Position { x, y } => ComputedValue::Position {
+            x: Box::new(zoom_computed_value(x, zoom)),
+            y: Box::new(zoom_computed_value(y, zoom)),
+        },
+        ComputedValue::NineSlice(value) => ComputedValue::NineSlice(value.scaled_absolute(zoom)),
+        _ => value.clone(),
     }
 }
 
@@ -333,6 +411,71 @@ pub enum LengthPercentageMath {
 }
 
 impl LengthPercentageMath {
+    fn scaled_absolute(&self, zoom: f32) -> Self {
+        match self {
+            Self::Linear { px, percentage } => Self::Linear {
+                px: px * zoom,
+                percentage: *percentage,
+            },
+            Self::Sum(values) => Self::Sum(
+                values
+                    .iter()
+                    .map(|value| value.scaled_absolute(zoom))
+                    .collect(),
+            ),
+            Self::Scale { factor, value } => Self::Scale {
+                factor: *factor,
+                value: Box::new(value.scaled_absolute(zoom)),
+            },
+            Self::Min(values) => Self::Min(
+                values
+                    .iter()
+                    .map(|value| value.scaled_absolute(zoom))
+                    .collect(),
+            ),
+            Self::Max(values) => Self::Max(
+                values
+                    .iter()
+                    .map(|value| value.scaled_absolute(zoom))
+                    .collect(),
+            ),
+            Self::Abs(value) => Self::Abs(Box::new(value.scaled_absolute(zoom))),
+            Self::Hypot(values) => Self::Hypot(
+                values
+                    .iter()
+                    .map(|value| value.scaled_absolute(zoom))
+                    .collect(),
+            ),
+            Self::Modulo {
+                dividend,
+                divisor,
+                remainder,
+            } => Self::Modulo {
+                dividend: Box::new(dividend.scaled_absolute(zoom)),
+                divisor: Box::new(divisor.scaled_absolute(zoom)),
+                remainder: *remainder,
+            },
+            Self::Round {
+                strategy,
+                value,
+                step,
+            } => Self::Round {
+                strategy: *strategy,
+                value: Box::new(value.scaled_absolute(zoom)),
+                step: Box::new(step.scaled_absolute(zoom)),
+            },
+            Self::Clamp {
+                minimum,
+                preferred,
+                maximum,
+            } => Self::Clamp {
+                minimum: Box::new(minimum.scaled_absolute(zoom)),
+                preferred: Box::new(preferred.scaled_absolute(zoom)),
+                maximum: Box::new(maximum.scaled_absolute(zoom)),
+            },
+        }
+    }
+
     /// Resolves this expression using `basis` as the value represented by
     /// `100%`.
     #[must_use]
@@ -617,6 +760,8 @@ pub(crate) struct PropagatedTextDecoration {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ComputedStyle {
     properties: PropertyMap,
+    /// Product of this element's computed `zoom` and its flat-tree ancestors.
+    effective_zoom: f32,
     /// Resolved component values for properties whose used value cannot be
     /// recovered from their CSSOM serialization alone (for example generated
     /// content containing strings and counter functions).
@@ -644,6 +789,43 @@ pub(crate) struct ViewportPaintStyle {
 }
 
 impl ComputedStyle {
+    /// Effective CSS zoom used when resolving lengths for layout and paint.
+    pub(crate) fn effective_zoom(&self) -> f32 {
+        if self.effective_zoom > 0.0 {
+            self.effective_zoom
+        } else {
+            1.0
+        }
+    }
+
+    /// Returns a private used-value snapshot with absolute lengths zoomed.
+    pub(crate) fn zoomed_used_values(&self) -> Self {
+        let effective_zoom = self.effective_zoom();
+        if effective_zoom == 1.0 {
+            return self.clone();
+        }
+        let mut used = self.clone();
+        let replacements = used
+            .properties
+            .iter()
+            .map(|(name, value)| (name.to_string(), zoom_computed_value(value, effective_zoom)))
+            .collect::<Vec<_>>();
+        for (name, value) in replacements {
+            used.properties.insert(&name, value);
+        }
+        used
+    }
+
+    /// Projects absolute lengths for layout and paint while preserving the
+    /// cached snapshot when zoom does not change any used values.
+    fn zoomed_used_values_shared(style: Arc<Self>) -> Arc<Self> {
+        if style.effective_zoom() == 1.0 {
+            style
+        } else {
+            Arc::new(style.zoomed_used_values())
+        }
+    }
+
     pub(crate) fn shaping_options(&self) -> &Arc<crate::font::ShapingOptions> {
         &self.shaping_options
     }
@@ -1085,6 +1267,8 @@ pub struct StyleResolver {
     /// Output medium used for `@media` evaluation.
     media_type: MediaType,
     media_environment: MediaEnvironment,
+    /// Layout-only projection flag; ordinary computed style remains unscaled.
+    zoomed_used_values: bool,
     /// Cache of parsed media query lists keyed by the normalized (trimmed) prelude string.
     ///
     /// Avoids re-parsing the same `@media` prelude string for every node that
@@ -3805,7 +3989,22 @@ impl StyleResolver {
 
     /// Resolves computed style for `node`, using the cache when possible.
     pub fn computed_style(&mut self, node: &NodeHandle) -> ComputedStyle {
-        self.computed_style_shared(node).as_ref().clone()
+        let style = self.computed_style_shared(node);
+        if self.zoomed_used_values {
+            style.zoomed_used_values()
+        } else {
+            style.as_ref().clone()
+        }
+    }
+
+    /// Runs one layout operation with absolute computed lengths projected to
+    /// their zoomed used values. Nested calls restore the previous mode.
+    pub(crate) fn with_zoomed_used_values<T>(&mut self, action: impl FnOnce(&mut Self) -> T) -> T {
+        let previous = self.zoomed_used_values;
+        self.zoomed_used_values = true;
+        let result = action(self);
+        self.zoomed_used_values = previous;
+        result
     }
 
     /// Shares an immutable cached style with layout and paint readers. Invalidation
@@ -3904,7 +4103,12 @@ impl StyleResolver {
         let style = self
             .with_visited_paint_pass(|pass| pass.style(node))
             .unwrap_or_else(|| self.computed_style_shared(node));
-        forced_colors::paint_style(node, style, &self.media_environment)
+        let style = print_color_adjust::paint_style(style, &self.media_environment);
+        ComputedStyle::zoomed_used_values_shared(forced_colors::paint_style(
+            node,
+            style,
+            &self.media_environment,
+        ))
     }
 
     /// Propagates background values without propagating the body's opt-out.
@@ -3933,6 +4137,9 @@ impl StyleResolver {
         viewport
             .properties
             .insert_from("forced-color-adjust", &root_style.properties);
+        viewport
+            .properties
+            .insert_from("print-color-adjust", &root_style.properties);
         let canvas_color = root_style
             .get("forced-color-adjust")
             .is_some_and(|value| value.css_text().eq_ignore_ascii_case("auto"))
@@ -3942,8 +4149,13 @@ impl StyleResolver {
                     .map(|palette| palette.canvas)
             })
             .flatten();
+        let viewport = print_color_adjust::paint_style(Arc::new(viewport), &self.media_environment);
         ViewportPaintStyle {
-            style: forced_colors::paint_style(root, Arc::new(viewport), &self.media_environment),
+            style: ComputedStyle::zoomed_used_values_shared(forced_colors::paint_style(
+                root,
+                viewport,
+                &self.media_environment,
+            )),
             canvas_color,
         }
     }
@@ -3956,7 +4168,14 @@ impl StyleResolver {
         let style = self
             .with_visited_paint_pass(|pass| pass.pseudo_style(node, pseudo))
             .unwrap_or_else(|| self.computed_pseudo_style_shared(node, pseudo));
-        style.map(|style| forced_colors::paint_style(node, style, &self.media_environment))
+        style.map(|style| {
+            let style = print_color_adjust::paint_style(style, &self.media_environment);
+            ComputedStyle::zoomed_used_values_shared(forced_colors::paint_style(
+                node,
+                style,
+                &self.media_environment,
+            ))
+        })
     }
 
     /// Resolves computed style for a pseudo-element attached to `node`.
@@ -3966,7 +4185,13 @@ impl StyleResolver {
         pseudo: PseudoElement,
     ) -> Option<ComputedStyle> {
         self.computed_pseudo_style_shared(node, pseudo)
-            .map(|style| style.as_ref().clone())
+            .map(|style| {
+                if self.zoomed_used_values {
+                    style.zoomed_used_values()
+                } else {
+                    style.as_ref().clone()
+                }
+            })
     }
 
     /// Shares an immutable cached pseudo style without cloning its property maps.
@@ -4644,8 +4869,15 @@ impl StyleResolver {
         let font_synthesis = computed_font_synthesis(&properties);
         let font_palette =
             Arc::new(self.computed_font_palette(&properties, font_family_scope_root));
+        let own_zoom = match properties.get(&PropertyId::Zoom) {
+            Some(ComputedValue::Number(value)) if *value > 0.0 => *value,
+            _ => 1.0,
+        };
+        let effective_zoom =
+            parent_style.map_or(own_zoom, |parent| parent.effective_zoom() * own_zoom);
         ComputedStyle {
             properties,
+            effective_zoom,
             component_values,
             transform_animation_context,
             custom_properties,
@@ -6894,7 +7126,13 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     if let Some(validation) = forced_colors::validate(name, value) {
         return validation;
     }
+    if let Some(validation) = print_color_adjust::validate(name, value) {
+        return validation;
+    }
     if let Some(validation) = will_change::validate(name, value) {
+        return validation;
+    }
+    if let Some(validation) = zoom::validate(name, value) {
         return validation;
     }
     if let Some(validation) = individual_transform::validate(name, value) {
@@ -14437,6 +14675,10 @@ fn canonical_property_name(name: &str) -> &str {
         "mask-mode"
     } else if name.eq_ignore_ascii_case("-webkit-mask-composite") {
         "mask-composite"
+    } else if name.eq_ignore_ascii_case("-webkit-print-color-adjust")
+        || name.eq_ignore_ascii_case("color-adjust")
+    {
+        "print-color-adjust"
     } else {
         name
     }
@@ -16910,7 +17152,12 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     // present lets a dropped/absent `cursor` declaration serialize as `auto`
     // in getComputedStyle (Acid3 test 47).
     (PropertyId::ForcedColorAdjust, InitialValue::Keyword("auto")),
+    (
+        PropertyId::PrintColorAdjust,
+        InitialValue::Keyword("economy"),
+    ),
     (PropertyId::WillChange, InitialValue::Keyword("auto")),
+    (PropertyId::Zoom, InitialValue::Number(1.0)),
     (PropertyId::Cursor, InitialValue::Keyword("auto")),
     (PropertyId::PointerEvents, InitialValue::Keyword("auto")),
     (PropertyId::ScrollBehavior, InitialValue::Keyword("auto")),
@@ -17327,6 +17574,7 @@ const INHERITED_PROPERTY_IDS: &[PropertyId] = &[
     PropertyId::CaretColor,
     PropertyId::ColorScheme,
     PropertyId::ForcedColorAdjust,
+    PropertyId::PrintColorAdjust,
     PropertyId::BorderCollapse,
     PropertyId::BorderSpacing,
     PropertyId::Color,

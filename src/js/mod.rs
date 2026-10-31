@@ -19785,6 +19785,29 @@ impl LayoutMetrics {
                 .join(","),
         )
     }
+
+    /// Converts the CSSOM geometry APIs which deliberately ignore `zoom`
+    /// back into unzoomed CSS pixels. Client rectangles remain in the painted
+    /// coordinate space, as required by CSS Viewport.
+    fn unzoom_non_client_rect_geometry(&mut self, effective_zoom: f32) {
+        if effective_zoom == 1.0 || effective_zoom <= 0.0 || !effective_zoom.is_finite() {
+            return;
+        }
+        self.content_x /= effective_zoom;
+        self.content_y /= effective_zoom;
+        self.content_width /= effective_zoom;
+        self.content_height /= effective_zoom;
+        self.offset_width /= effective_zoom;
+        self.offset_height /= effective_zoom;
+        self.offset_top /= effective_zoom;
+        self.offset_left /= effective_zoom;
+        self.client_width /= effective_zoom;
+        self.client_height /= effective_zoom;
+        self.client_top /= effective_zoom;
+        self.client_left /= effective_zoom;
+        self.scroll_width /= effective_zoom;
+        self.scroll_height /= effective_zoom;
+    }
 }
 
 fn rect_to_json(rect: &Rect) -> String {
@@ -20033,6 +20056,34 @@ struct LayoutUsedSize {
     border_width: f32,
     border_height: f32,
     edges: Option<(crate::layout::EdgeSizes, crate::layout::EdgeSizes)>,
+}
+
+impl LayoutUsedSize {
+    fn unzoomed(mut self, effective_zoom: f32) -> Self {
+        if effective_zoom == 1.0 || effective_zoom <= 0.0 || !effective_zoom.is_finite() {
+            return self;
+        }
+        self.content_width /= effective_zoom;
+        self.content_height /= effective_zoom;
+        self.border_width /= effective_zoom;
+        self.border_height /= effective_zoom;
+        self.edges = self.edges.map(|(mut margin, mut padding)| {
+            for value in [
+                &mut margin.top,
+                &mut margin.right,
+                &mut margin.bottom,
+                &mut margin.left,
+                &mut padding.top,
+                &mut padding.right,
+                &mut padding.bottom,
+                &mut padding.left,
+            ] {
+                *value /= effective_zoom;
+            }
+            (margin, padding)
+        });
+        self
+    }
 }
 
 /// Searches untransformed geometry, retaining only the first eligible fragment.
@@ -20441,6 +20492,7 @@ fn resolve_cssom_style(
         let used_size = resolved_layout_size(state, document, node, pseudo);
         let mut style = compute(state)?;
         if let Some(used_size) = used_size {
+            let used_size = used_size.unzoomed(style.effective_zoom());
             let root_font_size = document_style_resolver(state, document)?.root_font_size();
             let font_size = match style.get("font-size") {
                 Some(ComputedValue::Px(value)) => *value,
@@ -21205,6 +21257,13 @@ fn layout_metrics_native(
                     },
                 )
             };
+            let effective_zoom = document
+                .as_ref()
+                .and_then(|document| state.document_styles.get_mut(&document.identity()))
+                .and_then(|entry| entry.resolver.as_mut())
+                .map(|resolver| resolver.computed_style_shared(&node).effective_zoom())
+                .unwrap_or(1.0);
+            metrics.unzoom_non_client_rect_geometry(effective_zoom);
             if is_root_element && let Some(viewport) = viewport {
                 metrics.client_width = viewport.width;
                 metrics.client_height = viewport.height;

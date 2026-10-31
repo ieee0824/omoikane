@@ -2400,7 +2400,9 @@ pub(crate) fn layout_tree_with_content_visibility(
     input: ContentVisibilityLayoutInput,
 ) -> (Option<LayoutBox>, ContentVisibilityLayoutReport) {
     with_image_selection_environment(containing_block.width, containing_block.height, 1.0, || {
-        layout_tree_with_content_visibility_inner(node, resolver, containing_block, input)
+        resolver.with_zoomed_used_values(|resolver| {
+            layout_tree_with_content_visibility_inner(node, resolver, containing_block, input)
+        })
     })
 }
 
@@ -7244,7 +7246,10 @@ fn build_list_marker(
         _ => "disc".to_string(),
     };
 
-    if list_style_type == "none" {
+    let has_list_style_image = style
+        .get_by_id(PropertyId::ListStyleImage)
+        .is_some_and(|value| !value.css_text().eq_ignore_ascii_case("none"));
+    if list_style_type == "none" && !has_list_style_image {
         return None;
     }
 

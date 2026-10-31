@@ -8984,6 +8984,31 @@ fn linear_gradient_three_color_stops() {
 
 // ── paint_list_marker_placeholder tests ─────────────────────────────────────
 
+#[test]
+fn list_style_image_replaces_marker_text_and_paints_with_intrinsic_size() {
+    let red_pixel = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAEElEQVR4AQEFAPr%2FAP8AAP8FAAH%2F+lyI0QAAAABJRU5ErkJggg==";
+    let document = TreeBuilder::parse(&format!(
+        "<style>html,body,ul{{margin:0;padding:0}}li{{display:list-item;list-style-position:inside;list-style-type:none;list-style-image:url({red_pixel})}}</style><ul><li>x</li></ul>"
+    ))
+    .document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 30.0,
+            height: 20.0,
+        },
+    )
+    .unwrap();
+
+    let marker = canvas.pixel(0, 0).expect("marker pixel");
+    assert!(
+        marker.r > 200 && marker.g < 40 && marker.b < 40 && marker.a > 200,
+        "list marker image should paint its decoded red pixel, got {marker:?}"
+    );
+}
+
 /// Bullet markers (disc/circle/square) should render as a single filled square.
 /// Uses a fixed 30x30 canvas with font_size=20.0. Checks that at least one pixel
 /// is filled and that the total filled area is much smaller than a text run would be.
