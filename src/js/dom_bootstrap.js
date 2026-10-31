@@ -25542,20 +25542,32 @@ let omoikaneUserActivationState;
   }
   if (globalThis.URL === undefined) {
     class URLSearchParams {
-      constructor(init = "") {
+      constructor(init = "", update = null) {
         this._entries = [];
+        this._update = typeof update === "function" ? update : null;
+        this._replace(init);
+      }
+      _replace(init) {
+        this._entries.length = 0;
         const source = String(init).replace(/^\?/, "");
         if (source) for (const pair of source.split("&")) {
           const separator = pair.indexOf("=");
           const key = separator < 0 ? pair : pair.slice(0, separator);
           const value = separator < 0 ? "" : pair.slice(separator + 1);
-          this.append(decodeURIComponent(key.replace(/\+/g, " ")), decodeURIComponent(value.replace(/\+/g, " ")));
+          this._entries.push([decodeURIComponent(key.replace(/\+/g, " ")), decodeURIComponent(value.replace(/\+/g, " "))]);
         }
       }
-      append(name, value) { this._entries.push([String(name), String(value)]); }
+      _changed() { if (this._update) this._update(this.toString()); }
+      append(name, value) { this._entries.push([String(name), String(value)]); this._changed(); }
       set(name, value) {
-        this.delete(name);
-        this.append(name, value);
+        const key = String(name), replacement = String(value);
+        const first = this._entries.findIndex(entry => entry[0] === key);
+        if (first < 0) this._entries.push([key, replacement]);
+        else {
+          this._entries[first][1] = replacement;
+          this._entries = this._entries.filter((entry, index) => entry[0] !== key || index === first);
+        }
+        this._changed();
       }
       get(name) {
         const found = this._entries.find(entry => entry[0] === String(name));
@@ -25563,7 +25575,7 @@ let omoikaneUserActivationState;
       }
       getAll(name) { return this._entries.filter(entry => entry[0] === String(name)).map(entry => entry[1]); }
       has(name) { return this._entries.some(entry => entry[0] === String(name)); }
-      delete(name) { this._entries = this._entries.filter(entry => entry[0] !== String(name)); }
+      delete(name) { this._entries = this._entries.filter(entry => entry[0] !== String(name)); this._changed(); }
       get size() { return this._entries.length; }
       *entries() { yield* this._entries; }
       *keys() { for (const entry of this._entries) yield entry[0]; }
@@ -25583,12 +25595,20 @@ let omoikaneUserActivationState;
         this.password = parsed.password;
         this.port = parsed.port;
         this.pathname = parsed.pathname;
-        this.search = parsed.search;
+        this._search = parsed.search;
         this.hash = parsed.hash;
         this.origin = parsed.origin;
-        this.searchParams = new URLSearchParams(this.search);
-        this.href = parsed.href;
+        this.searchParams = new URLSearchParams(this._search, query => {
+          this._search = query ? "?" + query : "";
+        });
       }
+      get search() { return this._search; }
+      set search(value) {
+        const text = String(value);
+        this._search = text === "" || text === "?" ? "" : (text.startsWith("?") ? text : "?" + text);
+        if (this.searchParams) this.searchParams._replace(this._search);
+      }
+      get href() { return this.toString(); }
       toString() {
         const credentials = this.username || this.password
           ? this.username + (this.password ? ":" + this.password : "") + "@"
@@ -25601,6 +25621,7 @@ let omoikaneUserActivationState;
       static parse(input, base) {
         const convertedInput = String(input);
         const convertedBase = base === undefined ? undefined : String(base);
+        if (convertedBase === undefined && !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(convertedInput)) return null;
         try { return new URL(convertedInput, convertedBase); }
         catch (_) { return null; }
       }
@@ -28122,6 +28143,7 @@ let omoikaneUserActivationState;
     [Symbol.asyncIterator]() { return this.values(); }
     static from(iterable) {
       if (iterable === null || iterable === undefined) throw new TypeError("ReadableStream.from requires an iterable");
+      if (typeof iterable === "string") throw new TypeError("ReadableStream.from does not accept strings");
       const asyncMethod = iterable[Symbol.asyncIterator];
       const syncMethod = iterable[Symbol.iterator];
       const iterator = typeof asyncMethod === "function"
@@ -28131,11 +28153,16 @@ let omoikaneUserActivationState;
       return new ReadableStream({
         async pull(controller) {
           const result = await iterator.next();
+          if (result === null || typeof result !== "object") throw new TypeError("Iterator result must be an object");
           if (result.done) controller.close();
-          else controller.enqueue(result.value);
+          else controller.enqueue(await result.value);
         },
-        cancel(reason) {
-          return typeof iterator.return === "function" ? iterator.return(reason) : undefined;
+        async cancel(reason) {
+          const returnMethod = iterator.return;
+          if (returnMethod === undefined) return;
+          if (typeof returnMethod !== "function") throw new TypeError("Iterator return must be callable");
+          const result = await returnMethod.call(iterator, reason);
+          if (result === null || typeof result !== "object") throw new TypeError("Iterator return result must be an object");
         },
       });
     }

@@ -45,12 +45,13 @@ fn url_parse_and_search_params_size_follow_current_state() {
             r#"(() => {
               const parsed = URL.parse('/path?a=1&a=2', 'https://example.test/base');
               const params = parsed.searchParams;
+              const initialHref = parsed.href;
               const before = params.size;
               params.append('b', '3');
               const afterAppend = params.size;
               params.delete('a');
               return JSON.stringify([
-                parsed instanceof URL, parsed.href,
+                parsed instanceof URL, initialHref,
                 before, afterAppend, params.size,
                 URL.parse('http://[invalid') === null,
                 URL.parse.call(null, '/ok', 'https://example.test').href
