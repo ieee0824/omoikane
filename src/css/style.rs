@@ -8183,15 +8183,21 @@ fn valid_position_try_fallbacks(value: &Value, css_wide: impl Fn(&Value) -> bool
             let Some(Value::Keyword(first)) = parts.first() else {
                 return false;
             };
+            let tactic = |value: &str| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "flip-block" | "flip-inline" | "flip-start" | "flip-x" | "flip-y"
+                )
+            };
+            if parts.len() == 1 && tactic(first) {
+                return true;
+            }
             let named = first.starts_with("--") && first.len() > 2;
             let area = valid_position_area(&parts[0], |_| false);
             (named || area)
-                && parts[1..].iter().all(|part| {
-                    matches!(part, Value::Keyword(tactic) if matches!(
-                        tactic.to_ascii_lowercase().as_str(),
-                        "flip-block" | "flip-inline" | "flip-start" | "flip-x" | "flip-y"
-                    ))
-                })
+                && parts[1..]
+                    .iter()
+                    .all(|part| matches!(part, Value::Keyword(value) if tactic(value)))
         })
 }
 
@@ -9292,6 +9298,7 @@ fn validate_logical_box_declaration(name: &str, value: &Value) -> Option<Declara
     );
     if is_offset {
         let valid = matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("auto") || is_css_wide_keyword(&keyword.to_ascii_lowercase()))
+            || valid_anchor_function(value)
             || valid_logical_length(value, true, true);
         return Some(if valid {
             DeclarationValidation::Unvalidated
@@ -9351,6 +9358,51 @@ fn validate_logical_box_declaration(name: &str, value: &Value) -> Option<Declara
         return Some(DeclarationValidation::Invalid);
     }
     None
+}
+
+fn valid_anchor_function(value: &Value) -> bool {
+    let Value::Function { name, arguments } = value else {
+        return false;
+    };
+    if !name.eq_ignore_ascii_case("anchor") || arguments.is_empty() {
+        return false;
+    }
+    let components = arguments
+        .iter()
+        .flat_map(|argument| match argument {
+            Value::List(values) => values.iter().collect::<Vec<_>>(),
+            value => vec![value],
+        })
+        .collect::<Vec<_>>();
+    let mut index = 0;
+    if components
+        .get(index)
+        .is_some_and(|value| is_dashed_ident(value))
+    {
+        index += 1;
+    }
+    let Some(Value::Keyword(side)) = components.get(index) else {
+        return false;
+    };
+    if !matches!(
+        side.to_ascii_lowercase().as_str(),
+        "top"
+            | "right"
+            | "bottom"
+            | "left"
+            | "center"
+            | "start"
+            | "end"
+            | "self-start"
+            | "self-end"
+            | "inside"
+            | "outside"
+    ) && !side.ends_with('%')
+    {
+        return false;
+    }
+    index += 1;
+    index == components.len()
 }
 
 fn valid_logical_length(value: &Value, allow_negative: bool, allow_percentage: bool) -> bool {

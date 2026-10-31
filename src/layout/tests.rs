@@ -14041,6 +14041,128 @@ fn length_percentage_math_resolves_sizing_and_position_at_layout() {
 }
 
 #[test]
+fn named_anchor_functions_position_an_absolute_box() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let anchor = NodeHandle::element("section");
+    let positioned = NodeHandle::element("aside");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(anchor.clone());
+    container.append_child(positioned.clone());
+
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0 } \
+             div { position: relative; width: 300px; height: 200px } \
+             section { anchor-name: --trigger; margin-left: 40px; width: 30px; height: 20px } \
+             aside { position: absolute; position-anchor: --trigger; \
+                     left: anchor(right); top: anchor(bottom); width: 10px; height: 10px }",
+        )
+        .unwrap(),
+    );
+
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        },
+    )
+    .unwrap();
+    let positioned = find_layout_box(&layout, &positioned).unwrap();
+    assert_eq!(positioned.dimensions.border_box().x, 70.0);
+    assert_eq!(positioned.dimensions.border_box().y, 20.0);
+}
+
+#[test]
+fn position_area_places_a_box_below_its_named_anchor() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let anchor = NodeHandle::element("section");
+    let positioned = NodeHandle::element("aside");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(anchor);
+    container.append_child(positioned.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0 } div { position: relative; width: 300px; height: 200px } \
+             section { anchor-name: --trigger; margin-left: 40px; width: 30px; height: 20px } \
+             aside { position: absolute; position-anchor: --trigger; position-area: block-end; \
+                     width: 10px; height: 10px }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        },
+    )
+    .unwrap();
+    let positioned = find_layout_box(&layout, &positioned).unwrap();
+    assert_eq!(positioned.dimensions.border_box().x, 50.0);
+    assert_eq!(positioned.dimensions.border_box().y, 20.0);
+}
+
+#[test]
+fn position_try_flip_block_uses_the_first_non_overflowing_option() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let container = NodeHandle::element("div");
+    let anchor = NodeHandle::element("section");
+    let positioned = NodeHandle::element("aside");
+    document.append_child(body.clone());
+    body.append_child(container.clone());
+    container.append_child(anchor);
+    container.append_child(positioned.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "body { margin: 0 } div { position: relative; width: 100px; height: 50px; padding-top: 1px } \
+             section { anchor-name: --trigger; margin-top: 19px; width: 20px; height: 20px } \
+             aside { position: absolute; position-anchor: --trigger; position-area: block-end; \
+                     position-try-fallbacks: flip-block; width: 10px; height: 15px }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        find_layout_box(&layout, &positioned)
+            .unwrap()
+            .dimensions
+            .border_box()
+            .y,
+        5.0
+    );
+}
+
+#[test]
 fn flex_wrap_child_calc_width_resolves_correctly() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");
