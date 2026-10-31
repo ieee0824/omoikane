@@ -384,6 +384,16 @@ collect_pattern \
 collect_pattern "/html/webappapis/scripting/processing-model-2/" "/cors/support.js"
 collect_pattern "/compression/"
 collect_pattern "/encoding/streams/" "/common/sab.js"
+# Streams, Body and URL modern APIs (#1294).
+collect_pattern \
+  "/streams/resources/" \
+  "/streams/readable-byte-streams/construct-byob-request.any.js" \
+  "/streams/readable-streams/async-iterator.any.js" \
+  "/streams/readable-streams/from.any.js" \
+  "/FileAPI/blob/Blob-bytes.any.js" \
+  "/FileAPI/support/Blob.js" \
+  "/url/url-statics-parse.any.js" \
+  "/url/urlsearchparams-size.any.js"
 collect_pattern "/css/selectors/is-where-error-recovery.html"
 collect_pattern "/css/selectors/child-indexed-pseudo-class.html" "/css/selectors/nth-last-child-invalid.html" "/css/selectors/invalidation/nth-child-whole-subtree.html"
 collect_pattern "/html/semantics/selectors/pseudo-classes/required-optional.html" "/html/semantics/selectors/pseudo-classes/required-optional-hidden.html" "/html/semantics/selectors/pseudo-classes/utils.js"

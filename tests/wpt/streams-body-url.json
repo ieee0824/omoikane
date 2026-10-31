@@ -1,0 +1,6 @@
+{
+  "tests": [
+    { "path": "url/url-statics-parse.any.js" },
+    { "path": "url/urlsearchparams-size.any.js" }
+  ]
+}
