@@ -2400,7 +2400,9 @@ pub(crate) fn layout_tree_with_content_visibility(
     input: ContentVisibilityLayoutInput,
 ) -> (Option<LayoutBox>, ContentVisibilityLayoutReport) {
     with_image_selection_environment(containing_block.width, containing_block.height, 1.0, || {
-        layout_tree_with_content_visibility_inner(node, resolver, containing_block, input)
+        resolver.with_zoomed_used_values(|resolver| {
+            layout_tree_with_content_visibility_inner(node, resolver, containing_block, input)
+        })
     })
 }
 

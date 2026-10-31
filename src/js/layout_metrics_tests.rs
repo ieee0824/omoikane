@@ -20,6 +20,84 @@ fn number(runtime: &mut JsRuntime, source: &str) -> f64 {
 }
 
 #[test]
+fn zoom_scales_client_rects_and_hit_testing_but_not_other_cssom_geometry() {
+    let mut runtime = runtime(
+        "<html><head><style>html,body{margin:0}#outer{zoom:200%;width:50px;height:30px;overflow:auto;background:red}#inner{zoom:2;width:10px;height:5px;background:blue}#zero{zoom:0;width:7px;height:3px}#wide{zoom:2;width:30px;height:1px}</style></head><body><div id='outer'><div id='inner'></div><div id='zero'></div><div id='wide'></div></div></body></html>",
+    );
+    runtime.set_viewport(320.0, 200.0);
+    runtime
+        .eval("globalThis.outer=document.getElementById('outer');globalThis.inner=document.getElementById('inner');globalThis.zero=document.getElementById('zero')")
+        .unwrap();
+
+    assert_eq!(
+        number(&mut runtime, "parseFloat(getComputedStyle(outer).zoom)"),
+        2.0
+    );
+    assert_eq!(
+        number(&mut runtime, "parseFloat(getComputedStyle(inner).zoom)"),
+        2.0
+    );
+    assert_eq!(
+        number(&mut runtime, "parseFloat(getComputedStyle(zero).zoom)"),
+        1.0
+    );
+    assert_eq!(
+        number(&mut runtime, "parseFloat(getComputedStyle(inner).width)"),
+        10.0
+    );
+    assert_eq!(
+        number(&mut runtime, "outer.getBoundingClientRect().width"),
+        100.0
+    );
+    assert_eq!(
+        number(&mut runtime, "inner.getBoundingClientRect().width"),
+        40.0
+    );
+    assert_eq!(
+        number(&mut runtime, "zero.getBoundingClientRect().width"),
+        14.0
+    );
+    assert_eq!(number(&mut runtime, "outer.offsetWidth"), 50.0);
+    assert_eq!(number(&mut runtime, "inner.offsetWidth"), 10.0);
+    assert_eq!(number(&mut runtime, "zero.offsetWidth"), 7.0);
+    assert_eq!(number(&mut runtime, "outer.clientWidth"), 50.0);
+    assert_eq!(number(&mut runtime, "inner.clientWidth"), 10.0);
+    assert_eq!(number(&mut runtime, "outer.scrollWidth"), 60.0);
+    assert!(
+        runtime
+            .eval("CSS.supports('zoom','150%') && !CSS.supports('zoom','-1')")
+            .unwrap()
+            .to_boolean()
+    );
+    assert_eq!(
+        runtime
+            .hit_test(30.0, 5.0)
+            .and_then(|node| node.get_attribute("id"))
+            .as_deref(),
+        Some("inner"),
+    );
+    assert_ne!(
+        runtime
+            .hit_test(45.0, 5.0)
+            .and_then(|node| node.get_attribute("id"))
+            .as_deref(),
+        Some("inner"),
+    );
+    runtime
+        .eval("inner.style.zoom='3';inner.style.translate='5px 0';inner.style.transform='translateX(5px)'")
+        .unwrap();
+    assert_eq!(
+        number(&mut runtime, "inner.getBoundingClientRect().width"),
+        60.0
+    );
+    assert_eq!(
+        number(&mut runtime, "inner.getBoundingClientRect().x"),
+        60.0
+    );
+    assert_eq!(number(&mut runtime, "inner.offsetWidth"), 10.0);
+}
+
+#[test]
 fn document_point_query_matches_pointer_hit_test_after_style_change() {
     let mut runtime = runtime(
         "<html><head><style>html,body{margin:0}#back,#front{position:absolute;left:10px;top:10px;width:60px;height:60px}#back{background:red}#front{background:blue}</style></head><body><div id='back'></div><div id='front'></div></body></html>",

@@ -398,6 +398,7 @@ define_properties! {
         "word-spacing" => WordSpacing,
         "writing-mode" => WritingMode,
         "z-index" => ZIndex,
+        "zoom" => Zoom,
     ],
     shorthand_or_alias: [
         "-webkit-mask",
@@ -429,6 +430,7 @@ define_properties! {
         "border-style",
         "border-top",
         "border-width",
+        "color-adjust",
         "column-rule",
         "columns",
         "contain-intrinsic-size",

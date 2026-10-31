@@ -38,7 +38,7 @@ fn print_color_adjust_validates_inherits_and_reaches_print_pixels() {
     }
     assert_eq!(
         runtime
-            .eval("CSS.supports('-webkit-print-color-adjust', 'exact')")
+            .eval("CSS.supports('-webkit-print-color-adjust', 'exact') && CSS.supports('color-adjust', 'economy')")
             .unwrap()
             .as_boolean(),
         Some(true)
