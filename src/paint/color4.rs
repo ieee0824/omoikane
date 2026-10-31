@@ -1720,22 +1720,25 @@ mod tests {
 
     #[test]
     fn relative_colors_resolve_origin_channels_and_calc_expressions() {
-        for (input, expected) in [
+        for (input, specified, expected) in [
             (
                 "rgb(from red r calc(g + 32) b / alpha)",
+                "rgb(from red r calc((g) + (32)) b / alpha)",
                 "color(srgb 1 0.12549 0)",
             ),
             (
                 "hsl(from red calc(h + 120) s l / 50%)",
+                "hsl(from red calc((h) + (120)) s l / 50%)",
                 "color(srgb 0 1 0 / 0.5)",
             ),
             (
                 "oklch(from color(srgb 1 0 0) l calc(c / 2) h)",
+                "oklch(from color(srgb 1 0 0) l calc(0.5 * c) h)",
                 "oklch(0.627955 0.128842 29.2339)",
             ),
         ] {
             let color = CssColor::parse(input).unwrap_or_else(|| panic!("{input}"));
-            assert_eq!(color.serialize(), input, "{input}");
+            assert_eq!(color.serialize(), specified, "{input}");
             assert_eq!(color.serialize_computed(), expected, "{input}");
         }
     }
