@@ -4395,6 +4395,12 @@ impl StyleResolver {
         base_select_part: Option<base_select::BaseSelectPart>,
     ) -> ComputedStyle {
         let mut candidates = Vec::new();
+        let collect_starting_style = pseudo.is_none()
+            && self
+                .transition_timeline
+                .needs_starting_style(node.identity());
+        let mut starting_candidates = Vec::new();
+        let mut starting_source_order = 0usize;
         let mut source_order = 0usize;
         collect_builtin_ua_candidates(node, pseudo, &mut source_order, &mut candidates);
         if let Some(part) = base_select_part {
@@ -4453,6 +4459,46 @@ impl StyleResolver {
                 stylesheet_scope.implicit_scope_root.as_ref(),
                 stylesheet_scope.encapsulation_order,
             );
+            if collect_starting_style {
+                for rule in &input.stylesheet.rules {
+                    let Rule::At(at_rule) = rule else {
+                        continue;
+                    };
+                    if !at_rule.name.eq_ignore_ascii_case("starting-style") {
+                        continue;
+                    }
+                    let Some(block) = at_rule.block.as_deref() else {
+                        continue;
+                    };
+                    collect_rule_candidates(
+                        node,
+                        block,
+                        input.origin,
+                        self.stylesheet_ids[stylesheet_position],
+                        layer_context,
+                        layer_order,
+                        pseudo,
+                        &mut starting_source_order,
+                        &mut starting_candidates,
+                        viewport_width,
+                        viewport_height,
+                        color_scheme_dark,
+                        self.media_type,
+                        &self.media_environment,
+                        &mut self.media_query_cache,
+                        &mut self.scope_prelude_cache,
+                        &mut self.container_query_cache,
+                        &self.container_contexts,
+                        element_keys.as_ref(),
+                        &mut self.selector_match_cache,
+                        stylesheet_scope.root.as_ref(),
+                        stylesheet_scope.implicit_scope_root.as_ref(),
+                        stylesheet_scope.encapsulation_order,
+                        None,
+                        None,
+                    );
+                }
+            }
         }
 
         if pseudo.is_none()
@@ -4915,8 +4961,47 @@ impl StyleResolver {
             );
         }
         if pseudo.is_none() {
-            self.transition_timeline
-                .sample(node.identity(), &mut properties);
+            self.annotate_tree_counting_candidates(node, &mut starting_candidates);
+            starting_candidates =
+                expand_pending_shorthand_candidates(starting_candidates, &custom_properties);
+            starting_candidates.sort_by(compare_candidate_priority);
+            let starting_flow = logical_flow_from_properties(&properties);
+            remove_reverted_candidates(
+                &mut starting_candidates,
+                Some(&custom_properties),
+                Some(starting_flow),
+            );
+            let mut starting_style = (!starting_candidates.is_empty()).then(|| properties.clone());
+            if let Some(starting_style) = &mut starting_style {
+                for candidate in starting_candidates {
+                    if candidate.name.starts_with("--") {
+                        continue;
+                    }
+                    let Some((value, validation)) =
+                        resolve_cascaded_value(&candidate, &custom_properties, node)
+                    else {
+                        continue;
+                    };
+                    let computed = match validation {
+                        DeclarationValidation::Valid(computed) => computed,
+                        DeclarationValidation::Unvalidated => {
+                            compute_value(&value, &candidate.name, custom_ctx)
+                        }
+                        DeclarationValidation::Invalid => continue,
+                    };
+                    insert_computed_property(
+                        starting_style,
+                        &candidate.name,
+                        computed,
+                        starting_flow,
+                    );
+                }
+            }
+            self.transition_timeline.sample_with_starting_style(
+                node.identity(),
+                starting_style,
+                &mut properties,
+            );
         }
 
         forced_colors::compute_presentation_adjustments(
@@ -5076,6 +5161,9 @@ impl StyleResolver {
         let shadow_base = animation::snapshot_shadow_base(steps, properties);
         let transform_base =
             ["translate", "rotate", "scale"].map(|name| properties.get(name).cloned());
+        let composition = properties
+            .get(&PropertyId::AnimationComposition)
+            .map_or_else(|| "replace".to_string(), ComputedValue::css_text);
 
         let element_font_size = properties
             .get(&PropertyId::FontSize)
@@ -5121,7 +5209,12 @@ impl StyleResolver {
             } else {
                 resolved
             };
-            let computed = compute_value(&resolved, property_name, ctx);
+            let underlying = properties.get(property_name).cloned();
+            let computed = animation::composite_snapshot_value(
+                underlying.as_ref(),
+                compute_value(&resolved, property_name, ctx),
+                &composition,
+            );
             let flow = logical_flow_from_properties(properties);
             insert_computed_property(properties, property_name, computed, flow);
         }
@@ -8141,6 +8234,25 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         "container-type" => {
             return validate_keyword_value(value, &["normal", "inline-size", "size"]);
         }
+        "animation-composition" => {
+            if let Value::Keyword(keyword) = value
+                && is_css_wide_keyword(&keyword.to_ascii_lowercase())
+            {
+                return DeclarationValidation::Valid(ComputedValue::Keyword(
+                    keyword.to_ascii_lowercase(),
+                ));
+            }
+            let normalized = render_value(value)
+                .split(',')
+                .map(|value| {
+                    let value = value.trim().to_ascii_lowercase();
+                    matches!(value.as_str(), "replace" | "add" | "accumulate").then_some(value)
+                })
+                .collect::<Option<Vec<_>>>();
+            return normalized.map_or(DeclarationValidation::Invalid, |values| {
+                DeclarationValidation::Valid(ComputedValue::Keyword(values.join(", ")))
+            });
+        }
         "container-name" => return validate_container_name_declaration(value),
         "contain" => return validate_contain_declaration(value),
         "transform" => return validate_transform_declaration(value),
@@ -8163,6 +8275,7 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         "transform-origin" => return validate_transform_origin_declaration(value),
         "perspective-origin" => return validate_perspective_origin_declaration(value),
         "transition-property"
+        | "transition-behavior"
         | "transition-duration"
         | "transition-timing-function"
         | "transition-delay" => {
@@ -11635,8 +11748,10 @@ fn collect_rule_candidates(
                         )
                     } else if at_rule.name.eq_ignore_ascii_case("keyframes")
                         || at_rule.name.eq_ignore_ascii_case("-webkit-keyframes")
+                        || at_rule.name.eq_ignore_ascii_case("starting-style")
                     {
-                        // @keyframes rules are handled separately; skip them in cascade.
+                        // Keyframes and starting styles are handled by their
+                        // respective timelines, not the ordinary cascade.
                         false
                     } else {
                         // Non-conditional grouping rules (e.g. @layer) pass through.
@@ -18090,6 +18205,10 @@ const INITIAL_VALUES: &[(PropertyId, InitialValue)] = &[
     (PropertyId::MixBlendMode, InitialValue::Keyword("normal")),
     (PropertyId::Isolation, InitialValue::Keyword("auto")),
     (PropertyId::TransitionProperty, InitialValue::Keyword("all")),
+    (
+        PropertyId::TransitionBehavior,
+        InitialValue::Keyword("normal"),
+    ),
     (PropertyId::TransitionDuration, InitialValue::Keyword("0s")),
     (
         PropertyId::TransitionTimingFunction,

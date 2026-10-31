@@ -96,6 +96,7 @@ use cross_origin_isolation::{
 #[cfg(test)]
 mod animation_layout_cache_tests;
 mod attribute_assignment;
+mod canvas2d;
 mod canvas_blit;
 #[cfg(test)]
 mod canvas_blit_tests;
@@ -17396,6 +17397,26 @@ fn register_host_bindings(
             js_string!("__omoikane_canvas_blit"),
             12,
             NativeFunction::from_copy_closure(canvas_blit::native),
+        ),
+        (
+            js_string!("__omoikane_canvas2d_draw"),
+            5,
+            NativeFunction::from_copy_closure(canvas2d::draw_native),
+        ),
+        (
+            js_string!("__omoikane_canvas2d_contains"),
+            1,
+            NativeFunction::from_copy_closure(canvas2d::contains_native),
+        ),
+        (
+            js_string!("__omoikane_canvas_svg_path"),
+            1,
+            NativeFunction::from_copy_closure(canvas2d::svg_path_native),
+        ),
+        (
+            js_string!("__omoikane_canvas_parse_color"),
+            1,
+            NativeFunction::from_copy_closure(canvas2d::parse_color_native),
         ),
         (
             js_string!("__omoikane_canvas_commit"),

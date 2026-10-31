@@ -2,7 +2,7 @@
 //!
 //! Transition values use comma-separated lists whose commas must survive the
 //! generic declaration parser. This module validates those lists and expands
-//! the shorthand into its four longhands. Timeline sampling lives above the
+//! the shorthand into its longhands. Timeline sampling lives above the
 //! CSS parser and consumes the normalized longhand values produced here.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -24,6 +24,7 @@ struct TransitionDescriptor {
     duration: String,
     timing_function: String,
     delay: String,
+    behavior: String,
 }
 
 /// Per-document CSS transition state sampled by a [`super::StyleResolver`].
@@ -283,12 +284,14 @@ struct RunningTransition {
     start_ms: f64,
     end_ms: f64,
     timing: TimingFunction,
+    discrete: bool,
     started: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum TimingFunction {
     Linear,
+    LinearStops(Vec<(f64, f64)>),
     CubicBezier(f64, f64, f64, f64),
     Steps(u32, StepPosition),
 }
@@ -301,14 +304,41 @@ enum StepPosition {
     JumpBoth,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct TransitionParameters {
     duration_ms: f64,
     delay_ms: f64,
     timing: TimingFunction,
+    allow_discrete: bool,
 }
 
 impl TransitionTimeline {
+    /// Whether this element has no transition baseline yet and may consume
+    /// an `@starting-style` snapshot.
+    pub(crate) fn needs_starting_style(&self, node_id: usize) -> bool {
+        self.elements
+            .get(&node_id)
+            .is_none_or(|state| !state.initialized)
+    }
+
+    /// Seeds a newly styled element from `@starting-style` before comparing
+    /// it with the normal after-change style in the same style update.
+    pub(crate) fn sample_with_starting_style(
+        &mut self,
+        node_id: usize,
+        starting: Option<PropertyMap>,
+        properties: &mut PropertyMap,
+    ) {
+        if let Some(starting) = starting
+            && self.needs_starting_style(node_id)
+        {
+            let state = self.elements.entry(node_id).or_default();
+            state.base_values = starting;
+            state.initialized = true;
+        }
+        self.sample(node_id, properties);
+    }
+
     fn sample_time_advances(&self, time_ms: f64) -> bool {
         time_ms.is_finite() && time_ms.max(0.0) > self.now_ms
     }
@@ -635,15 +665,16 @@ fn update_transition_for_property(
         cancel_transition(node_id, now_ms, state, events, &property);
         return;
     };
+    let discrete = interpolate_property_with_color(
+        &property,
+        &start_value,
+        &end_value,
+        0.5,
+        &sampled_current_color(properties, &state.running, now_ms),
+    )
+    .is_none();
     if parameters.duration_ms + parameters.delay_ms <= 0.0
-        || interpolate_property_with_color(
-            &property,
-            &start_value,
-            &end_value,
-            0.5,
-            &sampled_current_color(properties, &state.running, now_ms),
-        )
-        .is_none()
+        || (discrete && !parameters.allow_discrete)
     {
         cancel_transition(node_id, now_ms, state, events, &property);
         return;
@@ -656,6 +687,7 @@ fn update_transition_for_property(
         end_value,
         interrupted.as_ref(),
         parameters,
+        discrete,
         now_ms,
     );
     events.push(running.event_record(node_id, "transitionrun", property.clone(), now_ms));
@@ -726,6 +758,7 @@ impl RunningTransition {
         end_value: ComputedValue,
         interrupted: Option<&Self>,
         parameters: TransitionParameters,
+        discrete: bool,
         now_ms: f64,
     ) -> Self {
         let (reversing_adjusted_start_value, reversing_shortening_factor) = interrupted
@@ -756,6 +789,7 @@ impl RunningTransition {
             start_ms,
             end_ms,
             timing: parameters.timing,
+            discrete,
             started,
         }
     }
@@ -772,6 +806,23 @@ impl RunningTransition {
 
     fn sample(&self, property: &str, now_ms: f64, current_color: &str) -> Option<ComputedValue> {
         let progress = self.input_progress(now_ms);
+        if self.discrete {
+            if now_ms < self.start_ms {
+                return Some(self.start_value.clone());
+            }
+            return Some(
+                if discrete_uses_end_value(
+                    property,
+                    &self.start_value,
+                    &self.end_value,
+                    self.timing.sample(progress),
+                ) {
+                    self.end_value.clone()
+                } else {
+                    self.start_value.clone()
+                },
+            );
+        }
         interpolate_property_with_color(
             property,
             &self.start_value,
@@ -796,6 +847,26 @@ impl RunningTransition {
             property_name,
             elapsed_time: elapsed_ms / 1000.0,
         }
+    }
+}
+
+fn discrete_uses_end_value(
+    property: &str,
+    start: &ComputedValue,
+    end: &ComputedValue,
+    progress: f64,
+) -> bool {
+    let hidden_value = match property {
+        "display" => "none",
+        "content-visibility" => "hidden",
+        _ => return progress >= 0.5,
+    };
+    let start_hidden = start.css_text().eq_ignore_ascii_case(hidden_value);
+    let end_hidden = end.css_text().eq_ignore_ascii_case(hidden_value);
+    match (start_hidden, end_hidden) {
+        (true, false) => true,
+        (false, true) => progress >= 1.0,
+        _ => progress >= 0.5,
     }
 }
 
@@ -833,16 +904,20 @@ impl TimingFunction {
                 };
                 Some(Self::Steps(count, position))
             }
+            _ if normalized.starts_with("linear(") => {
+                Some(Self::LinearStops(parse_linear_stops(&normalized)?))
+            }
             _ => None,
         }
     }
 
-    fn sample(self, progress: f64) -> f64 {
+    fn sample(&self, progress: f64) -> f64 {
         let progress = progress.clamp(0.0, 1.0);
         match self {
             Self::Linear => progress,
-            Self::CubicBezier(x1, y1, x2, y2) => sample_cubic_bezier(progress, x1, y1, x2, y2),
-            Self::Steps(count, position) => sample_steps(progress, count, position),
+            Self::LinearStops(stops) => sample_linear_stops(progress, stops),
+            Self::CubicBezier(x1, y1, x2, y2) => sample_cubic_bezier(progress, *x1, *y1, *x2, *y2),
+            Self::Steps(count, position) => sample_steps(progress, *count, *position),
         }
     }
 }
@@ -852,6 +927,7 @@ struct TransitionConfiguration {
     durations_ms: Vec<f64>,
     timings: Vec<TimingFunction>,
     delays_ms: Vec<f64>,
+    allow_discrete: Vec<bool>,
 }
 
 impl TransitionConfiguration {
@@ -860,6 +936,7 @@ impl TransitionConfiguration {
         let duration_text = property_keyword(properties, "transition-duration", "0s");
         let timing_text = property_keyword(properties, "transition-timing-function", "ease");
         let delay_text = property_keyword(properties, "transition-delay", "0s");
+        let behavior_text = property_keyword(properties, "transition-behavior", "normal");
         Self {
             properties: split_top_level(property_text, ',')
                 .unwrap_or_default()
@@ -873,6 +950,11 @@ impl TransitionConfiguration {
                 .filter_map(TimingFunction::parse)
                 .collect(),
             delays_ms: parse_time_list_ms(delay_text, true),
+            allow_discrete: split_top_level(behavior_text, ',')
+                .unwrap_or_default()
+                .into_iter()
+                .map(|value| value.trim().eq_ignore_ascii_case("allow-discrete"))
+                .collect(),
         }
     }
 
@@ -906,7 +988,8 @@ impl TransitionConfiguration {
         Some(TransitionParameters {
             duration_ms: *repeated(&self.durations_ms, index)?,
             delay_ms: *repeated(&self.delays_ms, index)?,
-            timing: *repeated(&self.timings, index)?,
+            timing: repeated(&self.timings, index)?.clone(),
+            allow_discrete: *repeated(&self.allow_discrete, index)?,
         })
     }
 }
@@ -1208,6 +1291,11 @@ pub(crate) fn expand_transition_shorthand(value: Value, important: bool) -> Vec<
             value: Value::Keyword(join(|item| &item.delay)),
             important,
         },
+        Declaration {
+            name: "transition-behavior".to_string(),
+            value: Value::Keyword(join(|item| &item.behavior)),
+            important,
+        },
     ]
 }
 
@@ -1240,6 +1328,10 @@ pub(crate) fn normalize_transition_shorthand(input: &str) -> Option<String> {
     properties.insert(
         "transition-delay".to_string(),
         ComputedValue::Keyword(join(|item| &item.delay)),
+    );
+    properties.insert(
+        "transition-behavior".to_string(),
+        ComputedValue::Keyword(join(|item| &item.behavior)),
     );
     Some(computed_transition_shorthand(&properties))
 }
@@ -1276,6 +1368,14 @@ pub(crate) fn normalize_transition_longhand(name: &str, value: &str) -> Option<S
         "transition-timing-function" => items
             .into_iter()
             .map(normalize_timing_function)
+            .collect::<Option<Vec<_>>>()?,
+        "transition-behavior" => items
+            .into_iter()
+            .map(|item| match item.trim().to_ascii_lowercase().as_str() {
+                "normal" => Some("normal".to_string()),
+                "allow-discrete" => Some("allow-discrete".to_string()),
+                _ => None,
+            })
             .collect::<Option<Vec<_>>>()?,
         _ => return None,
     };
@@ -1318,6 +1418,7 @@ fn parse_transition_shorthand(input: &str) -> Option<Vec<TransitionDescriptor>> 
         let mut duration = None;
         let mut timing_function = None;
         let mut delay = None;
+        let mut behavior = None;
         for component in components {
             if let Some(time) = normalize_time(component, delay.is_none()) {
                 if duration.is_none() {
@@ -1336,6 +1437,15 @@ fn parse_transition_shorthand(input: &str) -> Option<Vec<TransitionDescriptor>> 
                 && let Some(timing) = normalize_timing_function(component)
             {
                 timing_function = Some(timing);
+                continue;
+            }
+            if behavior.is_none()
+                && matches!(
+                    component.to_ascii_lowercase().as_str(),
+                    "normal" | "allow-discrete"
+                )
+            {
+                behavior = Some(component.to_ascii_lowercase());
                 continue;
             }
             if property.is_none()
@@ -1357,6 +1467,7 @@ fn parse_transition_shorthand(input: &str) -> Option<Vec<TransitionDescriptor>> 
             duration: duration.unwrap_or_else(|| "0s".to_string()),
             timing_function: timing_function.unwrap_or_else(|| "ease".to_string()),
             delay: delay.unwrap_or_else(|| "0s".to_string()),
+            behavior: behavior.unwrap_or_else(|| "normal".to_string()),
         });
     }
     if descriptors.len() > 1 && descriptors.iter().any(|item| item.property == "none") {
@@ -1373,6 +1484,7 @@ pub(crate) fn computed_transition_shorthand(properties: &PropertyMap) -> String 
     let durations = split_keyword_property(properties, "transition-duration", "0s");
     let timings = split_keyword_property(properties, "transition-timing-function", "ease");
     let delays = split_keyword_property(properties, "transition-delay", "0s");
+    let behaviors = split_keyword_property(properties, "transition-behavior", "normal");
     property_items
         .iter()
         .enumerate()
@@ -1384,6 +1496,9 @@ pub(crate) fn computed_transition_shorthand(properties: &PropertyMap) -> String 
                 .map(String::as_str)
                 .unwrap_or("ease");
             let delay = repeated(&delays, index).map(String::as_str).unwrap_or("0s");
+            let behavior = repeated(&behaviors, index)
+                .map(String::as_str)
+                .unwrap_or("normal");
             let duration_is_zero = time_to_ms(duration, false) == Some(0.0);
             let delay_is_zero = time_to_ms(delay, true) == Some(0.0);
             let timing_is_ease = timing.eq_ignore_ascii_case("ease");
@@ -1399,6 +1514,9 @@ pub(crate) fn computed_transition_shorthand(properties: &PropertyMap) -> String 
             }
             if !delay_is_zero {
                 components.push(delay);
+            }
+            if behavior != "normal" {
+                components.push(behavior);
             }
             if components.is_empty() {
                 "all".to_string()
@@ -1418,12 +1536,13 @@ fn split_keyword_property(properties: &PropertyMap, name: &str, fallback: &str) 
         .collect()
 }
 
-fn transition_longhands() -> [&'static str; 4] {
+fn transition_longhands() -> [&'static str; 5] {
     [
         "transition-property",
         "transition-duration",
         "transition-timing-function",
         "transition-delay",
+        "transition-behavior",
     ]
 }
 
@@ -1487,6 +1606,21 @@ fn normalize_timing_function(input: &str) -> Option<String> {
     if lower == "step-end" {
         return Some("steps(1)".to_string());
     }
+    if function_arguments(&lower, "linear").is_some() {
+        let stops = parse_linear_stops(&lower)?;
+        return Some(format!(
+            "linear({})",
+            stops
+                .iter()
+                .map(|(output, input)| format!(
+                    "{} {}%",
+                    format_number(*output as f32),
+                    format_number((*input * 100.0) as f32)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     if let Some(arguments) = function_arguments(&lower, "cubic-bezier") {
         let values = split_top_level(arguments, ',')?;
         if values.len() != 4 {
@@ -1536,6 +1670,103 @@ fn normalize_timing_function(input: &str) -> Option<String> {
         return Some(format!("steps({count}, {position})"));
     }
     None
+}
+
+fn parse_linear_stops(input: &str) -> Option<Vec<(f64, f64)>> {
+    let arguments = function_arguments(input, "linear")?;
+    let items = split_top_level(arguments, ',')?;
+    if items.len() < 2 {
+        return None;
+    }
+    let mut stops = Vec::new();
+    for item in items {
+        let components = split_top_level_whitespace(item.trim())?;
+        if components.is_empty() || components.len() > 3 {
+            return None;
+        }
+        let output = components[0].parse::<f64>().ok()?;
+        if !output.is_finite() {
+            return None;
+        }
+        let mut positions = components[1..]
+            .iter()
+            .map(|component| {
+                let value = component.strip_suffix('%')?.parse::<f64>().ok()? / 100.0;
+                value.is_finite().then_some(value)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if positions.len() == 2 && positions[0] > positions[1] {
+            return None;
+        }
+        if positions.is_empty() {
+            stops.push((output, f64::NAN));
+        } else {
+            for position in positions.drain(..) {
+                stops.push((output, position));
+            }
+        }
+    }
+    if stops[0].1.is_nan() {
+        stops[0].1 = 0.0;
+    }
+    if stops.last()?.1.is_nan() {
+        stops.last_mut()?.1 = 1.0;
+    }
+    let mut index = 1;
+    while index < stops.len() {
+        if !stops[index].1.is_nan() {
+            index += 1;
+            continue;
+        }
+        let start = index - 1;
+        let mut end = index;
+        while end < stops.len() && stops[end].1.is_nan() {
+            end += 1;
+        }
+        let from = stops[start].1;
+        let to = stops.get(end)?.1;
+        for missing in index..end {
+            stops[missing].1 = from + (to - from) * (missing - start) as f64 / (end - start) as f64;
+        }
+        index = end + 1;
+    }
+    let mut previous = f64::NEG_INFINITY;
+    for (_, position) in &mut stops {
+        *position = position.max(previous);
+        previous = *position;
+    }
+    Some(stops)
+}
+
+fn sample_linear_stops(progress: f64, stops: &[(f64, f64)]) -> f64 {
+    let first = stops[0];
+    let last = stops[stops.len() - 1];
+    if progress <= first.1 {
+        let next = stops
+            .iter()
+            .copied()
+            .find(|stop| stop.1 > first.1)
+            .unwrap_or(last);
+        return interpolate_linear_stop(progress, first, next);
+    }
+    if progress >= last.1 {
+        let previous = stops
+            .iter()
+            .rev()
+            .copied()
+            .find(|stop| stop.1 < last.1)
+            .unwrap_or(first);
+        return interpolate_linear_stop(progress, previous, last);
+    }
+    let right = stops.partition_point(|stop| stop.1 <= progress);
+    interpolate_linear_stop(progress, stops[right - 1], stops[right])
+}
+
+fn interpolate_linear_stop(progress: f64, from: (f64, f64), to: (f64, f64)) -> f64 {
+    if to.1 == from.1 {
+        return to.0;
+    }
+    from.0 + (to.0 - from.0) * (progress - from.1) / (to.1 - from.1)
 }
 
 fn function_arguments<'a>(input: &'a str, name: &str) -> Option<&'a str> {
@@ -1634,6 +1865,7 @@ mod tests {
                 assert_eq!(running.start_ms, expected.start_ms);
                 assert_eq!(running.end_ms, expected.end_ms);
                 assert_eq!(running.started, expected.started);
+                assert_eq!(running.discrete, expected.discrete);
                 for progress in [0.0, 0.25, 0.5, 1.0] {
                     assert_eq!(
                         running.timing.sample(progress),
@@ -1849,7 +2081,9 @@ mod tests {
                 duration_ms: 1_000.0,
                 delay_ms: 0.0,
                 timing: TimingFunction::Linear,
+                allow_discrete: false,
             },
+            false,
             0.0,
         );
         let mut timeline = TransitionTimeline::default();
@@ -2066,7 +2300,7 @@ mod tests {
             ),
             false,
         );
-        assert_eq!(declarations.len(), 4);
+        assert_eq!(declarations.len(), 5);
         assert_eq!(
             declarations[0].value,
             Value::Keyword("opacity, transform".into())
@@ -2077,6 +2311,10 @@ mod tests {
             Value::Keyword("linear, cubic-bezier(0.1, 0.2, 0.3, 1)".into())
         );
         assert_eq!(declarations[3].value, Value::Keyword("50ms, 0s".into()));
+        assert_eq!(
+            declarations[4].value,
+            Value::Keyword("normal, normal".into())
+        );
     }
 
     #[test]
@@ -2100,6 +2338,55 @@ mod tests {
     }
 
     #[test]
+    fn parses_transition_behavior_in_longhand_and_shorthand() {
+        assert_eq!(
+            normalize_transition_longhand("transition-behavior", "normal, ALLOW-DISCRETE"),
+            Some("normal, allow-discrete".into())
+        );
+        let descriptors = parse_transition_shorthand("visibility 1s allow-discrete").unwrap();
+        assert_eq!(descriptors[0].behavior, "allow-discrete");
+        assert!(normalize_transition_longhand("transition-behavior", "auto").is_none());
+    }
+
+    #[test]
+    fn allow_discrete_switches_non_interpolable_values_at_half_progress() {
+        let mut timeline = TransitionTimeline::default();
+        let mut initial = timeline_style(None, "visibility", "1s", "0s");
+        initial.insert("visibility", ComputedValue::Keyword("visible".into()));
+        initial.insert(
+            "transition-behavior",
+            ComputedValue::Keyword("allow-discrete".into()),
+        );
+        timeline.sample(1, &mut initial);
+
+        let mut target_style = initial.clone();
+        target_style.insert("visibility", ComputedValue::Keyword("hidden".into()));
+        timeline.set_time_ms(10.0);
+        let mut target = target_style.clone();
+        timeline.sample(1, &mut target);
+        assert_eq!(
+            target.get("visibility"),
+            Some(&ComputedValue::Keyword("visible".into()))
+        );
+        assert_eq!(timeline.take_events().len(), 2);
+
+        timeline.set_time_ms(509.0);
+        let mut target = target_style.clone();
+        timeline.sample(1, &mut target);
+        assert_eq!(
+            target.get("visibility"),
+            Some(&ComputedValue::Keyword("visible".into()))
+        );
+        timeline.set_time_ms(510.0);
+        let mut target = target_style;
+        timeline.sample(1, &mut target);
+        assert_eq!(
+            target.get("visibility"),
+            Some(&ComputedValue::Keyword("hidden".into()))
+        );
+    }
+
+    #[test]
     fn samples_cubic_bezier_and_step_timing_functions() {
         let ease_middle = TimingFunction::parse("ease").unwrap().sample(0.5);
         assert!((ease_middle - 0.8024).abs() < 0.001);
@@ -2111,6 +2398,20 @@ mod tests {
             TimingFunction::parse("step-start").unwrap().sample(0.0),
             1.0
         );
+    }
+
+    #[test]
+    fn normalizes_and_samples_linear_easing_stops() {
+        assert_eq!(
+            normalize_timing_function("linear(0, .5 25% 75%, 1)"),
+            Some("linear(0 0%, 0.5 25%, 0.5 75%, 1 100%)".into())
+        );
+        let timing = TimingFunction::parse("linear(0, .5 25% 75%, 1)").unwrap();
+        assert!((timing.clone().sample(0.125) - 0.25).abs() < 0.0001);
+        assert!((timing.clone().sample(0.5) - 0.5).abs() < 0.0001);
+        assert!((timing.sample(0.875) - 0.75).abs() < 0.0001);
+        assert!(normalize_timing_function("linear(0)").is_none());
+        assert!(normalize_timing_function("linear(0 80% 20%, 1)").is_none());
     }
 
     #[test]
