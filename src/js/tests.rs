@@ -13080,40 +13080,22 @@ fn cssom_insert_and_delete_report_dom_exceptions() {
 }
 
 #[test]
-fn cssom_braceless_at_rule_has_healthy_rule_views() {
+fn cssom_discards_unsupported_braceless_at_rules() {
     let doc = crate::html::TreeBuilder::parse("<html><head><style>@charset \"UTF-8\"; p { color: red; }</style></head><body></body></html>").document();
     let mut runtime = JsRuntime::with_document(doc).unwrap();
     assert_eq!(
         eval_num(&mut runtime, "document.styleSheets[0].cssRules.length"),
-        2.0
+        1.0
     );
     assert_eq!(
         eval_str(
             &mut runtime,
             "document.styleSheets[0].cssRules[0].selectorText"
         ),
-        ""
-    );
-    assert_eq!(
-        eval_str(&mut runtime, "document.styleSheets[0].cssRules[0].cssText"),
-        "@charset \"UTF-8\";"
-    );
-    assert_eq!(
-        eval_str(
-            &mut runtime,
-            "document.styleSheets[0].cssRules[0].style.cssText"
-        ),
-        ""
-    );
-    assert_eq!(
-        eval_str(
-            &mut runtime,
-            "document.styleSheets[0].cssRules[1].selectorText"
-        ),
         "p"
     );
     assert_eq!(
-        eval_str(&mut runtime, "document.styleSheets[0].cssRules[1].cssText"),
+        eval_str(&mut runtime, "document.styleSheets[0].cssRules[0].cssText"),
         "p { color: red; }"
     );
 }
