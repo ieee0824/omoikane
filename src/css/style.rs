@@ -2815,6 +2815,78 @@ fn invalidation_subtrees(roots: impl IntoIterator<Item = NodeHandle>) -> Option<
 }
 
 impl StyleResolver {
+    /// Projects the accepted declarations of the last matching document
+    /// `@position-try` rule onto an already-computed style. The returned value
+    /// is owned and only lives for one fallback layout attempt.
+    pub(crate) fn position_try_style(
+        &self,
+        base: &ComputedStyle,
+        name: &str,
+    ) -> Option<ComputedStyle> {
+        fn find<'a>(rules: &'a [Rule], name: &str, found: &mut Option<&'a [Declaration]>) {
+            for rule in rules {
+                let Rule::At(rule) = rule else {
+                    continue;
+                };
+                if rule.name.eq_ignore_ascii_case("position-try") && rule.prelude.trim() == name {
+                    *found = Some(&rule.declarations);
+                }
+                if let Some(children) = &rule.block {
+                    find(children, name, found);
+                }
+            }
+        }
+
+        let mut declarations = None;
+        for input in &self.stylesheets {
+            find(&input.stylesheet.rules, name, &mut declarations);
+        }
+        let declarations = declarations?;
+        let mut style = base.clone();
+        let flow = logical_flow_from_properties(&style.properties);
+        for declaration in declarations {
+            let property = canonical_property_name(&declaration.name);
+            if declaration.important
+                || !matches!(
+                    property,
+                    "top"
+                        | "right"
+                        | "bottom"
+                        | "left"
+                        | "margin-top"
+                        | "margin-right"
+                        | "margin-bottom"
+                        | "margin-left"
+                        | "width"
+                        | "height"
+                        | "min-width"
+                        | "min-height"
+                        | "max-width"
+                        | "max-height"
+                        | "align-self"
+                        | "justify-self"
+                        | "position-anchor"
+                        | "position-area"
+                )
+            {
+                continue;
+            }
+            let computed = match validate_declaration(property, &declaration.value) {
+                DeclarationValidation::Invalid => continue,
+                DeclarationValidation::Valid(value) => value,
+                DeclarationValidation::Unvalidated => {
+                    compute_value(&declaration.value, property, ResolutionContext::default())
+                }
+            };
+            insert_computed_property(&mut style.properties, property, computed, flow);
+        }
+        style.properties.insert(
+            PropertyId::PositionTryFallbacks,
+            ComputedValue::Keyword("none".into()),
+        );
+        Some(style)
+    }
+
     pub(crate) fn replace_counter_values(
         &mut self,
         values: HashMap<(usize, Option<PseudoElement>), HashMap<String, Vec<i32>>>,

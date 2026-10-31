@@ -6941,6 +6941,36 @@ fn layout_positioned_child_mode(
             if fallbacks.split_ascii_whitespace().any(|value| value == "flip-block")
     );
     if overflows
+        && let Some(name) = style
+            .get_by_id(PropertyId::PositionTryFallbacks)
+            .and_then(|value| match value {
+                ComputedValue::Keyword(value) => {
+                    value.split([',', ' ']).find(|part| part.starts_with("--"))
+                }
+                _ => None,
+            })
+        && let Some(fallback_style) = resolver.position_try_style(style, name)
+        && let Some(fallback) = layout_positioned_child_mode(
+            child,
+            resolver,
+            &fallback_style,
+            parent_box,
+            containing_block,
+            viewport,
+            top_layer_root,
+            anchors,
+        )
+    {
+        let rect = fallback.dimensions.border_box();
+        if rect.x >= origin.x
+            && rect.y >= origin.y
+            && rect.x + rect.width <= origin.x + origin.width
+            && rect.y + rect.height <= origin.y + origin.height
+        {
+            return Some(fallback);
+        }
+    }
+    if overflows
         && flip_block
         && let Some((area_x, area_y)) =
             position_area_origin(style, anchors, outer_width, outer_height, true)
