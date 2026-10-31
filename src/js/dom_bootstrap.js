@@ -12372,6 +12372,8 @@ let omoikaneUserActivationState;
   }
   globalThis.__omoikane_flush_stylesheets = flushStyleSheets;
 
+  const registeredTypedProperties = new Map();
+
   // Minimal CSS namespace used for feature detection and selector escaping.
   // Unsupported declarations conservatively report false so sites choose their
   // fallback path instead of aborting while probing browser capabilities.
@@ -12400,6 +12402,7 @@ let omoikaneUserActivationState;
       if (status !== "ok") {
         throw new DOMException("The custom property descriptor is invalid.", "SyntaxError");
       }
+      registeredTypedProperties.set(name, { syntax, inherits, initialValue });
     },
     escape(value) {
       const input = String(value);
@@ -28819,6 +28822,143 @@ let omoikaneUserActivationState;
     toString() { return this.value; }
   }
 
+  class CSSVariableReferenceValue {
+    constructor(variable, fallback = null) {
+      const name = String(variable);
+      if (!/^--/.test(name)) throw new TypeError("A variable reference requires a custom property name");
+      if (fallback !== null && !(fallback instanceof CSSUnparsedValue)) {
+        throw new TypeError("Variable fallback must be a CSSUnparsedValue");
+      }
+      this.variable = name;
+      this.fallback = fallback;
+    }
+    toString() {
+      return "var(" + this.variable + (this.fallback ? ", " + this.fallback : "") + ")";
+    }
+  }
+
+  class CSSUnparsedValue extends CSSStyleValue {
+    constructor(members) {
+      super();
+      const values = Array.from(members, member => {
+        if (member instanceof CSSVariableReferenceValue) return member;
+        return String(member);
+      });
+      this.__values = values;
+      for (let index = 0; index < values.length; index++) this[index] = values[index];
+    }
+    get length() { return this.__values.length; }
+    [Symbol.iterator]() { return this.__values[Symbol.iterator](); }
+    toString() { return this.__values.join(""); }
+  }
+
+  function typedStylePropertyName(property) {
+    const name = String(property);
+    return name.startsWith("--") ? name : __styleNameToCss(name).toLowerCase();
+  }
+
+  function reifyTypedStyleValue(property, cssText) {
+    const name = typedStylePropertyName(property);
+    const value = String(cssText).trim();
+    if (!value) return null;
+    if (name.startsWith("--") && !registeredTypedProperties.has(name)) {
+      return new CSSUnparsedValue([value]);
+    }
+    const registration = registeredTypedProperties.get(name);
+    if (registration && registration.syntax === "*") return new CSSUnparsedValue([value]);
+    try { return parseCssUnitValue(value); } catch (_) {}
+    return new CSSKeywordValue(value);
+  }
+
+  const stylePropertyMapConstruction = {};
+  class StylePropertyMapReadOnly {
+    constructor(token, declaration) {
+      if (token !== stylePropertyMapConstruction) throw new TypeError("Illegal constructor");
+      this.__declaration = declaration;
+    }
+    get(property) {
+      return reifyTypedStyleValue(property,
+        this.__declaration.getPropertyValue(typedStylePropertyName(property)));
+    }
+    getAll(property) {
+      const value = this.get(property);
+      return value === null ? [] : [value];
+    }
+    has(property) {
+      return this.__declaration.getPropertyValue(typedStylePropertyName(property)) !== "";
+    }
+    get size() { return this.__declaration.length; }
+    *keys() {
+      for (let index = 0; index < this.__declaration.length; index++) {
+        yield this.__declaration.item(index);
+      }
+    }
+    *values() { for (const key of this.keys()) yield this.get(key); }
+    *entries() { for (const key of this.keys()) yield [key, this.get(key)]; }
+    [Symbol.iterator]() { return this.entries(); }
+    forEach(callback, thisArg = undefined) {
+      for (const [key, value] of this) callback.call(thisArg, value, key, this);
+    }
+  }
+
+  function serializeTypedStyleValue(value) {
+    if (value instanceof CSSStyleValue) return value.toString();
+    return String(value);
+  }
+
+  class StylePropertyMap extends StylePropertyMapReadOnly {
+    set(property, ...values) {
+      const name = typedStylePropertyName(property);
+      if (values.length !== 1) throw new TypeError("StylePropertyMap.set requires one value");
+      const value = serializeTypedStyleValue(values[0]);
+      if (!name.startsWith("--") && !CSS.supports(name, value)) {
+        throw new TypeError("The value is not valid for the property");
+      }
+      this.__declaration.setProperty(name, value);
+    }
+    append(property, ...values) {
+      const name = typedStylePropertyName(property);
+      if (values.length === 0) throw new TypeError("StylePropertyMap.append requires a value");
+      const addition = values.map(serializeTypedStyleValue).join(", ");
+      const current = this.__declaration.getPropertyValue(name);
+      const value = current ? current + ", " + addition : addition;
+      if (!name.startsWith("--") && !CSS.supports(name, value)) {
+        throw new TypeError("The value is not valid for the property");
+      }
+      this.__declaration.setProperty(name, value);
+    }
+    delete(property) { this.__declaration.removeProperty(typedStylePropertyName(property)); }
+    clear() {
+      for (const property of Array.from(this.keys())) this.__declaration.removeProperty(property);
+    }
+  }
+
+  const attributeStyleMapCache = new WeakMap();
+  const computedStyleMapCache = new WeakMap();
+  const ruleStyleMapCache = new WeakMap();
+  function mutableStyleMapFor(owner, declaration) {
+    const cache = owner instanceof CSSStyleRule ? ruleStyleMapCache : attributeStyleMapCache;
+    if (!cache.has(owner)) {
+      cache.set(owner, new StylePropertyMap(stylePropertyMapConstruction, declaration));
+    }
+    return cache.get(owner);
+  }
+
+  Object.defineProperty(Element.prototype, "attributeStyleMap", {
+    get() { return mutableStyleMapFor(this, this.style); }, enumerable: true, configurable: true,
+  });
+  Element.prototype.computedStyleMap = function() {
+    if (!computedStyleMapCache.has(this)) {
+      computedStyleMapCache.set(this, new StylePropertyMapReadOnly(
+        stylePropertyMapConstruction, getComputedStyle(this)
+      ));
+    }
+    return computedStyleMapCache.get(this);
+  };
+  Object.defineProperty(CSSStyleRule.prototype, "styleMap", {
+    get() { return mutableStyleMapFor(this, this.style); }, enumerable: true, configurable: true,
+  });
+
   function cssNumericAdd(inputs, direction) {
     const values = inputs.map(cssNumericInput);
     const first = values[0];
@@ -29144,7 +29284,8 @@ let omoikaneUserActivationState;
   globalThis.AnimationTimeline = AnimationTimeline;
   globalThis.DocumentTimeline = DocumentTimeline;
   Object.assign(globalThis, {
-    CSSStyleValue, CSSNumericValue, CSSUnitValue, CSSKeywordValue,
+    CSSStyleValue, CSSNumericValue, CSSUnitValue, CSSKeywordValue, CSSUnparsedValue,
+    CSSVariableReferenceValue, StylePropertyMapReadOnly, StylePropertyMap,
     CSSMathValue, CSSMathSum, CSSMathProduct, CSSMathMin, CSSMathMax,
     CSSMathNegate, CSSMathInvert,
   });

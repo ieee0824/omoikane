@@ -82,3 +82,90 @@ fn numeric_factories_cover_typed_om_units_and_reject_unknown_units() {
         "[\"25%\",\"90deg\",\"16ms\",\"60Hz\",\"2dppx\",\"1fr\",true]"
     );
 }
+
+#[test]
+fn attribute_style_map_stays_live_with_css_style_declaration() {
+    let mut runtime = runtime();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            r#"(() => {
+              const target = document.getElementById('target');
+              const map = target.attributeStyleMap;
+              map.set('width', CSS.px(12));
+              target.style.height = '7px';
+              map.set('display', new CSSKeywordValue('block'));
+              const width = map.get('width');
+              const height = map.get('height');
+              map.delete('display');
+              return JSON.stringify([
+                map === target.attributeStyleMap,
+                width instanceof CSSUnitValue, width.value, width.unit,
+                height.toString(), target.style.width,
+                map.has('display'), map.size, [...map.keys()].sort()
+              ]);
+            })()"#,
+        ),
+        "[true,true,12,\"px\",\"7px\",\"12px\",false,2,[\"height\",\"width\"]]"
+    );
+}
+
+#[test]
+fn computed_and_rule_style_maps_reify_their_authoritative_declarations() {
+    let mut runtime = JsRuntime::with_document(
+        TreeBuilder::parse(
+            "<style>#target { width: 20px; display: block; }</style><div id='target'></div>",
+        )
+        .document(),
+    )
+    .expect("runtime");
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            r#"(() => {
+              const target = document.getElementById('target');
+              const computed = target.computedStyleMap();
+              const rule = document.styleSheets[0].cssRules[0];
+              rule.styleMap.set('height', CSS.px(9));
+              const width = computed.get('width');
+              return JSON.stringify([
+                computed instanceof StylePropertyMapReadOnly,
+                !(computed instanceof StylePropertyMap),
+                width instanceof CSSUnitValue, width.toString(),
+                computed.get('display') instanceof CSSKeywordValue,
+                rule.style.height, rule.styleMap.get('height').toString(),
+                getComputedStyle(target).height
+              ]);
+            })()"#,
+        ),
+        "[true,true,true,\"20px\",true,\"9px\",\"9px\",\"9px\"]"
+    );
+}
+
+#[test]
+fn registered_custom_properties_reify_through_computed_style_map() {
+    let mut runtime = runtime();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            r#"(() => {
+              CSS.registerProperty({
+                name: '--gap', syntax: '<length>', inherits: false, initialValue: '3px'
+              });
+              const target = document.getElementById('target');
+              target.attributeStyleMap.set('--gap', CSS.px(11));
+              const specified = target.attributeStyleMap.get('--gap');
+              const computed = target.computedStyleMap().get('--gap');
+              target.attributeStyleMap.set('--raw', new CSSUnparsedValue(['var(--gap)']));
+              return JSON.stringify([
+                specified instanceof CSSUnitValue, specified.toString(),
+                computed instanceof CSSUnitValue, computed.toString(),
+                target.style.getPropertyValue('--gap'),
+                target.attributeStyleMap.get('--raw') instanceof CSSUnparsedValue,
+                target.attributeStyleMap.get('--raw').toString()
+              ]);
+            })()"#,
+        ),
+        "[true,\"11px\",true,\"11px\",\"11px\",true,\"var(--gap)\"]"
+    );
+}
