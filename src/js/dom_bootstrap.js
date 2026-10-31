@@ -25596,17 +25596,27 @@ let omoikaneUserActivationState;
         this.port = parsed.port;
         this.pathname = parsed.pathname;
         this._search = parsed.search;
-        this.hash = parsed.hash;
+        this._emptySearch = parsed.search === "" && /\?(?:#|$)/.test(parsed.href);
+        this._hash = parsed.hash;
+        this._emptyHash = parsed.hash === "" && parsed.href.endsWith("#");
         this.origin = parsed.origin;
         this.searchParams = new URLSearchParams(this._search, query => {
           this._search = query ? "?" + query : "";
+          this._emptySearch = false;
         });
       }
       get search() { return this._search; }
       set search(value) {
         const text = String(value);
-        this._search = text === "" || text === "?" ? "" : (text.startsWith("?") ? text : "?" + text);
+        this._emptySearch = text === "?";
+        this._search = text === "" || this._emptySearch ? "" : (text.startsWith("?") ? text : "?" + text);
         if (this.searchParams) this.searchParams._replace(this._search);
+      }
+      get hash() { return this._hash; }
+      set hash(value) {
+        const text = String(value);
+        this._emptyHash = text === "#";
+        this._hash = text === "" || this._emptyHash ? "" : (text.startsWith("#") ? text : "#" + text);
       }
       get href() { return this.toString(); }
       toString() {
@@ -25614,7 +25624,8 @@ let omoikaneUserActivationState;
           ? this.username + (this.password ? ":" + this.password : "") + "@"
           : "";
         return this.protocol + (this.host ? "//" + credentials + this.host : "") +
-          this.pathname + this.search + this.hash;
+          this.pathname + (this.search || (this._emptySearch ? "?" : "")) +
+          (this.hash || (this._emptyHash ? "#" : ""));
       }
       toJSON() { return this.toString(); }
       static canParse(input, base) { try { new URL(input, base); return true; } catch (_) { return false; } }
