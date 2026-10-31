@@ -438,6 +438,7 @@ fn expand_css_wide_shorthand(
             .collect(),
         "animation" => [
             "animation-name",
+            "animation-composition",
             "animation-fill-mode",
             "animation-duration",
             "animation-delay",
@@ -452,6 +453,7 @@ fn expand_css_wide_shorthand(
         .collect(),
         "transition" => [
             "transition-property",
+            "transition-behavior",
             "transition-duration",
             "transition-timing-function",
             "transition-delay",
@@ -3212,6 +3214,7 @@ fn expand_animation_shorthand(value: Value, important: bool) -> Vec<Declaration>
     let mut direction = Value::Keyword("normal".into());
     let mut fill = Value::Keyword("none".into());
     let mut play = Value::Keyword("running".into());
+    let mut composition = Value::Keyword("replace".into());
     let mut time_count = 0;
     for item in values {
         match item {
@@ -3242,6 +3245,7 @@ fn expand_animation_shorthand(value: Value, important: bool) -> Vec<Declaration>
                 }
                 "infinite" => iterations = item.clone(),
                 "running" | "paused" => play = item.clone(),
+                "replace" | "add" | "accumulate" => composition = item.clone(),
                 "ease" | "ease-in" | "ease-out" | "ease-in-out" | "linear" | "step-start"
                 | "step-end" => timing = item.clone(),
                 _ => name = item.clone(),
@@ -3261,6 +3265,7 @@ fn expand_animation_shorthand(value: Value, important: bool) -> Vec<Declaration>
         ("animation-direction", direction),
         ("animation-fill-mode", fill),
         ("animation-play-state", play),
+        ("animation-composition", composition),
     ]
     .into_iter()
     .map(|(name, value)| Declaration {

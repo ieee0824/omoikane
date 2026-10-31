@@ -94,6 +94,23 @@ fn transition_behavior_is_exposed_through_cssom_validation() {
 }
 
 #[test]
+fn animation_composition_is_exposed_through_cssom_validation() {
+    let mut runtime = runtime();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "JSON.stringify([
+                CSS.supports('animation-composition', 'replace'),
+                CSS.supports('animation-composition', 'add'),
+                CSS.supports('animation-composition', 'accumulate'),
+                CSS.supports('animation-composition', 'auto')
+            ])",
+        ),
+        "[true,true,true,false]"
+    );
+}
+
+#[test]
 fn scroll_and_view_timelines_derive_progress_from_current_geometry() {
     let mut runtime = runtime();
     assert_eq!(

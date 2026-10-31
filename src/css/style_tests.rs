@@ -1863,6 +1863,7 @@ fn identifies_supported_property_names() {
         "transform-origin",
         "animation",
         "animation-delay",
+        "animation-composition",
         "animation-direction",
         "animation-duration",
         "animation-iteration-count",
@@ -1891,6 +1892,7 @@ fn identifies_supported_property_names() {
         "animation",
         "animation-name",
         "animation-fill-mode",
+        "animation-composition",
         "animation-duration",
         "animation-play-state",
     ] {
@@ -9161,12 +9163,16 @@ fn animation_shorthand_forwards_applies_final_state() {
         Origin::Author,
         parse_stylesheet(
             "@keyframes fadein { from { opacity: 0; } to { opacity: 1; } } \
-             .fade { opacity: 0; animation: fadein 1s forwards; }",
+             .fade { opacity: 0; animation: fadein 1s forwards add; }",
         )
         .unwrap(),
     );
     let style = resolver.computed_style(&div);
     let opacity = style.get("opacity");
+    assert_eq!(
+        style.get("animation-composition"),
+        Some(&ComputedValue::Keyword("add".to_string()))
+    );
     assert!(
         matches!(opacity, Some(ComputedValue::Number(v)) if (*v - 1.0).abs() < 0.01),
         "animation shorthand with forwards should apply final opacity: 1.0, got {opacity:?}"

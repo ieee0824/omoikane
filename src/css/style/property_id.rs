@@ -95,6 +95,7 @@ define_properties! {
         "align-self" => AlignSelf,
         "anchor-name" => AnchorName,
         "anchor-scope" => AnchorScope,
+        "animation-composition" => AnimationComposition,
         "animation-delay" => AnimationDelay,
         "animation-direction" => AnimationDirection,
         "animation-duration" => AnimationDuration,

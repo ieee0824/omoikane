@@ -5076,6 +5076,9 @@ impl StyleResolver {
         let shadow_base = animation::snapshot_shadow_base(steps, properties);
         let transform_base =
             ["translate", "rotate", "scale"].map(|name| properties.get(name).cloned());
+        let composition = properties
+            .get(&PropertyId::AnimationComposition)
+            .map_or_else(|| "replace".to_string(), ComputedValue::css_text);
 
         let element_font_size = properties
             .get(&PropertyId::FontSize)
@@ -5121,7 +5124,12 @@ impl StyleResolver {
             } else {
                 resolved
             };
-            let computed = compute_value(&resolved, property_name, ctx);
+            let underlying = properties.get(property_name).cloned();
+            let computed = animation::composite_snapshot_value(
+                underlying.as_ref(),
+                compute_value(&resolved, property_name, ctx),
+                &composition,
+            );
             let flow = logical_flow_from_properties(properties);
             insert_computed_property(properties, property_name, computed, flow);
         }
@@ -8140,6 +8148,9 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         }
         "container-type" => {
             return validate_keyword_value(value, &["normal", "inline-size", "size"]);
+        }
+        "animation-composition" => {
+            return validate_keyword_value(value, &["replace", "add", "accumulate"]);
         }
         "container-name" => return validate_container_name_declaration(value),
         "contain" => return validate_contain_declaration(value),
