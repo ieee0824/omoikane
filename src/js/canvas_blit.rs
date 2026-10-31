@@ -1,13 +1,25 @@
 //! Bounded one-to-one Canvas pixel transfer; JS retains general drawing state.
 use super::*;
 
-struct ByteView {
-    buffer: JsArrayBuffer,
-    offset: usize,
-    length: usize,
+pub(super) struct ByteView {
+    pub(super) buffer: JsArrayBuffer,
+    pub(super) offset: usize,
+    pub(super) length: usize,
 }
 
-fn byte_view(value: Option<&JsValue>, context: &mut Context) -> JsResult<Option<ByteView>> {
+impl ByteView {
+    /// A copy of the viewed bytes.
+    pub(super) fn copy(&self) -> Option<Vec<u8>> {
+        let data = self.buffer.data()?;
+        Some(data.get(self.offset..)?.get(..self.length)?.to_vec())
+    }
+}
+
+/// The `Uint8Array` in `value`, or `None` for anything else.
+pub(super) fn byte_view(
+    value: Option<&JsValue>,
+    context: &mut Context,
+) -> JsResult<Option<ByteView>> {
     let Some(object) = value.and_then(JsValue::as_object) else {
         return Ok(None);
     };
