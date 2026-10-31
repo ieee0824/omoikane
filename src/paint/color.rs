@@ -242,14 +242,18 @@ fn parse_rgb_args(args: &str) -> Option<Color> {
 }
 
 /// Parses an RGB channel value: plain number (0-255) or percentage (0%-100%).
+/// Values too large for `f32` still clamp to the channel range.
 fn parse_rgb_channel(s: &str) -> Option<f32> {
-    if let Some(pct) = s.strip_suffix('%') {
-        pct.parse::<f32>()
+    let parse = |text: &str| {
+        text.parse::<f64>()
             .ok()
             .filter(|value| value.is_finite())
-            .map(|p| p * 255.0 / 100.0)
+            .map(|value| value.clamp(-1.0e6, 1.0e6) as f32)
+    };
+    if let Some(pct) = s.strip_suffix('%') {
+        parse(pct).map(|p| p * 255.0 / 100.0)
     } else {
-        s.parse().ok().filter(|value: &f32| value.is_finite())
+        parse(s)
     }
 }
 

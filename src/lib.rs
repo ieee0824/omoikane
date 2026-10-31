@@ -5,6 +5,7 @@
 
 pub mod accessibility;
 pub mod canvas;
+mod canvas2d;
 pub mod cdp;
 pub mod css;
 pub mod data;
