@@ -1173,6 +1173,9 @@
     {"path": "longtask-timing/longtask-in-raf.html"},
     {"path": "longtask-timing/longtask-tojson.html"},
     {"path": "longtask-timing/spin-eventloop-not-longtask.html"},
-    {"path": "longtask-timing/supported-longtask-types.window.js"}
+    {"path": "longtask-timing/supported-longtask-types.window.js"},
+    {"path": "server-timing/navigation_timing_idl.https.html"},
+    {"path": "server-timing/resource_timing_idl.https.html"},
+    {"path": "server-timing/service_worker_idl.https.html"}
   ]
 }
