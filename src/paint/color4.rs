@@ -216,7 +216,7 @@ fn parse_color_mix(text: &str, context: Option<ColorContext>) -> Option<CssColor
     } else {
         &parts[..]
     };
-    if color_parts.len() < 2 {
+    if color_parts.is_empty() {
         return None;
     }
     let mut components = color_parts
@@ -257,7 +257,8 @@ fn parse_interpolation_method(first: &str) -> Option<(Space, bool, &str, &str)> 
     let hue_method = match words.get(2..) {
         Some([]) => "shorter",
         Some([method, "hue"])
-            if matches!(*method, "shorter" | "longer" | "increasing" | "decreasing") =>
+            if matches!(*method, "shorter" | "longer" | "increasing" | "decreasing")
+                && (is_hsl || matches!(space, Space::Hwb | Space::Lch | Space::Oklch)) =>
         {
             method
         }
@@ -333,6 +334,11 @@ fn serialize_specified_mix(method_or_color: &str, components: &[MixComponent]) -
         method.strip_suffix(" shorter hue").unwrap_or(method)
     } else {
         ""
+    };
+    let method = match method {
+        "in oklab" => "",
+        "in xyz" => "in xyz-d65",
+        method => method,
     };
     let omit_percentages = components.len() == 2
         && components
@@ -891,9 +897,22 @@ mod tests {
                 .to_color();
         assert_eq!(shorter, Color::rgb(255, 0, 0));
         assert_eq!(longer, Color::rgb(0, 255, 255));
+        assert_eq!(
+            CssColor::parse("color-mix(in srgb, red)")
+                .unwrap()
+                .serialize_computed(),
+            "color(srgb 1 0 0)"
+        );
+        assert_eq!(
+            CssColor::parse("color-mix(in xyz, red, blue)")
+                .unwrap()
+                .serialize(),
+            "color-mix(in xyz-d65, red, blue)"
+        );
         for invalid in [
-            "color-mix(in srgb, red)",
             "color-mix(in unknown, red, blue)",
+            "color-mix(in srgb longer hue, red, blue)",
+            "color-mix(in lab longer hue, red, blue)",
             "color-mix(in srgb, red -1%, blue)",
             "color-mix(in srgb, red 120%, blue)",
         ] {
