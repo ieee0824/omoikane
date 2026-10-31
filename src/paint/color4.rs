@@ -414,7 +414,7 @@ fn substitute_relative_channels(text: &str, references: &[(&str, Option<f64>)]) 
             }
             let identifier = &text[start..offset];
             if let Some((_, value)) = references.iter().find(|(name, _)| *name == identifier) {
-                output.push_str(&css_number(value.unwrap_or(0.0)));
+                output.push_str(&value.unwrap_or(0.0).to_string());
             } else {
                 output.push_str(identifier);
             }
@@ -1316,6 +1316,18 @@ mod tests {
                 .unwrap()
                 .serialize_computed(),
             "color(srgb 0.4 0.2 0.6)"
+        );
+    }
+
+    #[test]
+    fn relative_channel_substitution_keeps_internal_precision() {
+        assert_eq!(
+            CssColor::parse(
+                "color(from hsl(from color(xyz-d50 0.99 0.88 0.77) h s l) xyz-d50 x y z)"
+            )
+            .unwrap()
+            .serialize_computed(),
+            "color(xyz-d50 0.99 0.88 0.77)"
         );
     }
 
