@@ -23526,7 +23526,9 @@ let omoikaneUserActivationState;
     }
     if (isChildWindow) return childNavigation(kind, value, extra);
     if ((kind === "assign" || kind === "replace") && nativeCommitFragmentURL(value)) {
+      const previousURL = __loc.href;
       __applyLocationUrl(value, false);
+      __navigationFragmentCommitted(__loc.href, previousURL);
     }
     return __omoikane_schedule_navigation(kind, value, extra);
   };
@@ -23653,7 +23655,14 @@ let omoikaneUserActivationState;
   __loc.reload = function() {
     scheduleWindowNavigation("reload", __loc.href);
   };
-  const __historyEntries = [{ state: null, href: __loc.href }];
+  let __historyEntrySequence = 0;
+  const __newHistoryIdentity = () => {
+    const suffix = (++__historyEntrySequence).toString(16).padStart(12, "0");
+    const key = `00000000-0000-4000-8000-${suffix}`;
+    const idSuffix = (++__historyEntrySequence).toString(16).padStart(12, "0");
+    return { key, id: `00000000-0000-4000-8000-${idSuffix}` };
+  };
+  const __historyEntries = [{ state: null, href: __loc.href, ...__newHistoryIdentity() }];
   let __historyIndex = 0;
   let __sessionHistoryLength = 1;
   globalThis.__omoikane_sync_history = function(length, stateJSON) {
@@ -23693,11 +23702,16 @@ let omoikaneUserActivationState;
     get state() { return __historyEntries[__historyIndex].state; },
     pushState(state, unused, url) {
       void unused;
+      const previous = __historyEntries[__historyIndex];
       __applyHistoryUrl(url);
+      const entry = { state, href: __loc.href, ...__newHistoryIdentity() };
+      const navigationEvent = __navigationHistoryStarted("push", entry, previous.href);
       if (auxiliaryNavigationId === undefined) nativeCommitHistoryApiURL(__loc.href);
       __historyEntries.splice(__historyIndex + 1);
-      __historyEntries.push({ state, href: __loc.href });
+      __historyEntries.push(entry);
       __historyIndex = __historyEntries.length - 1;
+      __navigationHistoryCommitted("push", previous);
+      __navigationHistoryFinished(navigationEvent);
       const stateJSON = JSON.stringify(state);
       scheduleWindowNavigation("push-state", __loc.href, stateJSON === undefined ? "null" : stateJSON);
     },
@@ -23705,7 +23719,14 @@ let omoikaneUserActivationState;
       void unused;
       __applyHistoryUrl(url);
       if (auxiliaryNavigationId === undefined) nativeCommitHistoryApiURL(__loc.href);
-      __historyEntries[__historyIndex] = { state, href: __loc.href };
+      const previous = __historyEntries[__historyIndex];
+      const entry = {
+        state, href: __loc.href, key: previous.key, id: __newHistoryIdentity().id,
+      };
+      const navigationEvent = __navigationHistoryStarted("replace", entry, previous.href);
+      __historyEntries[__historyIndex] = entry;
+      __navigationHistoryCommitted("replace", previous);
+      __navigationHistoryFinished(navigationEvent);
       const stateJSON = JSON.stringify(state);
       scheduleWindowNavigation("replace-state", __loc.href, stateJSON === undefined ? "null" : stateJSON);
     },
@@ -23718,8 +23739,14 @@ let omoikaneUserActivationState;
       }
       const localTarget = __historyIndex + numeric;
       if (localTarget >= 0 && localTarget < __historyEntries.length) {
+        const previous = __historyEntries[__historyIndex];
+        const navigationEvent = __navigationHistoryStarted(
+          "traverse", __historyEntries[localTarget], previous.href
+        );
         __historyIndex = localTarget;
         __applyHistoryUrl(__historyEntries[localTarget].href);
+        __navigationHistoryCommitted("traverse", previous);
+        __navigationHistoryFinished(navigationEvent);
       }
       scheduleWindowNavigation("traverse", String(numeric));
     },
@@ -28182,6 +28209,276 @@ let omoikaneUserActivationState;
       return !event.defaultPrevented;
     }
   }
+
+  const navigationEntryToken = {};
+  const navigationDestinationToken = {};
+  const navigationEntryObjects = new WeakMap();
+  let navigationController = null;
+  const cloneNavigationState = value => {
+    if (value === undefined) return undefined;
+    return typeof structuredClone === "function" ? structuredClone(value) : value;
+  };
+  class NavigationHistoryEntry extends EventTarget {
+    constructor(token, entry) {
+      super();
+      if (token !== navigationEntryToken) throw new TypeError("Illegal constructor");
+      this.__entry = entry;
+    }
+    get url() { return this.__entry.href; }
+    get key() { return this.__entry.key; }
+    get id() { return this.__entry.id; }
+    get index() { return __historyEntries.indexOf(this.__entry); }
+    get sameDocument() { return true; }
+    getState() { return cloneNavigationState(this.__entry.state); }
+    get [Symbol.toStringTag]() { return "NavigationHistoryEntry"; }
+  }
+  const navigationEntryObject = entry => {
+    let object = navigationEntryObjects.get(entry);
+    if (!object) {
+      object = new NavigationHistoryEntry(navigationEntryToken, entry);
+      navigationEntryObjects.set(entry, object);
+    }
+    return object;
+  };
+  class NavigationDestination {
+    constructor(token, entry, state) {
+      if (token !== navigationDestinationToken) throw new TypeError("Illegal constructor");
+      this.__entry = entry;
+      this.__state = state;
+    }
+    get url() { return this.__entry.href; }
+    get key() { return this.__entry.key || ""; }
+    get id() { return this.__entry.id || ""; }
+    get index() { return __historyEntries.indexOf(this.__entry); }
+    get sameDocument() { return true; }
+    getState() { return cloneNavigationState(this.__state); }
+    get [Symbol.toStringTag]() { return "NavigationDestination"; }
+  }
+  class NavigateEvent extends Event {
+    constructor(type, init) {
+      if (!init || init.destination === undefined || init.signal === undefined) {
+        throw new TypeError("destination and signal are required");
+      }
+      super(type, { cancelable: true });
+      this.navigationType = init.navigationType ?? "push";
+      this.destination = init.destination;
+      this.canIntercept = !!init.canIntercept;
+      this.userInitiated = !!init.userInitiated;
+      this.hashChange = !!init.hashChange;
+      this.signal = init.signal;
+      this.formData = init.formData ?? null;
+      this.downloadRequest = init.downloadRequest ?? null;
+      this.info = init.info;
+      this.hasUAVisualTransition = !!init.hasUAVisualTransition;
+      this.sourceElement = init.sourceElement ?? null;
+      this.__handler = null;
+    }
+    intercept(options = {}) {
+      if (!this.__dispatching) {
+        throw new DOMException("Navigation is no longer interceptable", "InvalidStateError");
+      }
+      if (options.handler !== undefined && typeof options.handler !== "function") {
+        throw new TypeError("Navigation intercept handler must be callable");
+      }
+      this.__handler = options.handler || null;
+    }
+    scroll() {}
+    get [Symbol.toStringTag]() { return "NavigateEvent"; }
+  }
+  class NavigationCurrentEntryChangeEvent extends Event {
+    constructor(type, init) {
+      if (!init || init.from === undefined) throw new TypeError("from is required");
+      super(type);
+      this.navigationType = init.navigationType ?? null;
+      this.from = init.from;
+    }
+    get [Symbol.toStringTag]() { return "NavigationCurrentEntryChangeEvent"; }
+  }
+  class NavigationTransition {
+    constructor(navigationType, from, finished) {
+      this.navigationType = navigationType;
+      this.from = from;
+      this.finished = finished;
+    }
+    get [Symbol.toStringTag]() { return "NavigationTransition"; }
+  }
+  class Navigation extends EventTarget {
+    constructor() {
+      super();
+      if (navigationController !== null) throw new TypeError("Illegal constructor");
+    }
+    get currentEntry() {
+      return navigationEntryObject(__historyEntries[__historyIndex]);
+    }
+    entries() {
+      return __historyEntries.map(navigationEntryObject);
+    }
+    get canGoBack() { return __historyIndex > 0; }
+    get canGoForward() { return __historyIndex + 1 < __historyEntries.length; }
+    get transition() { return this.__transition || null; }
+    navigate(url, options = {}) {
+      const href = new URL(String(url), document.baseURI).href;
+      const state = options.state === undefined ? undefined : cloneNavigationState(options.state);
+      return this.__start("push", { href }, state, options.info, () => {
+        history.pushState(state, "", href);
+      });
+    }
+    reload(options = {}) {
+      return this.__start("reload", __historyEntries[__historyIndex],
+        __historyEntries[__historyIndex].state, options.info, () => history.go(0));
+    }
+    traverseTo(key, options = {}) {
+      const index = __historyEntries.findIndex(entry => entry.key === String(key));
+      if (index < 0) return this.__rejectedResult("InvalidStateError", "Unknown navigation key");
+      const target = __historyEntries[index];
+      return this.__start("traverse", target, target.state, options.info,
+        () => history.go(index - __historyIndex));
+    }
+    back(options = {}) {
+      if (!this.canGoBack) return this.__rejectedResult("InvalidStateError", "No previous entry");
+      return this.traverseTo(__historyEntries[__historyIndex - 1].key, options);
+    }
+    forward(options = {}) {
+      if (!this.canGoForward) return this.__rejectedResult("InvalidStateError", "No next entry");
+      return this.traverseTo(__historyEntries[__historyIndex + 1].key, options);
+    }
+    updateCurrentEntry(options) {
+      if (!options || !("state" in options)) throw new TypeError("state is required");
+      const from = this.currentEntry;
+      __historyEntries[__historyIndex].state = cloneNavigationState(options.state);
+      this.dispatchEvent(new NavigationCurrentEntryChangeEvent("currententrychange", {
+        navigationType: null, from,
+      }));
+    }
+    __rejectedResult(name, message) {
+      const rejection = Promise.reject(new DOMException(message, name));
+      return { committed: rejection, finished: rejection };
+    }
+    __start(navigationType, destinationEntry, state, info, commit) {
+      const destination = new NavigationDestination(navigationDestinationToken, destinationEntry, state);
+      const controller = new AbortController();
+      const event = new NavigateEvent("navigate", {
+        navigationType, destination, info, signal: controller.signal, canIntercept: true,
+        hashChange: new URL(destination.url).hash !== new URL(__loc.href).hash,
+      });
+      this.dispatchEvent(event);
+      if (event.defaultPrevented) return this.__rejectedResult("AbortError", "Navigation canceled");
+      let resolveCommitted, rejectCommitted, resolveFinished, rejectFinished;
+      const committed = new Promise((resolve, reject) => {
+        resolveCommitted = resolve; rejectCommitted = reject;
+      });
+      const finished = new Promise((resolve, reject) => {
+        resolveFinished = resolve; rejectFinished = reject;
+      });
+      const from = this.currentEntry;
+      this.__pendingCommit = { navigationType, from };
+      this.__transition = new NavigationTransition(navigationType, from, finished);
+      try {
+        commit();
+        const entry = this.currentEntry;
+        resolveCommitted(entry);
+        let handlerResult;
+        if (event.__handler) handlerResult = event.__handler();
+        Promise.resolve(handlerResult).then(
+          () => Promise.resolve().then(() => {
+            this.dispatchEvent(new Event("navigatesuccess"));
+            this.__transition = null;
+            resolveFinished(entry);
+          }),
+          error => Promise.resolve().then(() => {
+            const failure = new Event("navigateerror");
+            failure.error = error;
+            this.dispatchEvent(failure);
+            this.__transition = null;
+            rejectFinished(error);
+          })
+        );
+      } catch (error) {
+        this.__pendingCommit = null;
+        this.__transition = null;
+        rejectCommitted(error);
+        rejectFinished(error);
+      }
+      return { committed, finished };
+    }
+    get [Symbol.toStringTag]() { return "Navigation"; }
+  }
+  navigationController = new Navigation();
+  function __navigationHistoryCommitted(navigationType, previousEntry) {
+    if (!navigationController) return;
+    const pending = navigationController.__pendingCommit;
+    navigationController.__pendingCommit = null;
+    const from = pending?.from || (previousEntry
+      ? navigationEntryObject(previousEntry)
+      : navigationController.currentEntry);
+    const event = new NavigationCurrentEntryChangeEvent("currententrychange", {
+      navigationType: pending?.navigationType || navigationType, from,
+    });
+    event.isTrusted = true;
+    navigationController.dispatchEvent(event);
+  }
+  function __navigationHistoryStarted(navigationType, entry, previousHref) {
+    if (!navigationController || navigationController.__pendingCommit) return null;
+    const event = new NavigateEvent("navigate", {
+      navigationType,
+      destination: new NavigationDestination(
+        navigationDestinationToken, entry, entry.state
+      ),
+      signal: new AbortController().signal,
+      canIntercept: true,
+      hashChange: new URL(entry.href).hash !== new URL(previousHref).hash,
+    });
+    navigationController.dispatchEvent(event);
+    return event;
+  }
+  function __navigationHistoryFinished(event) {
+    if (!event) return;
+    let result;
+    try { if (event.__handler) result = event.__handler(); }
+    catch (error) { result = Promise.reject(error); }
+    Promise.resolve(result).then(() => {
+      navigationController.dispatchEvent(new Event("navigatesuccess"));
+    }, error => {
+      const failure = new Event("navigateerror");
+      failure.error = error;
+      navigationController.dispatchEvent(failure);
+    });
+  }
+  function __navigationFragmentCommitted(href, previousHref) {
+    if (!navigationController || !__historyEntries.length) return;
+    const previous = __historyEntries[__historyIndex];
+    if (previous.href === href) return;
+    const entry = {
+      state: previous.state,
+      href,
+      key: previous.key,
+      id: __newHistoryIdentity().id,
+    };
+    const event = __navigationHistoryStarted("push", entry, previousHref);
+    __historyEntries[__historyIndex] = entry;
+    __navigationHistoryCommitted("push", previous);
+    __navigationHistoryFinished(event);
+  }
+  for (const type of ["navigate", "navigatesuccess", "navigateerror", "currententrychange"]) {
+    const property = `on${type}`;
+    Object.defineProperty(Navigation.prototype, property, {
+      enumerable: true, configurable: true,
+      get() { return this[`__${property}`] || null; },
+      set(callback) {
+        const previous = this[`__${property}`];
+        if (previous) this.removeEventListener(type, previous);
+        this[`__${property}`] = typeof callback === "function" ? callback : null;
+        if (this[`__${property}`]) this.addEventListener(type, this[`__${property}`]);
+      },
+    });
+  }
+  for (const constructor of [Navigation, NavigationHistoryEntry, NavigationDestination,
+    NavigateEvent, NavigationCurrentEntryChangeEvent, NavigationTransition]) {
+    globalThis[constructor.name] = constructor;
+  }
+  Object.defineProperty(globalThis, "navigation", {
+    enumerable: true, configurable: true, get() { return navigationController; },
+  });
 
   const clipboardConstructionToken = {};
   const clipboardStates = browsingInput.clipboardStates || (browsingInput.clipboardStates = new WeakMap());
