@@ -1,7 +1,7 @@
 //! JavaScript engine embedding and DOM/Web API bindings.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -71,6 +71,7 @@ mod dom_removal_trace;
 mod editability;
 mod frame_diagnostics;
 mod highlight;
+mod idle_period;
 mod language;
 mod layout_structure;
 mod main_shadow_mask_cache;
@@ -653,6 +654,8 @@ const DOM_BOOTSTRAP: &str = concat!(
     "\n",
     include_str!("highlight.js"),
     "\n",
+    include_str!("task_scheduling.js"),
+    "\n",
     include_str!("find_in_page.js")
 );
 
@@ -976,6 +979,13 @@ fn evaluate_dom_bootstrap(
                 .borrow_mut()
                 .cookie_change_callbacks
                 .insert(document_id, CookieChangeCallbacks { dispatch, reset });
+        }
+        let idle_period = namespace.get(js_string!("__omoikane_idle_period"), context)?;
+        if idle_period.is_object() {
+            host_state
+                .borrow_mut()
+                .idle_period_hooks
+                .insert(document_id, idle_period);
         }
         let opener_updater =
             namespace.get(js_string!("__omoikane_update_auxiliary_opener"), context)?;
@@ -2383,6 +2393,10 @@ struct HostState {
     cookie_store: Arc<Mutex<crate::http::CookieJar>>,
     cookie_change_sequence: u64,
     cookie_change_callbacks: HashMap<usize, CookieChangeCallbacks>,
+    /// Each Document's exported `requestIdleCallback` period hook.
+    idle_period_hooks: HashMap<usize, JsValue>,
+    /// Documents whose idle callbacks wait for the next idle period.
+    idle_period_requests: BTreeSet<usize>,
     auxiliary_opener_updaters: HashMap<usize, JsValue>,
     websocket_clients: HashMap<u64, WebSocketConnection>,
     next_websocket_id: u64,
@@ -2755,6 +2769,9 @@ unsafe impl Trace for HostState {
         }
         for updater in self.auxiliary_opener_updaters.values() {
             unsafe { updater.trace(tracer) };
+        }
+        for hook in self.idle_period_hooks.values() {
+            unsafe { hook.trace(tracer) };
         }
         for event in self.current_window_events.values() {
             unsafe { event.trace(tracer) };
@@ -3351,6 +3368,8 @@ impl HostState {
             cookie_store,
             cookie_change_sequence: 0,
             cookie_change_callbacks: HashMap::new(),
+            idle_period_hooks: HashMap::new(),
+            idle_period_requests: BTreeSet::new(),
             auxiliary_opener_updaters: HashMap::new(),
             websocket_clients: HashMap::new(),
             next_websocket_id: 1,
@@ -6272,6 +6291,8 @@ impl HostState {
     fn retire_document_tree(&mut self, document: &NodeHandle) {
         let document_id = document.identity();
         self.cookie_change_callbacks.remove(&document_id);
+        self.idle_period_hooks.remove(&document_id);
+        self.idle_period_requests.remove(&document_id);
         self.auxiliary_opener_updaters.remove(&document_id);
         self.promise_reports.retire_document(document_id);
         self.pointer_lock.retire_document(document_id);
@@ -6403,6 +6424,9 @@ impl HostState {
             return;
         };
         self.cookie_change_callbacks
+            .remove(&previous.document.identity());
+        self.idle_period_hooks.remove(&previous.document.identity());
+        self.idle_period_requests
             .remove(&previous.document.identity());
         self.auxiliary_opener_updaters
             .remove(&previous.document.identity());
@@ -11716,13 +11740,28 @@ impl JsRuntime {
     }
 
     /// Runs queued macrotasks and pending promise jobs until idle or the
-    /// configured [`Self::set_task_pump_limit`] is reached.
+    /// configured [`Self::set_task_pump_limit`] is reached. When the task
+    /// queues empty, one idle period runs waiting `requestIdleCallback`
+    /// callbacks.
     ///
     /// Propagates the first error thrown by a timer callback or source string.
     pub fn run_until_idle(&mut self) -> JsResult<()> {
-        if self.is_terminated_worker() {
-            return Ok(());
+        // An idle period starts once the task queues are empty. Tasks its
+        // callbacks queue run in the same call; callbacks they post wait for
+        // the next call, so self-reposting idle work cannot spin here.
+        if self.pump_tasks()? && self.run_idle_period()? {
+            self.pump_tasks()?;
         }
+        Ok(())
+    }
+
+    /// Runs queued macrotasks and their microtask checkpoints. Returns whether
+    /// the pump stopped because every task queue was empty.
+    fn pump_tasks(&mut self) -> JsResult<bool> {
+        if self.is_terminated_worker() {
+            return Ok(false);
+        }
+        let mut drained = false;
         self.poll_image_resource_loads()?;
         font_loading::poll_resource_loads(&mut self.host_state.borrow_mut());
         self.host_state.borrow_mut().poll_script_loads();
@@ -11742,6 +11781,7 @@ impl JsRuntime {
             flush_web_lock_notifications();
             let task = { self.host_state.borrow_mut().event_loop.pop_task() };
             let Some((source, task)) = task else {
+                drained = true;
                 break;
             };
             let task_document_id = match &task {
@@ -11836,7 +11876,7 @@ impl JsRuntime {
                 diagnostics.finish_and_emit(true);
             }
         }
-        Ok(())
+        Ok(drained)
     }
 
     fn is_terminated_worker(&self) -> bool {
@@ -11945,13 +11985,17 @@ impl JsRuntime {
         self.dispatch_cookie_changes()?;
         self.run_worklet_background_tasks();
         self.run_shared_worker_background_tasks();
+        let mut drained = false;
         for _ in 0..self.task_pump_limit {
             if self.is_terminated_worker() {
                 break;
             }
             flush_web_lock_notifications();
             let task = { self.host_state.borrow_mut().event_loop.pop_task() };
-            let Some((_, task)) = task else { break };
+            let Some((_, task)) = task else {
+                drained = true;
+                break;
+            };
             let task_document_id = match &task {
                 Task::Timer {
                     owner_document_id, ..
@@ -12057,6 +12101,10 @@ impl JsRuntime {
             self.run_worklet_background_tasks();
             self.run_jobs_for_document(task_document_id)?;
             self.dispatch_cookie_changes()?;
+        }
+        // Tasks queued by idle callbacks run in the next pump.
+        if drained {
+            self.run_idle_period()?;
         }
         Ok(())
     }
@@ -16552,6 +16600,7 @@ fn register_host_bindings(
     language::register(context, &mut bindings)?;
     window_members::register(context, &mut bindings)?;
     highlight::register(context, &mut bindings)?;
+    idle_period::register(context, &mut bindings)?;
     register_private_callable(
         context,
         &mut bindings,
