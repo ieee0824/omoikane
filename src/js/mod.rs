@@ -17114,6 +17114,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(set_attribute_native),
         ),
         (
+            js_string!("__omoikane_set_style_computation_source"),
+            2,
+            NativeFunction::from_copy_closure(set_style_computation_source_native),
+        ),
+        (
             js_string!("__omoikane_set_attribute_ns"),
             5,
             NativeFunction::from_copy_closure(set_attribute_ns_native),
@@ -23723,6 +23728,33 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
                     csp_source.as_ref(),
                 );
         }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn set_style_computation_source_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    let source = args
+        .get(1)
+        .filter(|value| !value.is_null() && !value.is_undefined())
+        .map(|value| {
+            value
+                .to_string(context)
+                .map(|value| value.to_std_string_escaped())
+        })
+        .transpose()?;
+    with_node_render_mutation(&[node_id], |state| {
+        let node = state
+            .borrow()
+            .get_node(node_id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        node.set_style_computation_source(source);
+        state.borrow_mut().mark_style_dirty_for_node(&node);
         Ok(JsValue::undefined())
     })
 }

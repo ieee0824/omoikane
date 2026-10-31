@@ -298,19 +298,73 @@ impl Parser<'_> {
         while self.consume(b',') {
             values.push(self.expression()?);
         }
-        if !self.consume(b')') || values.iter().any(|v| v.unit != first.unit) {
+        if !self.consume(b')') {
             return None;
         }
-        let value = match name {
-            "min" => values.iter().map(|v| v.value).fold(f64::INFINITY, f64::min),
-            "max" => values
-                .iter()
-                .map(|v| v.value)
-                .fold(f64::NEG_INFINITY, f64::max),
-            "clamp" if values.len() == 3 => {
-                values[0].value.max(values[1].value.min(values[2].value))
+        let same_units = values.iter().all(|value| value.unit == first.unit);
+        let (value, unit) = match name {
+            "sin" | "cos" | "tan" if values.len() == 1 => {
+                let radians = match first.unit {
+                    Unit::Number => first.value,
+                    Unit::Angle => first.value.to_radians(),
+                    _ => return None,
+                };
+                let value = match name {
+                    "sin" => radians.sin(),
+                    "cos" => radians.cos(),
+                    _ => radians.tan(),
+                };
+                (value, Unit::Number)
             }
-            "abs" if values.len() == 1 => first.value.abs(),
+            "asin" | "acos" | "atan" if values.len() == 1 && first.unit == Unit::Number => {
+                let value = match name {
+                    "asin" => first.value.asin(),
+                    "acos" => first.value.acos(),
+                    _ => first.value.atan(),
+                };
+                (value.to_degrees(), Unit::Angle)
+            }
+            "atan2" if values.len() == 2 && same_units => (
+                values[0].value.atan2(values[1].value).to_degrees(),
+                Unit::Angle,
+            ),
+            "pow" if values.len() == 2 && values.iter().all(|value| value.unit == Unit::Number) => {
+                (values[0].value.powf(values[1].value), Unit::Number)
+            }
+            "sqrt" if values.len() == 1 && first.unit == Unit::Number => {
+                (first.value.sqrt(), Unit::Number)
+            }
+            "exp" if values.len() == 1 && first.unit == Unit::Number => {
+                (first.value.exp(), Unit::Number)
+            }
+            "log"
+                if matches!(values.len(), 1 | 2)
+                    && values.iter().all(|value| value.unit == Unit::Number) =>
+            {
+                let value = if values.len() == 1 {
+                    first.value.ln()
+                } else {
+                    first.value.log(values[1].value)
+                };
+                (value, Unit::Number)
+            }
+            _ if !same_units => return None,
+            "min" => (
+                values.iter().map(|v| v.value).fold(f64::INFINITY, f64::min),
+                first.unit,
+            ),
+            "max" => (
+                values
+                    .iter()
+                    .map(|v| v.value)
+                    .fold(f64::NEG_INFINITY, f64::max),
+                first.unit,
+            ),
+            "clamp" if values.len() == 3 => (
+                values[0].value.max(values[1].value.min(values[2].value)),
+                first.unit,
+            ),
+            "abs" if values.len() == 1 => (first.value.abs(), first.unit),
             "sign" if values.len() == 1 => {
                 return Some(Quantity {
                     value: if first.value == 0.0 {
@@ -336,7 +390,7 @@ impl Parser<'_> {
         };
         Some(Quantity {
             value,
-            unit: first.unit,
+            unit,
             precedence: 3,
             source: values.iter().any(|v| v.source.is_some()).then(|| {
                 format!(

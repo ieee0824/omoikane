@@ -506,6 +506,7 @@ pub struct Element {
     html: bool,
     attributes: BTreeMap<String, String>,
     attribute_records: Vec<AttributeRecord>,
+    style_computation_source: Option<String>,
     checked: bool,
     dirty_checkedness: bool,
     indeterminate: bool,
@@ -629,6 +630,7 @@ impl Element {
             html: true,
             attributes: BTreeMap::new(),
             attribute_records: Vec::new(),
+            style_computation_source: None,
             checked: false,
             dirty_checkedness: false,
             indeterminate: false,
@@ -691,6 +693,7 @@ impl Element {
             html,
             attributes: BTreeMap::new(),
             attribute_records: Vec::new(),
+            style_computation_source: None,
             checked: false,
             dirty_checkedness: false,
             indeterminate: false,
@@ -2058,6 +2061,9 @@ impl NodeHandle {
         inner.aria_element_references.remove(&name);
         if let NodeData::Element(element) = &mut inner.data {
             invalidate_for_attribute(&[&name]);
+            if name == "style" {
+                element.style_computation_source = None;
+            }
             if name == "async" {
                 element.script_force_async = false;
             }
@@ -2093,6 +2099,29 @@ impl NodeHandle {
             }
             rebuild_attribute_projection(element);
         }
+    }
+
+    /// Replaces the private inline-style source used for computation.
+    ///
+    /// CSSOM may serialize a color differently from the parsed value that owns
+    /// its non-quantized channels. Ordinary `style` attribute mutations clear
+    /// this override before installing their new public text.
+    pub(crate) fn set_style_computation_source(&self, source: Option<String>) {
+        if let NodeData::Element(element) = &mut self.0.borrow_mut().data {
+            element.style_computation_source = source;
+        }
+    }
+
+    /// Returns owned inline-style text suitable for cascade computation.
+    pub(crate) fn inline_style_source(&self) -> Option<String> {
+        let inner = self.0.borrow();
+        let NodeData::Element(element) = &inner.data else {
+            return None;
+        };
+        element
+            .style_computation_source
+            .clone()
+            .or_else(|| element.attributes.get("style").cloned())
     }
 
     /// Sets an XML attribute without HTML ASCII case folding.
@@ -2259,6 +2288,9 @@ impl NodeHandle {
         inner.aria_element_references.remove(&name);
         if let NodeData::Element(element) = &mut inner.data {
             invalidate_for_attribute(&[&name]);
+            if name == "style" {
+                element.style_computation_source = None;
+            }
             if let Some(index) = element
                 .attribute_records
                 .iter()

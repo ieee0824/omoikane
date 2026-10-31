@@ -367,6 +367,8 @@ let omoikaneUserActivationState;
   const nativeCreateCdataSection = globalThis.__omoikane_create_cdata_section;
   const nativeSerializeXml = globalThis.__omoikane_serialize_xml;
   const nativeSetAttributeNS = globalThis.__omoikane_set_attribute_ns;
+  const nativeSetStyleComputationSource =
+    globalThis.__omoikane_set_style_computation_source;
   const nativeRemoveAttributeNS = globalThis.__omoikane_remove_attribute_ns;
   const nativeIframeContentDocument = globalThis.__omoikane_iframe_content_document;
   const nativeWindowNamedSnapshot = globalThis.__omoikane_window_named_snapshot;
@@ -465,6 +467,7 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_create_cdata_section;
   delete globalThis.__omoikane_serialize_xml;
   delete globalThis.__omoikane_set_attribute_ns;
+  delete globalThis.__omoikane_set_style_computation_source;
   delete globalThis.__omoikane_remove_attribute_ns;
   delete globalThis.__omoikane_iframe_content_document;
   delete globalThis.__omoikane_iframe_global;
@@ -912,6 +915,7 @@ let omoikaneUserActivationState;
       oldValue = __omoikane_get_attribute(element.__id, attr);
       if (guard) guard();
       __omoikane_set_attribute(element.__id, attr, newValue);
+      if (attr === "style") safeWeakMapDelete(elementStyleDeclarationCache, element);
       refreshMaterializedAttribute(element, [attr, null, attr, newValue]);
       callbackName = attr;
       callbackNamespace = null;
@@ -4380,6 +4384,7 @@ let omoikaneUserActivationState;
       const normalizeDecls = (declarations) => {
         const normalized = [];
         for (const declaration of declarations) {
+          const computationValue = declaration.computationValue || declaration.value;
           if (needsStyleValueNormalization(declaration.name, declaration.value)) {
             const value = __omoikane_normalize_style_value(
               declaration.name, declaration.value
@@ -4395,6 +4400,7 @@ let omoikaneUserActivationState;
               declaration.name, declaration.value
             ))) normalized.push({ name, value, priority: declaration.priority });
           } else {
+            declaration.computationValue = computationValue;
             normalized.push(declaration);
           }
         }
@@ -4403,6 +4409,7 @@ let omoikaneUserActivationState;
       const cloneDecls = declarations => declarations.map(declaration => ({
         name: declaration.name,
         value: declaration.value,
+        computationValue: declaration.computationValue,
         priority: declaration.priority,
       }));
       const parseDecls = () => {
@@ -4412,6 +4419,7 @@ let omoikaneUserActivationState;
         const declarations = normalizeDecls(parseDeclText(source));
         safeWeakMapSet(elementStyleDeclarationCache, node, {
           source,
+          computationSource: source,
           declarations: cloneDecls(declarations),
         });
         return declarations;
@@ -4422,10 +4430,20 @@ let omoikaneUserActivationState;
           .join(" ");
       const writeDecls = (decls, skipUnchanged = false) => {
         const source = serializeDecls(decls);
-        if (skipUnchanged && __omoikane_get_attribute(node.__id, "style") === source) return;
+        const computationSource = serializeDecls(decls.map(declaration => ({
+          ...declaration,
+          value: declaration.computationValue || declaration.value,
+        })));
+        const cached = safeWeakMapGet(elementStyleDeclarationCache, node);
+        if (skipUnchanged && __omoikane_get_attribute(node.__id, "style") === source &&
+            cached && cached.computationSource === computationSource) return;
         node.setAttribute("style", source);
+        if (computationSource !== source) {
+          nativeSetStyleComputationSource(node.__id, computationSource);
+        }
         safeWeakMapSet(elementStyleDeclarationCache, node, {
           source,
+          computationSource,
           declarations: cloneDecls(decls),
         });
       };
@@ -4486,6 +4504,7 @@ let omoikaneUserActivationState;
       // retains remove/append precedence for logical and shorthand groups.
       const setValue = (kebab, value, priority) => {
         value = String(value);
+        const computationValue = value;
         if (needsStyleValueNormalization(kebab, value)) {
           const normalized = __omoikane_normalize_style_value(kebab, value);
           if (normalized === null) return;
@@ -4516,12 +4535,12 @@ let omoikaneUserActivationState;
           const previous = decls[existing];
           const nextPriority = priority || "";
           if (previous.value === value && previous.priority === nextPriority) return;
-          decls[existing] = { name: kebab, value, priority: nextPriority };
+          decls[existing] = { name: kebab, value, computationValue, priority: nextPriority };
           writeDecls(decls, true);
           return;
         }
         const remaining = decls.filter(d => d.name !== kebab);
-        remaining.push({ name: kebab, value, priority: priority || "" });
+        remaining.push({ name: kebab, value, computationValue, priority: priority || "" });
         writeDecls(remaining, true);
       };
       // Removes a kebab-case property and returns its previous value ("" if it
