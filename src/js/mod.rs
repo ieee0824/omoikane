@@ -2633,6 +2633,7 @@ struct HostState {
     nonblocking_fetch_loading: bool,
     nonblocking_iframe_loading: bool,
     fetch_loads: fetch_loading::FetchLoads,
+    background_loads: fetch_loading::BackgroundLoads,
     script_loads: script_loading::ScriptLoads,
     resource_queue: crate::resource_worker::ResourceQueue,
     pending_image_events: Vec<image_loading::PendingImageEvent>,
@@ -3505,6 +3506,7 @@ impl HostState {
             nonblocking_fetch_loading: false,
             nonblocking_iframe_loading: false,
             fetch_loads: Default::default(),
+            background_loads: Default::default(),
             script_loads: Default::default(),
             resource_queue: Default::default(),
             pending_image_events: Vec::new(),
@@ -6359,6 +6361,7 @@ impl HostState {
         self.registered_custom_properties.remove(&document_id);
         self.font_loading.remove_document(document_id);
         self.script_loads.remove_document(document_id);
+        fetch_loading::activate_background_document(self, document_id);
         self.fetch_loads.remove_document(document_id);
         self.write_parsers.remove(&document_id);
         self.written_script_queue
@@ -6504,6 +6507,7 @@ impl HostState {
         self.registered_custom_properties.remove(&document_id);
         self.font_loading.remove_document(document_id);
         self.script_loads.remove_document(document_id);
+        fetch_loading::activate_background_document(self, document_id);
         self.fetch_loads.remove_document(document_id);
         self.write_parsers.remove(&document_id);
         self.written_script_queue
@@ -17223,6 +17227,11 @@ fn register_host_bindings(
             js_string!("__omoikane_cancel_fetch"),
             1,
             NativeFunction::from_copy_closure(fetch_loading::cancel_native),
+        ),
+        (
+            js_string!("__omoikane_background_fetch"),
+            11,
+            NativeFunction::from_copy_closure(fetch_loading::background_native),
         ),
         (
             js_string!("__omoikane_fetch"),

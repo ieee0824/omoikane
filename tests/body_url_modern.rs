@@ -61,3 +61,68 @@ fn url_parse_and_search_params_size_follow_current_state() {
         "[true,\"https://example.test/path?a=1&a=2\",2,3,1,true,\"https://example.test/ok\"]"
     );
 }
+
+#[test]
+fn beacon_and_fetch_later_expose_keepalive_contracts() {
+    let mut api_runtime = runtime();
+    assert_eq!(
+        json(
+            &mut api_runtime,
+            r#"(() => {
+              const endpoint = 'http://127.0.0.1:9/keepalive';
+              const result = fetchLater(endpoint, {
+                method: 'POST', body: 'later', activateAfter: 0
+              });
+              let invalidDelay = false;
+              try { fetchLater(endpoint, { activateAfter: -1 }); }
+              catch (error) { invalidDelay = error instanceof RangeError; }
+              let insecureTarget = false;
+              try { fetchLater('http://example.test/'); }
+              catch (error) { insecureTarget = error instanceof TypeError; }
+              const controller = new AbortController();
+              const aborted = fetchLater(endpoint, { signal: controller.signal });
+              controller.abort();
+              let quotaError = false;
+              try { fetchLater(endpoint, {method:'POST', body:new Uint8Array(65537)}); }
+              catch (error) { quotaError = error instanceof DOMException && error.name === 'QuotaExceededError'; }
+              return JSON.stringify([
+                typeof navigator.sendBeacon,
+                typeof fetchLater,
+                result instanceof FetchLaterResult,
+                result.activated,
+                invalidDelay,
+                insecureTarget,
+                aborted.activated,
+                quotaError,
+                Object.prototype.toString.call(result)
+              ]);
+            })()"#,
+        ),
+        "[\"function\",\"function\",true,true,true,true,false,true,\"[object FetchLaterResult]\"]"
+    );
+
+    let mut quota_runtime = runtime();
+    assert_eq!(
+        json(
+            &mut quota_runtime,
+            r#"JSON.stringify([
+              navigator.sendBeacon('http://127.0.0.1:9/full', new Uint8Array(65536)),
+              navigator.sendBeacon('http://127.0.0.1:9/overflow', new Uint8Array([1]))
+            ])"#,
+        ),
+        "[true,false]"
+    );
+
+    let mut insecure_runtime = JsRuntime::with_document_and_url(
+        TreeBuilder::parse("<main></main>").document(),
+        "http://example.test/",
+    )
+    .expect("insecure runtime");
+    assert_eq!(
+        json(
+            &mut insecure_runtime,
+            "JSON.stringify([typeof fetchLater, typeof FetchLaterResult, typeof navigator.sendBeacon])",
+        ),
+        "[\"undefined\",\"undefined\",\"function\"]"
+    );
+}

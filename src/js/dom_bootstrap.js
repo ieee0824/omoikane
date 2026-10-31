@@ -60,6 +60,7 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_canvas_svg_path;
   const nativeBeginFetch = globalThis.__omoikane_begin_fetch;
   const nativeCancelFetch = globalThis.__omoikane_cancel_fetch;
+  const nativeBackgroundFetch = globalThis.__omoikane_background_fetch;
   const nativeWebSocketConnect = globalThis.__omoikane_websocket_connect;
   const nativeEventSourceFetch = globalThis.__omoikane_event_source_fetch;
   const nativeTrustedTypeCreate = globalThis.__omoikane_trusted_type_create;
@@ -79,6 +80,7 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_url_pattern;
   delete globalThis.__omoikane_begin_fetch;
   delete globalThis.__omoikane_cancel_fetch;
+  delete globalThis.__omoikane_background_fetch;
   delete globalThis.__omoikane_websocket_connect;
   delete globalThis.__omoikane_event_source_fetch;
   delete globalThis.__omoikane_trusted_type_create;
@@ -36066,6 +36068,87 @@ let omoikaneUserActivationState;
       throw error;
     });
   };
+
+  function backgroundRequestArguments(request, cspSource) {
+    return [
+      request.url,
+      request.method,
+      JSON.stringify([...request.headers]),
+      bodyAsPayload(request.__body),
+      request.mode,
+      request.credentials,
+      request.redirect,
+      undefined,
+      cspSource,
+    ];
+  }
+
+  Navigator.prototype.sendBeacon = function(url, data = null) {
+    if (!(this instanceof Navigator)) throw new TypeError("Illegal invocation");
+    const request = new Request(url, {
+      method: "POST",
+      body: data,
+      mode: "cors",
+      credentials: "include",
+      redirect: "follow",
+    });
+    return nativeBackgroundFetch(
+      "beacon",
+      ...backgroundRequestArguments(request, nativeCaptureCspSource()),
+      undefined,
+    ) === true;
+  };
+
+  const fetchLaterResults = new WeakMap();
+  class FetchLaterResult {
+    constructor(token, id) {
+      if (token !== fetchLaterResults) throw new TypeError("Illegal constructor");
+      fetchLaterResults.set(this, id);
+    }
+    get activated() {
+      if (!fetchLaterResults.has(this)) throw new TypeError("Illegal invocation");
+      return nativeBackgroundFetch("status", fetchLaterResults.get(this)) === true;
+    }
+    get [Symbol.toStringTag]() { return "FetchLaterResult"; }
+  }
+  function isFetchLaterUrlTrustworthy(value) {
+    const parsed = new URL(value);
+    if (parsed.protocol === "https:") return true;
+    if (parsed.protocol !== "http:") return false;
+    const hostname = parsed.hostname.toLowerCase();
+    return hostname === "localhost" || hostname.endsWith(".localhost") ||
+      hostname === "127.0.0.1" || hostname === "[::1]";
+  }
+  function fetchLater(input, init = {}) {
+    if (arguments.length === 0) throw new TypeError("fetchLater requires a request");
+    const source = input instanceof Request ? input : null;
+    const options = init == null ? {} : { ...Object(init) };
+    const activateAfter = options.activateAfter;
+    delete options.activateAfter;
+    const request = new Request(input, options);
+    if (!isFetchLaterUrlTrustworthy(request.url)) {
+      throw new TypeError("fetchLater requires a potentially trustworthy HTTP URL");
+    }
+    if (request.signal && request.signal.aborted) throw request.signal.reason;
+    if (source && options.body === undefined && !bodyIsEmpty(source.__body)) disturbBody(source);
+    const id = nativeBackgroundFetch(
+      "fetchLater",
+      ...backgroundRequestArguments(request, nativeCaptureCspSource()),
+      activateAfter,
+    );
+    if (id === false) throw new DOMException("The deferred fetch quota was exceeded", "QuotaExceededError");
+    const result = new FetchLaterResult(fetchLaterResults, Number(id));
+    if (request.signal) {
+      request.signal.addEventListener("abort", () => {
+        nativeBackgroundFetch("cancel", Number(id));
+      }, { once: true });
+    }
+    return result;
+  }
+  if (globalThis.isSecureContext) {
+    globalThis.FetchLaterResult = FetchLaterResult;
+    globalThis.fetchLater = fetchLater;
+  }
 
   // -------------------------------------------------------------------------
   // Cache Storage
