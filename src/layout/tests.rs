@@ -14245,6 +14245,49 @@ fn named_position_try_rule_relocates_an_overflowing_box() {
 }
 
 #[test]
+fn named_position_try_rule_resolves_anchor_insets() {
+    let document = NodeHandle::document();
+    let body = NodeHandle::element("body");
+    let first_anchor = NodeHandle::element("section");
+    let second_anchor = NodeHandle::element("section");
+    let positioned = NodeHandle::element("aside");
+    first_anchor.set_attribute("id", "first");
+    second_anchor.set_attribute("id", "second");
+    document.append_child(body.clone());
+    body.append_child(first_anchor);
+    body.append_child(second_anchor);
+    body.append_child(positioned.clone());
+    let mut resolver = StyleResolver::new();
+    resolver.add_stylesheet(
+        Origin::Author,
+        parse_stylesheet(
+            "@position-try --pf { top: anchor(top); left: anchor(right); } \
+             body { margin: 8px } section, aside { position: absolute; width: 100px; height: 100px } \
+             #first { top: 100px; left: 0; anchor-name: --a } \
+             #second { top: 200px; left: 0; anchor-name: --b } \
+             aside { position-try-fallbacks: --pf; position-anchor: --a; left: 999999px }",
+        )
+        .unwrap(),
+    );
+    let layout = layout_tree(
+        &body,
+        &mut resolver,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+        },
+    )
+    .unwrap();
+    let rect = find_layout_box(&layout, &positioned)
+        .unwrap()
+        .dimensions
+        .border_box();
+    assert_eq!((rect.x, rect.y), (100.0, 100.0));
+}
+
+#[test]
 fn flex_wrap_child_calc_width_resolves_correctly() {
     let document = NodeHandle::document();
     let body = NodeHandle::element("body");

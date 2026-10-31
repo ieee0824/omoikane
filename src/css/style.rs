@@ -9964,16 +9964,20 @@ fn valid_anchor_size_fallback(value: &Value) -> bool {
             valid_anchor_size_function(value)
         }
         Value::Function { name, arguments } if is_length_percentage_math_function(name) => {
-            !arguments.is_empty()
-                && arguments.iter().all(|argument| match argument {
-                    Value::List(values) | Value::CommaList(values) => values.iter().all(|part| {
-                        valid_anchor_size_fallback(part)
-                            || matches!(part, Value::Keyword(operator) if matches!(operator.as_str(), "+" | "-" | "*" | "/"))
-                    }),
-                    argument => valid_anchor_size_fallback(argument),
-                })
+            !arguments.is_empty() && arguments.iter().all(valid_anchor_size_math_component)
         }
         _ => false,
+    }
+}
+
+fn valid_anchor_size_math_component(value: &Value) -> bool {
+    match value {
+        Value::List(values) | Value::CommaList(values) => {
+            values.iter().all(valid_anchor_size_math_component)
+        }
+        Value::Number(number) => number.is_finite(),
+        Value::Keyword(operator) => matches!(operator.as_str(), "+" | "-" | "*" | "/"),
+        value => valid_anchor_size_fallback(value),
     }
 }
 
@@ -10057,6 +10061,91 @@ fn canonical_anchor_size_tree(value: &Value) -> Value {
     }
 }
 
+fn render_canonical_anchor_size(value: &Value) -> String {
+    let value = canonical_anchor_size_tree(value);
+    render_anchor_size_value(&value, false)
+}
+
+fn render_anchor_size_value(value: &Value, nested_calc: bool) -> String {
+    match value {
+        Value::Function { name, arguments } if name.eq_ignore_ascii_case("calc") => {
+            let parts = arguments
+                .first()
+                .and_then(|argument| match argument {
+                    Value::List(parts) => Some(parts.as_slice()),
+                    _ => None,
+                })
+                .unwrap_or(arguments.as_slice());
+            if matches!(parts, [Value::Function { name, .. }] if name.eq_ignore_ascii_case("anchor-size"))
+            {
+                return render_anchor_size_value(&parts[0], false);
+            }
+            let body = if let [
+                Value::Function {
+                    name,
+                    arguments: inner,
+                },
+                Value::Keyword(operator),
+                Value::Number(divisor),
+            ] = parts
+                && name.eq_ignore_ascii_case("calc")
+                && operator == "/"
+                && *divisor == 2.0
+            {
+                let inner = inner
+                    .iter()
+                    .map(|value| render_anchor_size_value(value, true))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("0.5 * ({inner})")
+            } else if let [
+                anchor @ Value::Function { name, .. },
+                Value::Keyword(operator),
+                percentage @ Value::Percentage(_),
+            ] = parts
+                && name.eq_ignore_ascii_case("anchor-size")
+                && operator == "+"
+            {
+                format!(
+                    "{} + {}",
+                    render_anchor_size_value(percentage, false),
+                    render_anchor_size_value(anchor, false)
+                )
+            } else {
+                parts
+                    .iter()
+                    .map(|value| render_anchor_size_value(value, true))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            if nested_calc {
+                format!("({body})")
+            } else {
+                format!("calc({body})")
+            }
+        }
+        Value::Function { name, arguments } => format!(
+            "{name}({})",
+            arguments
+                .iter()
+                .map(|value| render_anchor_size_value(value, false))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::List(values) => values
+            .iter()
+            .map(|value| render_anchor_size_value(value, nested_calc))
+            .collect::<Vec<_>>()
+            .join(" "),
+        Value::CommaList(values) => values
+            .iter()
+            .map(|value| render_anchor_size_value(value, nested_calc))
+            .collect::<Vec<_>>()
+            .join(", "),
+        value => render_value(value),
+    }
+}
+
 pub(crate) fn normalize_anchor_position_specified(property: &str, text: &str) -> Option<String> {
     let keyword = text.trim().to_ascii_lowercase();
     if is_css_wide_keyword(&keyword) {
@@ -10077,9 +10166,7 @@ pub(crate) fn normalize_anchor_position_specified(property: &str, text: &str) ->
     if contains_valid_anchor_size_function(&declaration.value)
         && supports_declaration(property, text)
     {
-        return Some(render_value(&canonical_anchor_size_tree(
-            &declaration.value,
-        )));
+        return Some(render_canonical_anchor_size(&declaration.value));
     }
     None
 }

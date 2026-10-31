@@ -2945,7 +2945,7 @@ fn layout_document(
         content: viewport.rect,
         ..BoxDimensions::default()
     };
-    let anchors = collect_anchor_geometries(&children, resolver);
+    let mut anchors = collect_anchor_geometries(&children, resolver);
     for (child, style, static_position) in positioned_children {
         if let Some(positioned) = layout_positioned_child_with_anchors(
             &child,
@@ -2956,6 +2956,7 @@ fn layout_document(
             viewport,
             &anchors,
         ) {
+            append_anchor_geometries(&positioned, resolver, &mut anchors);
             children.push(positioned);
         }
     }
@@ -4538,7 +4539,7 @@ fn layout_block_cell_body(
     } else {
         positioned_ancestor
     };
-    let anchors = collect_anchor_geometries(&children, resolver);
+    let mut anchors = collect_anchor_geometries(&children, resolver);
     for (source, cs, static_position) in positioned_children {
         if let Some(positioned) = layout_positioned_source(
             &source,
@@ -4552,6 +4553,7 @@ fn layout_block_cell_body(
             viewport,
             &anchors,
         ) {
+            append_anchor_geometries(&positioned, resolver, &mut anchors);
             children.push(positioned);
         }
     }
@@ -6589,31 +6591,36 @@ fn collect_anchor_geometries(
     children: &[LayoutBox],
     resolver: &mut StyleResolver,
 ) -> Vec<AnchorGeometry> {
-    fn visit(layout: &LayoutBox, resolver: &mut StyleResolver, anchors: &mut Vec<AnchorGeometry>) {
-        let style = layout_box_style(layout, resolver);
-        if let Some(ComputedValue::Keyword(names)) = style.get_by_id(PropertyId::AnchorName) {
-            let names = crate::css::split_top_level_commas(names)
-                .into_iter()
-                .flat_map(|part| part.split_ascii_whitespace())
-                .filter(|name| name.starts_with("--"))
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            if !names.is_empty() {
-                anchors.push(AnchorGeometry {
-                    names,
-                    rect: layout.dimensions.border_box(),
-                });
-            }
-        }
-        for child in &layout.children {
-            visit(child, resolver, anchors);
-        }
-    }
     let mut anchors = Vec::new();
     for child in children {
-        visit(child, resolver, &mut anchors);
+        append_anchor_geometries(child, resolver, &mut anchors);
     }
     anchors
+}
+
+fn append_anchor_geometries(
+    layout: &LayoutBox,
+    resolver: &mut StyleResolver,
+    anchors: &mut Vec<AnchorGeometry>,
+) {
+    let style = layout_box_style(layout, resolver);
+    if let Some(ComputedValue::Keyword(names)) = style.get_by_id(PropertyId::AnchorName) {
+        let names = crate::css::split_top_level_commas(names)
+            .into_iter()
+            .flat_map(|part| part.split_ascii_whitespace())
+            .filter(|name| name.starts_with("--"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if !names.is_empty() {
+            anchors.push(AnchorGeometry {
+                names,
+                rect: layout.dimensions.border_box(),
+            });
+        }
+    }
+    for child in &layout.children {
+        append_anchor_geometries(child, resolver, anchors);
+    }
 }
 
 fn resolved_positioned_inset(
