@@ -49,6 +49,14 @@ let omoikaneUserActivationState;
   const computedStyleObjectKeys = Object.keys;
   const nativeCanvasBlit = globalThis.__omoikane_canvas_blit;
   delete globalThis.__omoikane_canvas_blit;
+  const nativeCanvas2dDraw = globalThis.__omoikane_canvas2d_draw;
+  delete globalThis.__omoikane_canvas2d_draw;
+  const nativeCanvas2dContains = globalThis.__omoikane_canvas2d_contains;
+  delete globalThis.__omoikane_canvas2d_contains;
+  const nativeCanvasParseColor = globalThis.__omoikane_canvas_parse_color;
+  delete globalThis.__omoikane_canvas_parse_color;
+  const nativeCanvasSvgPath = globalThis.__omoikane_canvas_svg_path;
+  delete globalThis.__omoikane_canvas_svg_path;
   const nativeBeginFetch = globalThis.__omoikane_begin_fetch;
   const nativeCancelFetch = globalThis.__omoikane_cancel_fetch;
   const nativeWebSocketConnect = globalThis.__omoikane_websocket_connect;
@@ -18340,21 +18348,10 @@ let omoikaneUserActivationState;
     };
     return [integer("width", 300), integer("height", 150)];
   }
-  function canvasColor(value, alpha) {
-    const text = String(value).trim().toLowerCase();
-    const named = { black:[0,0,0,255], white:[255,255,255,255], red:[255,0,0,255], green:[0,128,0,255], blue:[0,0,255,255], transparent:[0,0,0,0] };
-    let color = named[text];
-    if (!color && /^#[0-9a-f]{6}$/.test(text)) color = [parseInt(text.slice(1,3),16),parseInt(text.slice(3,5),16),parseInt(text.slice(5,7),16),255];
-    if (!color && /^#[0-9a-f]{3}$/.test(text)) color = [...text.slice(1)].map(ch=>parseInt(ch+ch,16)).concat(255);
-    const rgb = text.match(/^rgba?\(([^)]+)\)$/);
-    if (!color && rgb) { const p=rgb[1].split(",").map(Number); color=[p[0]||0,p[1]||0,p[2]||0,p.length>3?Math.round(Math.max(0,Math.min(1,p[3]))*255):255]; }
-    color = color || [0,0,0,255];
-    return [color[0],color[1],color[2],Math.round(color[3]*alpha)];
-  }
   function initialCanvasState(canvas) {
     const [width,height]=canvasDimensions(canvas);
     return { width,height,pixels:new Uint8ClampedArray(width*height*4), context:null, webgl:null, contextMode:null,
-      style:{fillStyle:"#000000",strokeStyle:"#000000",globalAlpha:1,lineWidth:1,lineCap:"butt",lineJoin:"miter",miterLimit:10,font:"10px sans-serif",transform:[1,0,0,1,0,0],clip:null}, stack:[], paths:[], current:null };
+      style:defaultCanvasStyle(), stack:[], path:newCanvasPath() };
   }
   function canvasState(canvas) {
     let state=canvasStates.get(canvas); const [width,height]=canvasDimensions(canvas);
@@ -18370,95 +18367,696 @@ let omoikaneUserActivationState;
     }
     return state;
   }
-  function blendCanvasPixel(state,x,y,color,clear=false) {
-    x=Math.floor(x); y=Math.floor(y); if(x<0||y<0||x>=state.width||y>=state.height)return;
-    if(state.style.clip && !pointInCanvasPaths(x+.5,y+.5,state.style.clip.paths,state.style.clip.rule))return;
-    const i=(y*state.width+x)*4; if(clear){state.pixels.fill(0,i,i+4);return;}
-    const sa=color[3]/255, da=state.pixels[i+3]/255, oa=sa+da*(1-sa);
-    if(!oa){state.pixels.fill(0,i,i+4);return;}
-    for(let c=0;c<3;c++)state.pixels[i+c]=Math.round((color[c]*sa+state.pixels[i+c]*da*(1-sa))/oa);
-    state.pixels[i+3]=Math.round(oa*255);
-  }
-  function transformCanvasPoint(m,x,y){return [m[0]*x+m[2]*y+m[4],m[1]*x+m[3]*y+m[5]];}
-  function pointInCanvasPaths(x,y,paths,rule){let winding=0,crossings=0;for(const path of paths){for(let i=0;i<path.length;i++){const a=path[i],b=path[(i+1)%path.length];if((a[1]>y)!==(b[1]>y)){const ix=a[0]+(y-a[1])*(b[0]-a[0])/(b[1]-a[1]);if(ix>x){crossings++;winding+=b[1]>a[1]?1:-1;}}}}return rule==="evenodd"?crossings%2===1:winding!==0;}
   function commitCanvas(canvas,state){
     if (canvas.__id != null) __omoikane_canvas_commit(canvas.__id,state.width,state.height,new Uint8Array(state.pixels.buffer));
   }
 
-  class CanvasRenderingContext2D {
-    constructor(canvas){this.canvas=canvas;}
-    get __s(){return canvasState(this.canvas);}
-    save(){const s=this.__s;s.stack.push({...s.style,transform:s.style.transform.slice(),clip:s.style.clip&&{rule:s.style.clip.rule,paths:s.style.clip.paths.map(p=>p.map(q=>q.slice()))}});}
-    restore(){const s=this.__s;if(s.stack.length)s.style=s.stack.pop();}
-    translate(x,y){this.transform(1,0,0,1,x,y);} rotate(a){this.transform(Math.cos(a),Math.sin(a),-Math.sin(a),Math.cos(a),0,0);} scale(x,y){this.transform(x,0,0,y,0,0);}
-    transform(a,b,c,d,e,f){const s=this.__s,m=s.style.transform;s.style.transform=[m[0]*a+m[2]*b,m[1]*a+m[3]*b,m[0]*c+m[2]*d,m[1]*c+m[3]*d,m[0]*e+m[2]*f+m[4],m[1]*e+m[3]*f+m[5]];}
-    setTransform(a,b,c,d,e,f){if(typeof a==="object"){({a,b,c,d,e,f}=a);}this.__s.style.transform=[Number(a),Number(b),Number(c),Number(d),Number(e),Number(f)];}
-    resetTransform(){this.__s.style.transform=[1,0,0,1,0,0];}
-    clearRect(x,y,w,h){
-      const s=this.__s,m=s.style.transform;
-      if(!s.style.clip&&m[0]===1&&m[1]===0&&m[2]===0&&m[3]===1&&m[4]===0&&m[5]===0){
-        const left=Math.max(0,Math.floor(x)),top=Math.max(0,Math.floor(y));
-        const right=Math.min(s.width,Math.ceil(Number(x)+Number(w)));
-        const bottom=Math.min(s.height,Math.ceil(Number(y)+Number(h)));
-        if(left<right&&top<bottom){
-          if(left===0&&top===0&&right===s.width&&bottom===s.height)s.pixels.fill(0);
-          else for(let row=top;row<bottom;row++)s.pixels.fill(0,(row*s.width+left)*4,(row*s.width+right)*4);
-        }
-      }else{
-        for(let py=Math.floor(y);py<Math.ceil(y+h);py++)for(let px=Math.floor(x);px<Math.ceil(x+w);px++){
-          const p=transformCanvasPoint(m,px,py);
-          blendCanvasPixel(s,p[0],p[1],[0,0,0,0],true);
-        }
-      }
-      commitCanvas(this.canvas,s);
-    }
-    fillRect(x,y,w,h){this.beginPath();this.rect(x,y,w,h);this.fill();}
-    strokeRect(x,y,w,h){this.beginPath();this.rect(x,y,w,h);this.stroke();}
-    beginPath(){const s=this.__s;s.paths=[];s.current=null;}
-    moveTo(x,y){const s=this.__s,p=transformCanvasPoint(s.style.transform,+x,+y);s.current=[p];s.paths.push(s.current);}
-    lineTo(x,y){const s=this.__s,p=transformCanvasPoint(s.style.transform,+x,+y);if(!s.current)this.moveTo(x,y);else s.current.push(p);}
-    closePath(){const s=this.__s;if(s.current&&s.current.length)s.current.push(s.current[0].slice());}
-    rect(x,y,w,h){this.moveTo(x,y);this.lineTo(x+w,y);this.lineTo(x+w,y+h);this.lineTo(x,y+h);this.closePath();}
-    quadraticCurveTo(cx,cy,x,y){const s=this.__s;if(!s.current||!s.current.length)this.moveTo(0,0);const p0=s.current[s.current.length-1],p=transformCanvasPoint(s.style.transform,+cx,+cy),e=transformCanvasPoint(s.style.transform,+x,+y);for(let i=1;i<=20;i++){const t=i/20,u=1-t;s.current.push([u*u*p0[0]+2*u*t*p[0]+t*t*e[0],u*u*p0[1]+2*u*t*p[1]+t*t*e[1]]);}}
-    bezierCurveTo(c1x,c1y,c2x,c2y,x,y){const s=this.__s;if(!s.current||!s.current.length)this.moveTo(0,0);const p0=s.current[s.current.length-1],p1=transformCanvasPoint(s.style.transform,c1x,c1y),p2=transformCanvasPoint(s.style.transform,c2x,c2y),p3=transformCanvasPoint(s.style.transform,x,y);for(let i=1;i<=24;i++){const t=i/24,u=1-t;s.current.push([u*u*u*p0[0]+3*u*u*t*p1[0]+3*u*t*t*p2[0]+t*t*t*p3[0],u*u*u*p0[1]+3*u*u*t*p1[1]+3*u*t*t*p2[1]+t*t*t*p3[1]]);}}
-    arc(x,y,r,start,end,ccw=false){const span=ccw?start-end:end-start,steps=Math.max(8,Math.ceil(Math.abs(span)*12));for(let i=0;i<=steps;i++){const a=ccw?start-span*i/steps:start+span*i/steps;i?this.lineTo(x+r*Math.cos(a),y+r*Math.sin(a)):this.moveTo(x+r*Math.cos(a),y+r*Math.sin(a));}}
-    ellipse(x,y,rx,ry,rotation,start,end,ccw=false){const span=ccw?start-end:end-start,steps=Math.max(8,Math.ceil(Math.abs(span)*12));for(let i=0;i<=steps;i++){const a=ccw?start-span*i/steps:start+span*i/steps,px=rx*Math.cos(a),py=ry*Math.sin(a),xx=x+px*Math.cos(rotation)-py*Math.sin(rotation),yy=y+px*Math.sin(rotation)+py*Math.cos(rotation);i?this.lineTo(xx,yy):this.moveTo(xx,yy);}}
-    arcTo(x1,y1,x2,y2){this.lineTo(x1,y1);this.lineTo(x2,y2);}
-    fill(rule="nonzero"){const s=this.__s,c=canvasColor(s.style.fillStyle,s.style.globalAlpha);for(let y=0;y<s.height;y++)for(let x=0;x<s.width;x++)if(pointInCanvasPaths(x+.5,y+.5,s.paths,rule))blendCanvasPixel(s,x,y,c);commitCanvas(this.canvas,s);}
-    stroke(){const s=this.__s,c=canvasColor(s.style.strokeStyle,s.style.globalAlpha),radius=Math.max(.5,s.style.lineWidth/2);for(const path of s.paths)for(let i=1;i<path.length;i++){const a=path[i-1],b=path[i],minx=Math.floor(Math.min(a[0],b[0])-radius),maxx=Math.ceil(Math.max(a[0],b[0])+radius),miny=Math.floor(Math.min(a[1],b[1])-radius),maxy=Math.ceil(Math.max(a[1],b[1])+radius),dx=b[0]-a[0],dy=b[1]-a[1],l=dx*dx+dy*dy;for(let y=miny;y<=maxy;y++)for(let x=minx;x<=maxx;x++){const t=l?Math.max(0,Math.min(1,((x+.5-a[0])*dx+(y+.5-a[1])*dy)/l)):0,qx=a[0]+t*dx,qy=a[1]+t*dy;if(Math.hypot(x+.5-qx,y+.5-qy)<=radius)blendCanvasPixel(s,x,y,c);}}commitCanvas(this.canvas,s);}
-    clip(rule="nonzero"){const s=this.__s;s.style.clip={rule:rule==="evenodd"?"evenodd":"nonzero",paths:s.paths.map(p=>p.map(q=>q.slice()))};}
-    createImageData(a,b){return a instanceof ImageData?new ImageData(a.width,a.height):new ImageData(a,b);}
-    getImageData(sx,sy,sw,sh){sw=Number(sw);sh=Number(sh);if(sw<=0||sh<=0)throw new DOMException("ImageData dimensions must be positive","IndexSizeError");const s=this.__s,out=new ImageData(sw,sh);for(let y=0;y<out.height;y++)for(let x=0;x<out.width;x++){const si=((sy+y)*s.width+(sx+x))*4,di=(y*out.width+x)*4;if(sx+x>=0&&sy+y>=0&&sx+x<s.width&&sy+y<s.height)out.data.set(s.pixels.slice(si,si+4),di);}return out;}
-    putImageData(image,dx,dy){const s=this.__s;for(let y=0;y<image.height;y++)for(let x=0;x<image.width;x++){const tx=dx+x,ty=dy+y;if(tx>=0&&ty>=0&&tx<s.width&&ty<s.height)s.pixels.set(image.data.slice((y*image.width+x)*4,(y*image.width+x+1)*4),(ty*s.width+tx)*4);}commitCanvas(this.canvas,s);}
-    drawImage(source,...args){let src;
-      const isHtmlCanvas = typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement;
-      if (isHtmlCanvas || source instanceof OffscreenCanvas) src=canvasState(source);
-      else if (source instanceof ImageBitmap) {
-        if (source.__detached) throw new DOMException("The ImageBitmap is detached","InvalidStateError");
-        src={width:source.width,height:source.height,pixels:source.__pixels};
-      } else {
-        const raw=source&&source.__id!=null?__omoikane_canvas_image_source(source.__id):null;
-        if(raw===null)throw new DOMException("Image source is unavailable","InvalidStateError");
-        const decoded=JSON.parse(raw);src={width:decoded.width,height:decoded.height,pixels:bytesFromBase64(decoded.pixels)};
-      }
-      const s=this.__s;let sx=0,sy=0,sw=src.width,sh=src.height,dx,dy,dw,dh;
-      if(args.length===2){[dx,dy]=args;dw=sw;dh=sh;}else if(args.length===4){[dx,dy,dw,dh]=args;}else{[sx,sy,sw,sh,dx,dy,dw,dh]=args;}
-      const m=s.style.transform;
-      if(!s.style.clip && s.style.globalAlpha===1 && sw===dw && sh===dh &&
-          m[0]===1 && m[1]===0 && m[2]===0 && m[3]===1 &&
-          typeof dx==="number" && typeof dy==="number" &&
-          nativeCanvasBlit(
-            new Uint8Array(src.pixels.buffer,src.pixels.byteOffset,src.pixels.byteLength),
-            new Uint8Array(s.pixels.buffer,s.pixels.byteOffset,s.pixels.byteLength),
-            src.width,src.height,s.width,s.height,sx,sy,sw,sh,dx+m[4],dy+m[5])) {
-        commitCanvas(this.canvas,s);return;
-      }
-      for(let y=0;y<dh;y++)for(let x=0;x<dw;x++){const xx=Math.floor(sx+x*sw/dw),yy=Math.floor(sy+y*sh/dh),i=(yy*src.width+xx)*4;blendCanvasPixel(s,dx+x,dy+y,[src.pixels[i],src.pixels[i+1],src.pixels[i+2],Math.round(src.pixels[i+3]*s.style.globalAlpha)]);}commitCanvas(this.canvas,s);}
-    measureText(text){const size=parseFloat(this.__s.style.font)||10;return domInterfaces.makeTextMetrics({width:String(text).length*size*.6,actualBoundingBoxAscent:size*.8,actualBoundingBoxDescent:size*.2});}
-    fillText(text,x,y){const s=this.__s,size=parseFloat(s.style.font)||10,w=this.measureText(text).width;this.fillRect(x,y-size*.8,w,size);}
-    strokeText(text,x,y){const s=this.__s,size=parseFloat(s.style.font)||10,w=this.measureText(text).width;this.strokeRect(x,y-size*.8,w,size);}
+  // Canvas 2D (HTML §4.12.5.1). Script keeps the drawing state and builds
+  // device-space paths; the native rasterizer paints them.
+  const canvasConstructionToken = {};
+  const canvasIdentity = [1,0,0,1,0,0];
+  const canvasCompositeOperations = new Set(["clear","plus-lighter","source-over","source-in","source-out","source-atop",
+    "destination-over","destination-in","destination-out","destination-atop","lighter","copy","xor",
+    "multiply","screen","overlay","darken","lighten","color-dodge","color-burn","hard-light",
+    "soft-light","difference","exclusion","hue","saturation","color","luminosity"]);
+  const canvasEnums = {
+    lineCap: ["butt","round","square"],
+    lineJoin: ["round","bevel","miter"],
+    textAlign: ["start","end","left","right","center"],
+    textBaseline: ["top","hanging","middle","alphabetic","ideographic","bottom"],
+    direction: ["ltr","rtl","inherit"],
+    imageSmoothingQuality: ["low","medium","high"],
+    fontKerning: ["auto","normal","none"],
+    fontStretch: ["ultra-condensed","extra-condensed","condensed","semi-condensed","normal",
+      "semi-expanded","expanded","extra-expanded","ultra-expanded"],
+    fontVariantCaps: ["normal","small-caps","all-small-caps","petite-caps","all-petite-caps","unicase","titling-caps"],
+    textRendering: ["auto","optimizeSpeed","optimizeLegibility","geometricPrecision"],
+  };
+  function defaultCanvasStyle() {
+    return { fillStyle:[0,0,0,255], strokeStyle:[0,0,0,255], globalAlpha:1, globalCompositeOperation:"source-over",
+      lineWidth:1, lineCap:"butt", lineJoin:"miter", miterLimit:10, lineDash:[], lineDashOffset:0,
+      shadowOffsetX:0, shadowOffsetY:0, shadowBlur:0, shadowColor:[0,0,0,0],
+      imageSmoothingEnabled:true, imageSmoothingQuality:"low", filter:"none",
+      font:"10px sans-serif", textAlign:"start", textBaseline:"alphabetic", direction:"inherit",
+      letterSpacing:"0px", wordSpacing:"0px", fontKerning:"auto", fontStretch:"normal",
+      fontVariantCaps:"normal", textRendering:"auto", transform:canvasIdentity.slice(), clip:[] };
   }
-  for(const name of ["fillStyle","strokeStyle","globalAlpha","lineWidth","lineCap","lineJoin","miterLimit","font"]){Object.defineProperty(CanvasRenderingContext2D.prototype,name,{get(){return this.__s.style[name];},set(value){this.__s.style[name]=name==="globalAlpha"?Math.max(0,Math.min(1,Number(value))):name==="lineWidth"?Math.max(0,Number(value)):String(value);}});}
+  function copyCanvasStyle(style) {
+    return { ...style, transform: style.transform.slice(), lineDash: style.lineDash.slice(), clip: style.clip.slice() };
+  }
+  /// Parses a CSS color for a canvas style, or returns null.
+  function parseCanvasColor(value, canvas) {
+    const text = String(value).trim();
+    if (/^currentcolor$/i.test(text)) {
+      if (canvas && canvas.isConnected && typeof getComputedStyle === "function") {
+        const color = nativeCanvasParseColor(getComputedStyle(canvas).color);
+        if (color) return color;
+      }
+      return [0,0,0,255];
+    }
+    return nativeCanvasParseColor(text);
+  }
+  function serializeCanvasColor(color) {
+    const [r,g,b,a] = color;
+    if (a === 255) return "#" + [r,g,b].map(value => value.toString(16).padStart(2,"0")).join("");
+    let alpha = String(a / 255);
+    for (let digits = 1; digits <= 3; digits++) {
+      const rounded = Math.round(a / 255 * 10 ** digits) / 10 ** digits;
+      if (Math.round(rounded * 255) === a) { alpha = String(rounded); break; }
+    }
+    return "rgba(" + r + ", " + g + ", " + b + ", " + alpha + ")";
+  }
+  function canvasFinite(...values) { return values.every(value => Number.isFinite(value)); }
+  function canvasDoubles(name, values) {
+    const numbers = values.map(Number);
+    if (!canvasFinite(...numbers)) throw new TypeError("Failed to execute '" + name + "': The provided double value is non-finite.");
+    return numbers;
+  }
+  function applyCanvasMatrix(m, x, y) { return [m[0]*x + m[2]*y + m[4], m[1]*x + m[3]*y + m[5]]; }
+  function multiplyCanvasMatrix(m, n) {
+    return [m[0]*n[0] + m[2]*n[1], m[1]*n[0] + m[3]*n[1], m[0]*n[2] + m[2]*n[3], m[1]*n[2] + m[3]*n[3],
+      m[0]*n[4] + m[2]*n[5] + m[4], m[1]*n[4] + m[3]*n[5] + m[5]];
+  }
+  function invertCanvasMatrix(m) {
+    const det = m[0]*m[3] - m[1]*m[2];
+    if (!det || !Number.isFinite(det)) return null;
+    return [m[3]/det, -m[1]/det, -m[2]/det, m[0]/det, (m[2]*m[5] - m[3]*m[4])/det, (m[1]*m[4] - m[0]*m[5])/det];
+  }
+  function canvasMatrixScale(m) { return Math.max(Math.hypot(m[0], m[1]), Math.hypot(m[2], m[3])); }
+  /// Validates a DOMMatrix2DInit (Geometry Interfaces "validate and fixup
+  /// (2D)") into `[a, b, c, d, e, f]`.
+  function canvasMatrixInit(init) {
+    if (init === undefined || init === null) return canvasIdentity.slice();
+    if (typeof init !== "object" && typeof init !== "function") throw new TypeError("The provided value is not a DOMMatrix2DInit.");
+    const pairs = [["a", "m11", 1], ["b", "m12", 0], ["c", "m21", 0], ["d", "m22", 1], ["e", "m41", 0], ["f", "m42", 0]];
+    return pairs.map(([alias, name, fallback]) => {
+      const short = init[alias] === undefined ? undefined : Number(init[alias]);
+      const long = init[name] === undefined ? undefined : Number(init[name]);
+      if (short !== undefined && long !== undefined && !(short === long || (Number.isNaN(short) && Number.isNaN(long)))) {
+        throw new TypeError("The '" + alias + "' and '" + name + "' members are inconsistent.");
+      }
+      return long !== undefined ? long : short !== undefined ? short : fallback;
+    });
+  }
+
+  // CanvasPath: `path.subpaths` hold device-space points; `m` maps user space.
+  function newCanvasPath() { return { subpaths: [], current: null }; }
+  function canvasPathMoveTo(path, m, x, y) {
+    path.current = { points: [applyCanvasMatrix(m, x, y)], closed: false };
+    path.subpaths.push(path.current);
+  }
+  function canvasPathLineTo(path, m, x, y) {
+    if (!path.current) canvasPathMoveTo(path, m, x, y);
+    else path.current.points.push(applyCanvasMatrix(m, x, y));
+  }
+  function canvasPathAddDevice(path, point) {
+    if (!path.current) { path.current = { points: [point], closed: false }; path.subpaths.push(path.current); }
+    else path.current.points.push(point);
+  }
+  function canvasPathLast(path) { return path.current.points[path.current.points.length - 1]; }
+  function canvasPathClose(path) {
+    if (!path.current) return;
+    path.current.closed = true;
+    path.current = { points: [path.current.points[0].slice()], closed: false };
+    path.subpaths.push(path.current);
+  }
+  function canvasCurveSteps(value) { return Math.max(1, Math.min(256, Math.ceil(Math.sqrt(value)))); }
+  function canvasPathQuadratic(path, m, cx, cy, x, y) {
+    if (!path.current) canvasPathMoveTo(path, m, cx, cy);
+    const p0 = canvasPathLast(path), p1 = applyCanvasMatrix(m, cx, cy), p2 = applyCanvasMatrix(m, x, y);
+    const steps = canvasCurveSteps(2.5 * Math.hypot(p0[0] - 2*p1[0] + p2[0], p0[1] - 2*p1[1] + p2[1]));
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps, u = 1 - t;
+      path.current.points.push([u*u*p0[0] + 2*u*t*p1[0] + t*t*p2[0], u*u*p0[1] + 2*u*t*p1[1] + t*t*p2[1]]);
+    }
+  }
+  function canvasPathCubic(path, m, c1x, c1y, c2x, c2y, x, y) {
+    if (!path.current) canvasPathMoveTo(path, m, c1x, c1y);
+    const p0 = canvasPathLast(path), p1 = applyCanvasMatrix(m, c1x, c1y);
+    const p2 = applyCanvasMatrix(m, c2x, c2y), p3 = applyCanvasMatrix(m, x, y);
+    const dd = Math.max(Math.hypot(p0[0] - 2*p1[0] + p2[0], p0[1] - 2*p1[1] + p2[1]),
+      Math.hypot(p1[0] - 2*p2[0] + p3[0], p1[1] - 2*p2[1] + p3[1]));
+    const steps = canvasCurveSteps(7.5 * dd);
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps, u = 1 - t;
+      path.current.points.push([u*u*u*p0[0] + 3*u*u*t*p1[0] + 3*u*t*t*p2[0] + t*t*t*p3[0],
+        u*u*u*p0[1] + 3*u*u*t*p1[1] + 3*u*t*t*p2[1] + t*t*t*p3[1]]);
+    }
+  }
+  /// Adds an elliptical arc from `start` sweeping `sweep` radians, joined to
+  /// the current point by a line.
+  function canvasPathArcPoints(path, m, x, y, rx, ry, rotation, start, sweep) {
+    const radius = Math.max(rx, ry) * canvasMatrixScale(m);
+    const step = radius > 0.25 ? 2 * Math.acos(Math.max(-1, 1 - 0.1 / radius)) : Math.PI / 2;
+    const steps = Math.max(1, Math.min(4096, Math.ceil(Math.abs(sweep) / step)));
+    const cos = Math.cos(rotation), sin = Math.sin(rotation);
+    // Points just inside each end keep the stroke's end direction on the
+    // curve's tangent instead of the first or last chord.
+    const near = Math.min(1e-3, 0.25 / steps);
+    const fractions = [0];
+    if (sweep) fractions.push(near);
+    for (let i = 1; i < steps; i++) fractions.push(i / steps);
+    if (sweep) fractions.push(1 - near);
+    fractions.push(1);
+    for (const fraction of fractions) {
+      const angle = start + sweep * fraction;
+      const px = rx * Math.cos(angle), py = ry * Math.sin(angle);
+      canvasPathAddDevice(path, applyCanvasMatrix(m, x + px*cos - py*sin, y + px*sin + py*cos));
+    }
+  }
+  /// The signed sweep from `start` to `end`. Angles that differ by a whole
+  /// turn in the drawing direction draw a full ellipse, as browsers do.
+  function canvasArcSweep(start, end, anticlockwise) {
+    const tau = 2 * Math.PI;
+    if (!anticlockwise) {
+      if (end - start >= tau) return tau;
+      return start > end ? tau - (start - end) % tau : end - start;
+    }
+    if (start - end >= tau) return -tau;
+    return start < end ? -(tau - (end - start) % tau) : end - start;
+  }
+  function canvasPathEllipse(path, m, x, y, rx, ry, rotation, start, end, anticlockwise) {
+    canvasPathArcPoints(path, m, x, y, rx, ry, rotation, start, canvasArcSweep(start, end, anticlockwise));
+  }
+  function canvasPathArcTo(path, m, x1, y1, x2, y2, radius) {
+    if (!path.current) canvasPathMoveTo(path, m, x1, y1);
+    const inverse = invertCanvasMatrix(m);
+    if (!inverse) return;
+    const p0 = applyCanvasMatrix(inverse, ...canvasPathLast(path));
+    const v1 = [p0[0] - x1, p0[1] - y1], v2 = [x2 - x1, y2 - y1];
+    const l1 = Math.hypot(...v1), l2 = Math.hypot(...v2);
+    const cross = v1[0]*v2[1] - v1[1]*v2[0];
+    if (!l1 || !l2 || radius === 0 || Math.abs(cross) <= 1e-9 * l1 * l2) {
+      canvasPathLineTo(path, m, x1, y1);
+      return;
+    }
+    const u1 = [v1[0]/l1, v1[1]/l1], u2 = [v2[0]/l2, v2[1]/l2];
+    const angle = Math.acos(Math.max(-1, Math.min(1, u1[0]*u2[0] + u1[1]*u2[1])));
+    const distance = radius / Math.tan(angle / 2);
+    const t1 = [x1 + u1[0]*distance, y1 + u1[1]*distance], t2 = [x1 + u2[0]*distance, y1 + u2[1]*distance];
+    const bisector = [u1[0] + u2[0], u1[1] + u2[1]], length = Math.hypot(...bisector);
+    const offset = radius / Math.sin(angle / 2);
+    const center = [x1 + bisector[0]/length*offset, y1 + bisector[1]/length*offset];
+    const a1 = Math.atan2(t1[1] - center[1], t1[0] - center[0]);
+    const a2 = Math.atan2(t2[1] - center[1], t2[0] - center[0]);
+    let sweep = a2 - a1;
+    if (sweep > Math.PI) sweep -= 2 * Math.PI;
+    if (sweep < -Math.PI) sweep += 2 * Math.PI;
+    canvasPathArcPoints(path, m, center[0], center[1], radius, radius, 0, a1, sweep);
+  }
+  function canvasPathRect(path, m, x, y, w, h) {
+    canvasPathMoveTo(path, m, x, y);
+    canvasPathLineTo(path, m, x + w, y);
+    canvasPathLineTo(path, m, x + w, y + h);
+    canvasPathLineTo(path, m, x, y + h);
+    canvasPathClose(path);
+  }
+  function canvasRoundRectRadii(radii) {
+    const list = radii !== null && typeof radii === "object" && typeof radii[Symbol.iterator] === "function"
+      ? Array.from(radii) : [radii];
+    if (list.length < 1 || list.length > 4) throw new RangeError("roundRect() needs 1 to 4 radii");
+    const normalized = [];
+    for (const radius of list) {
+      if (radius !== null && typeof radius === "object") {
+        const rx = Number(radius.x === undefined ? 0 : radius.x), ry = Number(radius.y === undefined ? 0 : radius.y);
+        if (!canvasFinite(rx, ry)) return null;
+        if (rx < 0 || ry < 0) throw new RangeError("roundRect() radii must not be negative");
+        normalized.push([rx, ry]);
+      } else {
+        const r = Number(radius === undefined ? 0 : radius);
+        if (!Number.isFinite(r)) return null;
+        if (r < 0) throw new RangeError("roundRect() radii must not be negative");
+        normalized.push([r, r]);
+      }
+    }
+    const [a, b = a, c = a, d = b] = normalized;
+    // One radius applies to every corner, two to opposite pairs, three to
+    // the top-left, top-right/bottom-left and bottom-right corners.
+    if (normalized.length === 3) return [a, b, c, b];
+    return [a, b, normalized.length === 2 ? a : c, d];
+  }
+  function canvasPathRoundRect(path, m, x, y, w, h, radii) {
+    if (!canvasFinite(x, y, w, h)) return;
+    const corners = canvasRoundRectRadii(radii);
+    if (!corners) return;
+    let [upperLeft, upperRight, lowerRight, lowerLeft] = corners;
+    let left = x, top = y, width = w, height = h;
+    if (width < 0) { left += width; width = -width; [upperLeft, upperRight] = [upperRight, upperLeft]; [lowerLeft, lowerRight] = [lowerRight, lowerLeft]; }
+    if (height < 0) { top += height; height = -height; [upperLeft, lowerLeft] = [lowerLeft, upperLeft]; [upperRight, lowerRight] = [lowerRight, upperRight]; }
+    const ratios = [[width, upperLeft[0] + upperRight[0]], [width, lowerLeft[0] + lowerRight[0]],
+      [height, upperLeft[1] + lowerLeft[1]], [height, upperRight[1] + lowerRight[1]]];
+    const scale = Math.min(1, ...ratios.filter(([, sum]) => sum > 0).map(([side, sum]) => side / sum));
+    const [ul, ur, lr, ll] = [upperLeft, upperRight, lowerRight, lowerLeft].map(([rx, ry]) => [rx * scale, ry * scale]);
+    const half = Math.PI / 2;
+    canvasPathMoveTo(path, m, left + ul[0], top);
+    canvasPathArcPoints(path, m, left + width - ur[0], top + ur[1], ur[0], ur[1], 0, -half, half);
+    canvasPathArcPoints(path, m, left + width - lr[0], top + height - lr[1], lr[0], lr[1], 0, 0, half);
+    canvasPathArcPoints(path, m, left + ll[0], top + height - ll[1], ll[0], ll[1], 0, half, half);
+    canvasPathArcPoints(path, m, left + ul[0], top + ul[1], ul[0], ul[1], 0, Math.PI, half);
+    canvasPathClose(path);
+    path.subpaths.pop();
+    canvasPathMoveTo(path, m, x, y);
+  }
+  function copyCanvasSubpaths(subpaths, m) {
+    return subpaths.map(subpath => ({
+      points: m ? subpath.points.map(point => applyCanvasMatrix(m, point[0], point[1])) : subpath.points.slice(),
+      closed: subpath.closed,
+    }));
+  }
+  /// The CanvasPath methods shared by the context (whose points follow the
+  /// current transform) and Path2D.
+  const canvasPathMethods = {
+    closePath() { canvasPathClose(this.__path); },
+    moveTo(x, y) { x = +x; y = +y; if (canvasFinite(x, y)) canvasPathMoveTo(this.__path, this.__matrix, x, y); },
+    lineTo(x, y) { x = +x; y = +y; if (canvasFinite(x, y)) canvasPathLineTo(this.__path, this.__matrix, x, y); },
+    quadraticCurveTo(cx, cy, x, y) {
+      const values = [cx, cy, x, y].map(Number);
+      if (canvasFinite(...values)) canvasPathQuadratic(this.__path, this.__matrix, ...values);
+    },
+    bezierCurveTo(c1x, c1y, c2x, c2y, x, y) {
+      const values = [c1x, c1y, c2x, c2y, x, y].map(Number);
+      if (canvasFinite(...values)) canvasPathCubic(this.__path, this.__matrix, ...values);
+    },
+    arcTo(x1, y1, x2, y2, radius) {
+      const values = [x1, y1, x2, y2, radius].map(Number);
+      if (!canvasFinite(...values)) return;
+      if (values[4] < 0) throw new DOMException("The radius provided is negative.", "IndexSizeError");
+      canvasPathArcTo(this.__path, this.__matrix, ...values);
+    },
+    rect(x, y, w, h) {
+      const values = [x, y, w, h].map(Number);
+      if (canvasFinite(...values)) canvasPathRect(this.__path, this.__matrix, ...values);
+    },
+    roundRect(x, y, w, h, radii = 0) {
+      canvasPathRoundRect(this.__path, this.__matrix, +x, +y, +w, +h, radii);
+    },
+    arc(x, y, radius, start, end, anticlockwise = false) {
+      const values = [x, y, radius, start, end].map(Number);
+      if (!canvasFinite(...values)) return;
+      if (values[2] < 0) throw new DOMException("The radius provided is negative.", "IndexSizeError");
+      canvasPathEllipse(this.__path, this.__matrix, values[0], values[1], values[2], values[2], 0, values[3], values[4], !!anticlockwise);
+    },
+    ellipse(x, y, rx, ry, rotation, start, end, anticlockwise = false) {
+      const values = [x, y, rx, ry, rotation, start, end].map(Number);
+      if (!canvasFinite(...values)) return;
+      if (values[2] < 0 || values[3] < 0) throw new DOMException("The radius provided is negative.", "IndexSizeError");
+      canvasPathEllipse(this.__path, this.__matrix, ...values, !!anticlockwise);
+    },
+  };
+
+  class Path2D {
+    constructor(path = undefined) {
+      Object.defineProperty(this, "__path", { value: newCanvasPath() });
+      if (path instanceof Path2D) {
+        this.__path.subpaths = copyCanvasSubpaths(path.__path.subpaths);
+        this.__path.current = this.__path.subpaths[this.__path.subpaths.length - 1] || null;
+      } else if (path !== undefined) {
+        this.__addSvg(String(path));
+      }
+    }
+    get __matrix() { return canvasIdentity; }
+    __addSvg(d) {
+      for (const [command, ...values] of JSON.parse(nativeCanvasSvgPath(d))) {
+        if (command === "M") this.moveTo(...values);
+        else if (command === "L") this.lineTo(...values);
+        else if (command === "Q") this.quadraticCurveTo(...values);
+        else if (command === "C") this.bezierCurveTo(...values);
+        else this.closePath();
+      }
+    }
+    addPath(path, transform = undefined) {
+      if (!(path instanceof Path2D)) throw new TypeError("Failed to execute 'addPath' on 'Path2D': parameter 1 is not of type 'Path2D'.");
+      const matrix = canvasMatrixInit(transform);
+      if (!canvasFinite(...matrix)) return;
+      const added = copyCanvasSubpaths(path.__path.subpaths, matrix);
+      this.__path.subpaths.push(...added);
+      if (added.length) this.__path.current = added[added.length - 1];
+    }
+    get [Symbol.toStringTag]() { return "Path2D"; }
+  }
+  Object.assign(Path2D.prototype, canvasPathMethods);
+
+  class CanvasGradient {
+    constructor(token, spec) {
+      if (token !== canvasConstructionToken) throw new TypeError("Illegal constructor");
+      Object.defineProperty(this, "__spec", { value: spec });
+      Object.defineProperty(this, "__stops", { value: [] });
+    }
+    addColorStop(offset, color) {
+      const [value] = canvasDoubles("addColorStop", [offset]);
+      if (value < 0 || value > 1) throw new DOMException("The provided offset is outside the range [0, 1].", "IndexSizeError");
+      const parsed = parseCanvasColor(color, null);
+      if (!parsed) throw new DOMException("The value provided could not be parsed as a color.", "SyntaxError");
+      this.__stops.push([value, parsed]);
+    }
+    get [Symbol.toStringTag]() { return "CanvasGradient"; }
+  }
+
+  class CanvasPattern {
+    constructor(token, image, repetition) {
+      if (token !== canvasConstructionToken) throw new TypeError("Illegal constructor");
+      Object.defineProperty(this, "__image", { value: image });
+      Object.defineProperty(this, "__repetition", { value: repetition });
+      Object.defineProperty(this, "__transform", { value: canvasIdentity.slice(), writable: true });
+    }
+    setTransform(transform = undefined) {
+      const matrix = canvasMatrixInit(transform);
+      if (canvasFinite(...matrix)) this.__transform = matrix;
+    }
+    get [Symbol.toStringTag]() { return "CanvasPattern"; }
+  }
+
+  /// The pixels of a CanvasImageSource, `null` while an image is still
+  /// loading, or an InvalidStateError for an unusable source.
+  function canvasImagePixels(source) {
+    const isHtmlCanvas = typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement;
+    if (isHtmlCanvas || source instanceof OffscreenCanvas) {
+      const state = canvasState(source);
+      if (!state.width || !state.height) throw new DOMException("The source canvas is empty.", "InvalidStateError");
+      return state;
+    }
+    if (source instanceof ImageBitmap) {
+      if (source.__detached) throw new DOMException("The ImageBitmap is detached", "InvalidStateError");
+      return { width: source.width, height: source.height, pixels: source.__pixels };
+    }
+    const isImage = typeof HTMLImageElement !== "undefined" && source instanceof HTMLImageElement;
+    const isSvgImage = typeof SVGImageElement !== "undefined" && source instanceof SVGImageElement;
+    const isVideo = typeof HTMLVideoElement !== "undefined" && source instanceof HTMLVideoElement;
+    if (!isImage && !isSvgImage && !isVideo && !(typeof VideoFrame !== "undefined" && source instanceof VideoFrame)) {
+      throw new TypeError("The provided value is not of type CanvasImageSource.");
+    }
+    const raw = source.__id != null ? __omoikane_canvas_image_source(source.__id) : null;
+    if (raw === null) {
+      if (isImage && source.complete === false) return null;
+      if (isVideo) return null;
+      throw new DOMException("Image source is unavailable", "InvalidStateError");
+    }
+    const decoded = JSON.parse(raw);
+    return { width: decoded.width, height: decoded.height, pixels: bytesFromBase64(decoded.pixels) };
+  }
+  function canvasBytes(pixels) { return new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength); }
+  function canvasPaintSpec(style) {
+    if (Array.isArray(style)) return { spec: { type: "color", color: style }, texture: undefined };
+    if (style instanceof CanvasGradient) return { spec: { ...style.__spec, stops: style.__stops }, texture: undefined };
+    const image = style.__image;
+    return { spec: { type: "pattern", width: image.width, height: image.height, repetition: style.__repetition,
+      transform: style.__transform }, texture: canvasBytes(image.pixels) };
+  }
+  /// Runs one native drawing command on `context`'s bitmap.
+  function canvasDraw(context, kind, paths, options = {}) {
+    const state = context.__s, style = state.style;
+    const command = { kind, paths, rule: options.rule || "nonzero", transform: style.transform,
+      alpha: style.globalAlpha, composite: style.globalCompositeOperation, clip: style.clip,
+      smoothing: style.imageSmoothingEnabled };
+    let texture = options.texture;
+    if (kind !== "clear") {
+      if (options.paint) command.paint = options.paint;
+      else {
+        const paint = canvasPaintSpec(kind === "stroke" ? style.strokeStyle : style.fillStyle);
+        command.paint = paint.spec;
+        texture = paint.texture;
+      }
+      if (style.shadowColor[3] && (style.shadowBlur || style.shadowOffsetX || style.shadowOffsetY)) {
+        command.shadow = { color: style.shadowColor, blur: style.shadowBlur,
+          offsetX: style.shadowOffsetX, offsetY: style.shadowOffsetY };
+      }
+    }
+    if (kind === "stroke") command.stroke = canvasStrokeStyle(style);
+    nativeCanvas2dDraw(canvasBytes(state.pixels), state.width, state.height, JSON.stringify(command), texture);
+    commitCanvas(context.canvas, state);
+  }
+  function canvasStrokeStyle(style) {
+    return { width: style.lineWidth, cap: style.lineCap, join: style.lineJoin, miterLimit: style.miterLimit,
+      dash: style.lineDash, dashOffset: style.lineDashOffset };
+  }
+  function canvasFillRule(value) {
+    const rule = String(value);
+    if (rule !== "nonzero" && rule !== "evenodd") throw new TypeError("The provided value '" + rule + "' is not a valid enum value of type CanvasFillRule.");
+    return rule;
+  }
+  /// Splits `(path?, ...rest)` overloads into device-space paths and rest.
+  function canvasPathArguments(context, args) {
+    if (args[0] instanceof Path2D) {
+      return [copyCanvasSubpaths(args[0].__path.subpaths, context.__s.style.transform), args.slice(1)];
+    }
+    return [context.__s.path.subpaths, args];
+  }
+  function canvasRectPath(context, x, y, w, h) {
+    const path = newCanvasPath();
+    canvasPathRect(path, context.__s.style.transform, x, y, w, h);
+    return path.subpaths;
+  }
+
+  class CanvasRenderingContext2D {
+    constructor(canvas, options = undefined) {
+      Object.defineProperty(this, "__canvas", { value: canvas });
+    }
+    get canvas() { return this.__canvas; }
+    get __s() { return canvasState(this.__canvas); }
+    get __path() { return this.__s.path; }
+    get __matrix() { return this.__s.style.transform; }
+    getContextAttributes() {
+      return { alpha: true, colorSpace: "srgb", desynchronized: false, willReadFrequently: false, colorType: "unorm8" };
+    }
+    isContextLost() { return false; }
+    save() { const s = this.__s; s.stack.push(copyCanvasStyle(s.style)); }
+    restore() { const s = this.__s; if (s.stack.length) s.style = s.stack.pop(); }
+    reset() {
+      const s = this.__s;
+      s.pixels.fill(0);
+      s.style = defaultCanvasStyle();
+      s.stack = [];
+      s.path = newCanvasPath();
+      commitCanvas(this.canvas, s);
+    }
+    translate(x, y) { this.transform(1, 0, 0, 1, x, y); }
+    scale(x, y) { this.transform(x, 0, 0, y, 0, 0); }
+    rotate(angle) {
+      angle = +angle;
+      if (Number.isFinite(angle)) this.transform(Math.cos(angle), Math.sin(angle), -Math.sin(angle), Math.cos(angle), 0, 0);
+    }
+    transform(a, b, c, d, e, f) {
+      const values = [a, b, c, d, e, f].map(Number);
+      if (!canvasFinite(...values)) return;
+      const s = this.__s;
+      s.style.transform = multiplyCanvasMatrix(s.style.transform, values);
+    }
+    setTransform(...args) {
+      const values = args.length >= 6 ? args.slice(0, 6).map(Number) : canvasMatrixInit(args[0]);
+      if (canvasFinite(...values)) this.__s.style.transform = values;
+    }
+    getTransform() { return new DOMMatrix(this.__s.style.transform); }
+    resetTransform() { this.__s.style.transform = canvasIdentity.slice(); }
+    createLinearGradient(x0, y0, x1, y1) {
+      [x0, y0, x1, y1] = canvasDoubles("createLinearGradient", [x0, y0, x1, y1]);
+      return new CanvasGradient(canvasConstructionToken, { type: "linear", x0, y0, x1, y1 });
+    }
+    createRadialGradient(x0, y0, r0, x1, y1, r1) {
+      [x0, y0, r0, x1, y1, r1] = canvasDoubles("createRadialGradient", [x0, y0, r0, x1, y1, r1]);
+      if (r0 < 0 || r1 < 0) throw new DOMException("The radius provided is negative.", "IndexSizeError");
+      return new CanvasGradient(canvasConstructionToken, { type: "radial", x0, y0, r0, x1, y1, r1 });
+    }
+    createConicGradient(angle, x, y) {
+      [angle, x, y] = canvasDoubles("createConicGradient", [angle, x, y]);
+      return new CanvasGradient(canvasConstructionToken, { type: "conic", angle, x, y });
+    }
+    createPattern(image, repetition) {
+      const value = repetition === null ? "" : String(repetition);
+      const mode = value === "" ? "repeat" : value;
+      const source = canvasImagePixels(image);
+      if (!["repeat", "repeat-x", "repeat-y", "no-repeat"].includes(mode)) {
+        throw new DOMException("The provided repetition '" + value + "' is not valid.", "SyntaxError");
+      }
+      if (!source) return null;
+      const snapshot = { width: source.width, height: source.height, pixels: source.pixels.slice() };
+      return new CanvasPattern(canvasConstructionToken, snapshot, mode);
+    }
+    setLineDash(segments) {
+      const values = Array.from(segments, Number);
+      if (values.some(value => !Number.isFinite(value) || value < 0)) return;
+      this.__s.style.lineDash = values.length % 2 ? values.concat(values) : values;
+    }
+    getLineDash() { return this.__s.style.lineDash.slice(); }
+    clearRect(x, y, w, h) {
+      const values = [x, y, w, h].map(Number);
+      if (canvasFinite(...values)) canvasDraw(this, "clear", canvasRectPath(this, ...values));
+    }
+    fillRect(x, y, w, h) {
+      const values = [x, y, w, h].map(Number);
+      if (canvasFinite(...values) && values[2] && values[3]) canvasDraw(this, "fill", canvasRectPath(this, ...values));
+    }
+    strokeRect(x, y, w, h) {
+      const values = [x, y, w, h].map(Number);
+      if (!canvasFinite(...values) || (!values[2] && !values[3])) return;
+      canvasDraw(this, "stroke", canvasRectPath(this, ...values));
+    }
+    beginPath() { this.__s.path = newCanvasPath(); }
+    fill(...args) {
+      const [paths, [rule = "nonzero"]] = canvasPathArguments(this, args);
+      canvasDraw(this, "fill", paths, { rule: canvasFillRule(rule) });
+    }
+    stroke(...args) {
+      const [paths] = canvasPathArguments(this, args);
+      canvasDraw(this, "stroke", paths);
+    }
+    clip(...args) {
+      const [paths, [rule = "nonzero"]] = canvasPathArguments(this, args);
+      const style = this.__s.style;
+      style.clip = style.clip.concat([{ paths: copyCanvasSubpaths(paths), rule: canvasFillRule(rule) }]);
+    }
+    isPointInPath(...args) {
+      const [paths, [x, y, rule = "nonzero"]] = canvasPathArguments(this, args);
+      const point = [Number(x), Number(y)];
+      const fillRule = canvasFillRule(rule);
+      if (!canvasFinite(...point)) return false;
+      return nativeCanvas2dContains(JSON.stringify({ paths, rule: fillRule, point }));
+    }
+    isPointInStroke(...args) {
+      const [paths, [x, y]] = canvasPathArguments(this, args);
+      const point = [Number(x), Number(y)];
+      if (!canvasFinite(...point)) return false;
+      const style = this.__s.style;
+      return nativeCanvas2dContains(JSON.stringify({ paths, transform: style.transform,
+        stroke: canvasStrokeStyle(style), point }));
+    }
+    drawFocusIfNeeded() {}
+    createImageData(a, b = undefined) {
+      if (a instanceof ImageData) return new ImageData(a.width, a.height);
+      const [width, height] = canvasDoubles("createImageData", [a, b]).map(Math.trunc);
+      if (!width || !height) throw new DOMException("The source width or height is 0.", "IndexSizeError");
+      return new ImageData(Math.abs(width), Math.abs(height));
+    }
+    getImageData(sx, sy, sw, sh) {
+      let [x, y, width, height] = [sx, sy, sw, sh].map(value => Math.trunc(Number(value)) || 0);
+      if (!width || !height) throw new DOMException("The source width or height is 0.", "IndexSizeError");
+      if (width < 0) { x += width; width = -width; }
+      if (height < 0) { y += height; height = -height; }
+      const s = this.__s, out = new ImageData(width, height);
+      const left = Math.max(0, x), right = Math.min(s.width, x + width);
+      for (let row = Math.max(0, y); row < Math.min(s.height, y + height) && left < right; row++) {
+        out.data.set(s.pixels.subarray((row * s.width + left) * 4, (row * s.width + right) * 4),
+          ((row - y) * width + left - x) * 4);
+      }
+      return out;
+    }
+    putImageData(image, dx, dy, dirtyX = 0, dirtyY = 0, dirtyWidth = undefined, dirtyHeight = undefined) {
+      if (!(image instanceof ImageData)) throw new TypeError("Failed to execute 'putImageData': parameter 1 is not of type 'ImageData'.");
+      const integer = value => Math.trunc(Number(value)) || 0;
+      let [x, y] = [integer(dirtyX), integer(dirtyY)];
+      let width = dirtyWidth === undefined ? image.width : integer(dirtyWidth);
+      let height = dirtyHeight === undefined ? image.height : integer(dirtyHeight);
+      if (width < 0) { x += width; width = -width; }
+      if (height < 0) { y += height; height = -height; }
+      const left = Math.max(0, x), top = Math.max(0, y);
+      const right = Math.min(image.width, x + width), bottom = Math.min(image.height, y + height);
+      const s = this.__s, ox = integer(dx), oy = integer(dy);
+      for (let row = top; row < bottom; row++) {
+        const ty = oy + row;
+        if (ty < 0 || ty >= s.height) continue;
+        const from = Math.max(left, -ox), to = Math.min(right, s.width - ox);
+        if (from < to) s.pixels.set(image.data.subarray((row * image.width + from) * 4, (row * image.width + to) * 4), (ty * s.width + ox + from) * 4);
+      }
+      commitCanvas(this.canvas, s);
+    }
+    drawImage(image, ...args) {
+      if (![2, 4, 8].includes(args.length)) throw new TypeError("Failed to execute 'drawImage': Valid arities are: [3, 5, 9].");
+      const source = canvasImagePixels(image);
+      if (!source) return;
+      const values = args.map(Number);
+      if (!canvasFinite(...values)) return;
+      let sx = 0, sy = 0, sw = source.width, sh = source.height, dx, dy, dw, dh;
+      if (values.length === 2) { [dx, dy] = values; dw = sw; dh = sh; }
+      else if (values.length === 4) [dx, dy, dw, dh] = values;
+      else [sx, sy, sw, sh, dx, dy, dw, dh] = values;
+      if (!sw || !sh || !dw || !dh) return;
+      if (sw < 0) { sx += sw; sw = -sw; }
+      if (sh < 0) { sy += sh; sh = -sh; }
+      if (dw < 0) { dx += dw; dw = -dw; }
+      if (dh < 0) { dy += dh; dh = -dh; }
+      // Clip the source rectangle to the image, shrinking the destination.
+      const scaleX = dw / sw, scaleY = dh / sh;
+      const left = Math.max(sx, 0), top = Math.max(sy, 0);
+      const right = Math.min(sx + sw, source.width), bottom = Math.min(sy + sh, source.height);
+      if (left >= right || top >= bottom) return;
+      dx += (left - sx) * scaleX; dy += (top - sy) * scaleY;
+      dw = (right - left) * scaleX; dh = (bottom - top) * scaleY;
+      [sx, sy, sw, sh] = [left, top, right - left, bottom - top];
+      const s = this.__s, style = s.style, m = style.transform;
+      const plain = !style.clip.length && style.globalAlpha === 1 && style.globalCompositeOperation === "source-over" &&
+        !(style.shadowColor[3] && (style.shadowBlur || style.shadowOffsetX || style.shadowOffsetY));
+      if (plain && sw === dw && sh === dh && m[0] === 1 && m[1] === 0 && m[2] === 0 && m[3] === 1 &&
+          nativeCanvasBlit(canvasBytes(source.pixels), canvasBytes(s.pixels), source.width, source.height,
+            s.width, s.height, sx, sy, sw, sh, dx + m[4], dy + m[5])) {
+        commitCanvas(this.canvas, s);
+        return;
+      }
+      canvasDraw(this, "fill", canvasRectPath(this, dx, dy, dw, dh), {
+        paint: { type: "image", width: source.width, height: source.height, source: [sx, sy, sw, sh], destination: [dx, dy, dw, dh] },
+        texture: canvasBytes(source.pixels),
+      });
+    }
+    measureText(text) {
+      const size = parseFloat(this.__s.style.font) || 10;
+      const width = String(text).length * size * .6;
+      return domInterfaces.makeTextMetrics({ width, actualBoundingBoxLeft: 0, actualBoundingBoxRight: width,
+        actualBoundingBoxAscent: size * .8, actualBoundingBoxDescent: size * .2 });
+    }
+    __textBox(text, x, y) {
+      const style = this.__s.style, size = parseFloat(style.font) || 10, width = this.measureText(text).width;
+      const rtl = style.direction === "rtl";
+      const align = style.textAlign === "start" ? (rtl ? "right" : "left") : style.textAlign === "end" ? (rtl ? "left" : "right") : style.textAlign;
+      const left = align === "right" ? x - width : align === "center" ? x - width / 2 : x;
+      const baseline = { top: 0, hanging: size * .2, middle: size * .5, alphabetic: size * .8, ideographic: size, bottom: size }[style.textBaseline];
+      return [left, y - baseline, width, size];
+    }
+    fillText(text, x, y) {
+      if (canvasFinite(+x, +y)) canvasDraw(this, "fill", canvasRectPath(this, ...this.__textBox(text, +x, +y)));
+    }
+    strokeText(text, x, y) {
+      if (canvasFinite(+x, +y)) canvasDraw(this, "stroke", canvasRectPath(this, ...this.__textBox(text, +x, +y)));
+    }
+    get [Symbol.toStringTag]() { return "CanvasRenderingContext2D"; }
+  }
+  Object.assign(CanvasRenderingContext2D.prototype, canvasPathMethods);
+  function defineCanvasAttribute(name, get, set) {
+    Object.defineProperty(CanvasRenderingContext2D.prototype, name, {
+      configurable: true, enumerable: true,
+      get() { return get(this.__s.style[name], this); },
+      set(value) { const next = set(value, this); if (next !== undefined) this.__s.style[name] = next; },
+    });
+  }
+  const canvasNumberRules = {
+    lineWidth: value => value > 0, miterLimit: value => value > 0, shadowBlur: value => value >= 0,
+    shadowOffsetX: () => true, shadowOffsetY: () => true, lineDashOffset: () => true,
+    globalAlpha: value => value >= 0 && value <= 1,
+  };
+  for (const [name, valid] of Object.entries(canvasNumberRules)) {
+    defineCanvasAttribute(name, value => value, value => {
+      const number = Number(value);
+      return Number.isFinite(number) && valid(number) ? number : undefined;
+    });
+  }
+  for (const [name, values] of Object.entries(canvasEnums)) {
+    defineCanvasAttribute(name, value => value, value => values.includes(String(value)) ? String(value) : undefined);
+  }
+  for (const name of ["fillStyle", "strokeStyle"]) {
+    defineCanvasAttribute(name, value => Array.isArray(value) ? serializeCanvasColor(value) : value, (value, context) => {
+      if (value instanceof CanvasGradient || value instanceof CanvasPattern) return value;
+      return parseCanvasColor(value, context.canvas) || undefined;
+    });
+  }
+  defineCanvasAttribute("shadowColor", serializeCanvasColor, (value, context) => parseCanvasColor(value, context.canvas) || undefined);
+  defineCanvasAttribute("globalCompositeOperation", value => value,
+    value => canvasCompositeOperations.has(String(value)) ? String(value) : undefined);
+  defineCanvasAttribute("imageSmoothingEnabled", value => value, value => !!value);
+  defineCanvasAttribute("font", value => value, value => String(value).trim() || undefined);
+  defineCanvasAttribute("filter", value => value, value => String(value).trim() || undefined);
+  for (const name of ["letterSpacing", "wordSpacing"]) {
+    defineCanvasAttribute(name, value => value, value => {
+      const text = String(value).trim().toLowerCase();
+      return /^-?(\d+(\.\d+)?|\.\d+)(px|em|rem|ex|ch|pt|pc|in|cm|mm|q|vw|vh|vmin|vmax)$|^0$/.test(text) ? text : undefined;
+    });
+  }
 
   // EventTarget is declared later in this bootstrap (Navigator is constructed
   // before the shared event infrastructure is installed).  The bridge keeps
@@ -21822,6 +22420,9 @@ let omoikaneUserActivationState;
   globalThis.HTMLImageElement = HTMLImageElement;
   globalThis.HTMLCanvasElement = HTMLCanvasElement;
   globalThis.CanvasRenderingContext2D = CanvasRenderingContext2D;
+  globalThis.CanvasGradient = CanvasGradient;
+  globalThis.CanvasPattern = CanvasPattern;
+  globalThis.Path2D = Path2D;
   globalThis.WebGLRenderingContext = WebGLRenderingContext;
   globalThis.WebGLBuffer = WebGLBuffer;
   globalThis.WebGLShader = WebGLShader;
