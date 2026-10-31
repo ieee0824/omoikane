@@ -46,6 +46,7 @@ fn color4_is_valid_in_registered_custom_properties_and_stylesheet_cssom() {
          const e=document.getElementById('target'); e.style.setProperty('--tint','lch(50% 0 0)'); \
          const s=document.styleSheets[0].cssRules[0].style; \
          return getComputedStyle(e).getPropertyValue('--tint') === 'lch(50 0 0)' && s.color === 'lab(50 25 0)' && s.backgroundColor === 'color(display-p3 1 0 0)' && \
+         CSS.supports('color','light-dark(white, black)') && \
          CSS.supports('color','hwb(none 0 0 / none)') && CSS.supports('color','oklch(.5 .2 20)'); })()"
     ).unwrap().to_boolean());
 }

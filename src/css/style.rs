@@ -4862,6 +4862,7 @@ impl StyleResolver {
             &self.media_environment,
         );
         apply_initial_values(&mut properties);
+        resolve_light_dark_colors(&mut properties, self.color_scheme_dark);
         resolve_accent_current_color(&mut properties);
         resolve_text_emphasis_style(&mut properties);
         properties.insert(
@@ -6214,8 +6215,21 @@ fn is_valid_css_color_text(text: &str) -> bool {
     crate::css::ForcedColorPalette::for_color_scheme(false)
         .system_color(text)
         .is_some()
+        || valid_light_dark_color(text)
         || crate::paint::color4::CssColor::parse(text).is_some()
         || crate::paint::color::parse_color(text).is_some()
+}
+
+fn valid_light_dark_color(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    let Some(body) = lower
+        .strip_prefix("light-dark(")
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let colors = super::split_top_level_commas(body);
+    colors.len() == 2 && colors.into_iter().all(is_valid_css_color_text)
 }
 
 pub(super) fn is_valid_color_value(value: &Value) -> bool {
@@ -13278,6 +13292,11 @@ pub(crate) fn supports_declaration(property: &str, value: &str) -> bool {
     ) {
         return normalize_counter_specified(property, value).is_some();
     }
+    if property.eq_ignore_ascii_case("color-scheme")
+        && super::split_top_level_commas(value).len() != 1
+    {
+        return false;
+    }
     if (property.starts_with("inset")
         || property.starts_with("margin-")
         || property.starts_with("padding-")
@@ -14999,6 +15018,9 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
             ComputedValue::Number(normalize_numeric_property(property_name, *value))
         }
         Value::TreeCounting { .. } => ComputedValue::Keyword(render_value(value)),
+        Value::Function { name, .. } if name.eq_ignore_ascii_case("light-dark") => {
+            ComputedValue::Color(render_value(value))
+        }
         Value::Function { name, .. }
             if matches!(
                 name.to_ascii_lowercase().as_str(),
@@ -18168,6 +18190,46 @@ fn zero_border_width_for_none_style(properties: &mut PropertyMap) {
             properties.insert(width_key, ComputedValue::Px(0.0));
         }
     }
+}
+
+fn resolve_light_dark_colors(properties: &mut PropertyMap, preferred_dark: bool) {
+    let scheme = properties
+        .get(&PropertyId::ColorScheme)
+        .map(ComputedValue::css_text)
+        .unwrap_or_else(|| "normal".to_string());
+    let words = scheme.split_ascii_whitespace().collect::<Vec<_>>();
+    let supports_light = words.iter().any(|word| word.eq_ignore_ascii_case("light"));
+    let supports_dark = words.iter().any(|word| word.eq_ignore_ascii_case("dark"));
+    let dark = match (supports_light, supports_dark) {
+        (false, true) => true,
+        (true, false) => false,
+        (true, true) => preferred_dark,
+        (false, false) => false,
+    };
+    let replacements = properties
+        .iter()
+        .filter_map(|(name, value)| match value {
+            ComputedValue::Color(text) => {
+                resolve_light_dark_color(text, dark).map(|color| (name.to_string(), color))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (name, color) in replacements {
+        properties.insert(name, ComputedValue::Color(color));
+    }
+}
+
+fn resolve_light_dark_color(text: &str, dark: bool) -> Option<String> {
+    let trimmed = text.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let body = lower.strip_prefix("light-dark(")?.strip_suffix(')')?;
+    let colors = super::split_top_level_commas(body);
+    let [light, dark_color] = colors.as_slice() else {
+        return None;
+    };
+    let selected = if dark { dark_color } else { light }.trim();
+    resolve_light_dark_color(selected, dark).or_else(|| Some(selected.to_string()))
 }
 
 /// `color: currentColor` is equivalent to `color: inherit` per CSS Color Level 4.
