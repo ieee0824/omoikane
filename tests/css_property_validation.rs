@@ -158,6 +158,30 @@ fn anchor_position_properties_share_strict_cssom_and_supports_grammar() {
 }
 
 #[test]
+fn position_try_rule_exposes_name_and_live_descriptor_block() {
+    let mut runtime = JsRuntime::new().unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"(() => {
+            const sheet = new CSSStyleSheet();
+            sheet.replaceSync('@position-try --below { top: anchor(bottom); left: 10px; }');
+            const rule = sheet.cssRules[0];
+            if (!(rule instanceof CSSPositionTryRule) ||
+                !(rule.style instanceof CSSPositionTryDescriptors) ||
+                rule.name !== '--below' || rule.style.left !== '10px') return false;
+            rule.style.left = '20px';
+            return rule.cssText.includes('@position-try --below') &&
+                rule.cssText.includes('left: 20px;');
+        })()"#
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+}
+
+#[test]
 fn invalid_cssom_writes_preserve_valid_declarations_and_custom_values() {
     let mut runtime =
         JsRuntime::with_document(TreeBuilder::parse("<div id=probe></div>").document()).unwrap();

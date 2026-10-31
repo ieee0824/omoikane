@@ -10825,6 +10825,29 @@ let omoikaneUserActivationState;
     get overrideColors() { return this.__style.getPropertyValue("override-colors"); }
   }
 
+  class CSSPositionTryDescriptors {}
+
+  class CSSPositionTryRule extends CSSDescriptorRule {
+    constructor(text, sheet = null, index = -1) {
+      const source = cssRuleWithoutLeadingComments(text);
+      const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
+      const rawName = source.slice(0, open).replace(/^@position-try/i, "")
+        .replace(/\/\*[\s\S]*?\*\//g, " ").trim();
+      const name = cssIdentifierValue(rawName);
+      if (open < 0 || close <= open || name === null || !name.startsWith("--")) {
+        throw new DOMException("Invalid @position-try rule.", "SyntaxError");
+      }
+      super("@position-try " + cssIdentifierText(name) + " { " +
+        source.slice(open + 1, close) + " }", sheet, index);
+      this.__name = name;
+      Object.setPrototypeOf(this.__style, CSSPositionTryDescriptors.prototype);
+      this.__prelude = "@position-try " + cssIdentifierText(name);
+    }
+    get type() { return 0; }
+    get name() { return cssIdentifierText(this.__name); }
+    get style() { return this.__style; }
+  }
+
   function splitFontPaletteItems(value) {
     const result = [];
     let start = 0, depth = 0, quote = "", escaped = false;
@@ -11467,6 +11490,8 @@ let omoikaneUserActivationState;
       ? new CSSFontFeatureValuesRule(text, sheet, index)
       : /^@property(?=\s|\/\*|\{)/i.test(ruleSource)
       ? new CSSPropertyRule(text, sheet, index)
+      : /^@position-try(?=\s|\/\*|\{)/i.test(ruleSource)
+      ? new CSSPositionTryRule(text, sheet, index)
       : /^@import(?=\s|\/\*)/i.test(ruleSource)
       ? new CSSImportRule(text, sheet, index)
       : /^@layer(?=\s|\/\*|\{|;)/i.test(ruleSource)
@@ -21319,6 +21344,8 @@ let omoikaneUserActivationState;
   globalThis.CSSRule = CSSRule;
   globalThis.CSSFontFeatureValuesMap = CSSFontFeatureValuesMap;
   globalThis.CSSPropertyRule = CSSPropertyRule;
+  globalThis.CSSPositionTryDescriptors = CSSPositionTryDescriptors;
+  globalThis.CSSPositionTryRule = CSSPositionTryRule;
   globalThis.CSSImportRule = CSSImportRule;
   globalThis.CSSLayerBlockRule = CSSLayerBlockRule;
   globalThis.CSSLayerStatementRule = CSSLayerStatementRule;
