@@ -59,3 +59,21 @@ fn animation_accepts_an_effect_and_element_animate_remains_compatible() {
         "[true,true,\"idle\",true,\"running\",true,\"function\",\"function\"]"
     );
 }
+
+#[test]
+fn linear_easing_is_exposed_through_cssom_validation() {
+    let mut runtime = runtime();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "(() => { const target = document.getElementById('target');
+              target.style.transitionTimingFunction = 'linear(0, .5 25% 75%, 1)';
+              return JSON.stringify([
+                CSS.supports('transition-timing-function', 'linear(0, .5 25% 75%, 1)'),
+                CSS.supports('transition-timing-function', 'linear(0)'),
+                target.style.transitionTimingFunction
+              ]); })()",
+        ),
+        "[true,false,\"linear(0 0%, 0.5 25%, 0.5 75%, 1 100%)\"]"
+    );
+}

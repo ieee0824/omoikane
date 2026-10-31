@@ -286,9 +286,10 @@ struct RunningTransition {
     started: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum TimingFunction {
     Linear,
+    LinearStops(Vec<(f64, f64)>),
     CubicBezier(f64, f64, f64, f64),
     Steps(u32, StepPosition),
 }
@@ -301,7 +302,7 @@ enum StepPosition {
     JumpBoth,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct TransitionParameters {
     duration_ms: f64,
     delay_ms: f64,
@@ -833,16 +834,20 @@ impl TimingFunction {
                 };
                 Some(Self::Steps(count, position))
             }
+            _ if normalized.starts_with("linear(") => {
+                Some(Self::LinearStops(parse_linear_stops(&normalized)?))
+            }
             _ => None,
         }
     }
 
-    fn sample(self, progress: f64) -> f64 {
+    fn sample(&self, progress: f64) -> f64 {
         let progress = progress.clamp(0.0, 1.0);
         match self {
             Self::Linear => progress,
-            Self::CubicBezier(x1, y1, x2, y2) => sample_cubic_bezier(progress, x1, y1, x2, y2),
-            Self::Steps(count, position) => sample_steps(progress, count, position),
+            Self::LinearStops(stops) => sample_linear_stops(progress, stops),
+            Self::CubicBezier(x1, y1, x2, y2) => sample_cubic_bezier(progress, *x1, *y1, *x2, *y2),
+            Self::Steps(count, position) => sample_steps(progress, *count, *position),
         }
     }
 }
@@ -906,7 +911,7 @@ impl TransitionConfiguration {
         Some(TransitionParameters {
             duration_ms: *repeated(&self.durations_ms, index)?,
             delay_ms: *repeated(&self.delays_ms, index)?,
-            timing: *repeated(&self.timings, index)?,
+            timing: repeated(&self.timings, index)?.clone(),
         })
     }
 }
@@ -1487,6 +1492,21 @@ fn normalize_timing_function(input: &str) -> Option<String> {
     if lower == "step-end" {
         return Some("steps(1)".to_string());
     }
+    if function_arguments(&lower, "linear").is_some() {
+        let stops = parse_linear_stops(&lower)?;
+        return Some(format!(
+            "linear({})",
+            stops
+                .iter()
+                .map(|(output, input)| format!(
+                    "{} {}%",
+                    format_number(*output as f32),
+                    format_number((*input * 100.0) as f32)
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     if let Some(arguments) = function_arguments(&lower, "cubic-bezier") {
         let values = split_top_level(arguments, ',')?;
         if values.len() != 4 {
@@ -1536,6 +1556,103 @@ fn normalize_timing_function(input: &str) -> Option<String> {
         return Some(format!("steps({count}, {position})"));
     }
     None
+}
+
+fn parse_linear_stops(input: &str) -> Option<Vec<(f64, f64)>> {
+    let arguments = function_arguments(input, "linear")?;
+    let items = split_top_level(arguments, ',')?;
+    if items.len() < 2 {
+        return None;
+    }
+    let mut stops = Vec::new();
+    for item in items {
+        let components = split_top_level_whitespace(item.trim())?;
+        if components.is_empty() || components.len() > 3 {
+            return None;
+        }
+        let output = components[0].parse::<f64>().ok()?;
+        if !output.is_finite() {
+            return None;
+        }
+        let mut positions = components[1..]
+            .iter()
+            .map(|component| {
+                let value = component.strip_suffix('%')?.parse::<f64>().ok()? / 100.0;
+                value.is_finite().then_some(value)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if positions.len() == 2 && positions[0] > positions[1] {
+            return None;
+        }
+        if positions.is_empty() {
+            stops.push((output, f64::NAN));
+        } else {
+            for position in positions.drain(..) {
+                stops.push((output, position));
+            }
+        }
+    }
+    if stops[0].1.is_nan() {
+        stops[0].1 = 0.0;
+    }
+    if stops.last()?.1.is_nan() {
+        stops.last_mut()?.1 = 1.0;
+    }
+    let mut index = 1;
+    while index < stops.len() {
+        if !stops[index].1.is_nan() {
+            index += 1;
+            continue;
+        }
+        let start = index - 1;
+        let mut end = index;
+        while end < stops.len() && stops[end].1.is_nan() {
+            end += 1;
+        }
+        let from = stops[start].1;
+        let to = stops.get(end)?.1;
+        for missing in index..end {
+            stops[missing].1 = from + (to - from) * (missing - start) as f64 / (end - start) as f64;
+        }
+        index = end + 1;
+    }
+    let mut previous = f64::NEG_INFINITY;
+    for (_, position) in &mut stops {
+        *position = position.max(previous);
+        previous = *position;
+    }
+    Some(stops)
+}
+
+fn sample_linear_stops(progress: f64, stops: &[(f64, f64)]) -> f64 {
+    let first = stops[0];
+    let last = stops[stops.len() - 1];
+    if progress <= first.1 {
+        let next = stops
+            .iter()
+            .copied()
+            .find(|stop| stop.1 > first.1)
+            .unwrap_or(last);
+        return interpolate_linear_stop(progress, first, next);
+    }
+    if progress >= last.1 {
+        let previous = stops
+            .iter()
+            .rev()
+            .copied()
+            .find(|stop| stop.1 < last.1)
+            .unwrap_or(first);
+        return interpolate_linear_stop(progress, previous, last);
+    }
+    let right = stops.partition_point(|stop| stop.1 <= progress);
+    interpolate_linear_stop(progress, stops[right - 1], stops[right])
+}
+
+fn interpolate_linear_stop(progress: f64, from: (f64, f64), to: (f64, f64)) -> f64 {
+    if to.1 == from.1 {
+        return to.0;
+    }
+    from.0 + (to.0 - from.0) * (progress - from.1) / (to.1 - from.1)
 }
 
 fn function_arguments<'a>(input: &'a str, name: &str) -> Option<&'a str> {
@@ -2111,6 +2228,20 @@ mod tests {
             TimingFunction::parse("step-start").unwrap().sample(0.0),
             1.0
         );
+    }
+
+    #[test]
+    fn normalizes_and_samples_linear_easing_stops() {
+        assert_eq!(
+            normalize_timing_function("linear(0, .5 25% 75%, 1)"),
+            Some("linear(0 0%, 0.5 25%, 0.5 75%, 1 100%)".into())
+        );
+        let timing = TimingFunction::parse("linear(0, .5 25% 75%, 1)").unwrap();
+        assert!((timing.clone().sample(0.125) - 0.25).abs() < 0.0001);
+        assert!((timing.clone().sample(0.5) - 0.5).abs() < 0.0001);
+        assert!((timing.sample(0.875) - 0.75).abs() < 0.0001);
+        assert!(normalize_timing_function("linear(0)").is_none());
+        assert!(normalize_timing_function("linear(0 80% 20%, 1)").is_none());
     }
 
     #[test]
