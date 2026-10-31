@@ -28661,14 +28661,186 @@ let omoikaneUserActivationState;
     get currentTime() { return 0; }
   }
 
-  class CSSUnitValue {
+  const cssNumericUnits = new Map([
+    ["number", ["number", 1, ""]], ["percent", ["percent", 1, "%"]],
+    ["px", ["length", 1, "px"]], ["cm", ["length", 96 / 2.54, "cm"]],
+    ["mm", ["length", 96 / 25.4, "mm"]], ["q", ["length", 96 / 101.6, "Q"]],
+    ["in", ["length", 96, "in"]], ["pt", ["length", 96 / 72, "pt"]],
+    ["pc", ["length", 16, "pc"]], ["em", ["relative-length", 1, "em"]],
+    ["ex", ["relative-length-ex", 1, "ex"]], ["ch", ["relative-length-ch", 1, "ch"]],
+    ["rem", ["relative-length-rem", 1, "rem"]], ["lh", ["relative-length-lh", 1, "lh"]],
+    ["rlh", ["relative-length-rlh", 1, "rlh"]], ["vw", ["viewport-width", 1, "vw"]],
+    ["vh", ["viewport-height", 1, "vh"]], ["vi", ["viewport-inline", 1, "vi"]],
+    ["vb", ["viewport-block", 1, "vb"]], ["vmin", ["viewport-min", 1, "vmin"]],
+    ["vmax", ["viewport-max", 1, "vmax"]], ["deg", ["angle", Math.PI / 180, "deg"]],
+    ["grad", ["angle", Math.PI / 200, "grad"]], ["rad", ["angle", 1, "rad"]],
+    ["turn", ["angle", 2 * Math.PI, "turn"]], ["s", ["time", 1, "s"]],
+    ["ms", ["time", 0.001, "ms"]], ["hz", ["frequency", 1, "Hz"]],
+    ["khz", ["frequency", 1000, "kHz"]], ["dpi", ["resolution", 1 / 96, "dpi"]],
+    ["dpcm", ["resolution", 2.54 / 96, "dpcm"]], ["dppx", ["resolution", 1, "dppx"]],
+    ["fr", ["flex", 1, "fr"]],
+  ]);
+
+  function normalizeCssNumericUnit(unit) {
+    const source = String(unit);
+    const key = source === "%" ? "percent" : source.toLowerCase();
+    if (!cssNumericUnits.has(key)) throw new TypeError("Invalid CSS numeric unit");
+    return key;
+  }
+
+  function cssNumericInput(value) {
+    if (value instanceof CSSNumericValue) return value;
+    const number = Number(value);
+    if (!Number.isFinite(number)) throw new TypeError("Expected a finite CSS numeric value");
+    return new CSSUnitValue(number, "number");
+  }
+
+  function parseCssUnitValue(value) {
+    const source = String(value).trim();
+    const match = source.match(/^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)\s*([a-z]+|%)?$/i);
+    if (!match) throw new DOMException("The value is not a simple numeric value.", "SyntaxError");
+    return new CSSUnitValue(Number(match[1]), match[2] || "number");
+  }
+
+  class CSSStyleValue {
+    constructor() {
+      if (new.target === CSSStyleValue) throw new TypeError("Illegal constructor");
+    }
+    static parse(property, cssText) {
+      const name = String(property);
+      const value = String(cssText).trim();
+      if (!name.startsWith("--") && !CSS.supports(name, value)) {
+        throw new DOMException("The value is not valid for the property.", "SyntaxError");
+      }
+      try { return parseCssUnitValue(value); } catch (_) {}
+      return new CSSKeywordValue(value);
+    }
+    static parseAll(property, cssText) { return [this.parse(property, cssText)]; }
+  }
+
+  class CSSNumericValue extends CSSStyleValue {
+    constructor() {
+      super();
+      if (new.target === CSSNumericValue) throw new TypeError("Illegal constructor");
+    }
+    static parse(cssText) { return parseCssUnitValue(cssText); }
+    add(...values) { return cssNumericAdd([this, ...values], 1); }
+    sub(...values) { return cssNumericAdd([this, ...values], -1); }
+    mul(...values) { return cssNumericMultiply([this, ...values]); }
+    div(...values) {
+      return cssNumericMultiply([this, ...values.map(value => {
+        const numeric = cssNumericInput(value);
+        if (numeric instanceof CSSUnitValue && numeric.unit === "number") {
+          if (numeric.value === 0) throw new RangeError("Division by zero");
+          return new CSSUnitValue(1 / numeric.value, "number");
+        }
+        return new CSSMathInvert(numeric);
+      })]);
+    }
+    min(...values) { return new CSSMathMin(this, ...values.map(cssNumericInput)); }
+    max(...values) { return new CSSMathMax(this, ...values.map(cssNumericInput)); }
+    equals(...values) { return values.every(value => this.toString() === cssNumericInput(value).toString()); }
+    to(unit) {
+      if (!(this instanceof CSSUnitValue)) throw new TypeError("A compound value cannot be directly converted");
+      return this.__convert(unit);
+    }
+    toSum(...units) {
+      const value = units.length ? this.to(units[0]) : this;
+      return value instanceof CSSMathSum ? value : new CSSMathSum(value);
+    }
+  }
+
+  class CSSUnitValue extends CSSNumericValue {
     constructor(value, unit) {
+      super();
       const number = Number(value);
       if (!Number.isFinite(number)) throw new TypeError("CSSUnitValue requires a finite value");
       this.value = number;
-      this.unit = String(unit);
+      this.unit = normalizeCssNumericUnit(unit);
     }
-    toString() { return String(this.value) + (this.unit === "percent" ? "%" : this.unit); }
+    __convert(unit) {
+      const target = normalizeCssNumericUnit(unit);
+      const sourceInfo = cssNumericUnits.get(this.unit), targetInfo = cssNumericUnits.get(target);
+      if (sourceInfo[0] !== targetInfo[0]) throw new TypeError("Incompatible CSS numeric units");
+      return new CSSUnitValue(this.value * sourceInfo[1] / targetInfo[1], target);
+    }
+    toString() { return String(this.value) + cssNumericUnits.get(this.unit)[2]; }
+  }
+
+  class CSSMathValue extends CSSNumericValue {
+    constructor(operator) { super(); this.operator = operator; }
+  }
+
+  class CSSMathVariadic extends CSSMathValue {
+    constructor(operator, values) {
+      super(operator);
+      if (values.length === 0) throw new TypeError("At least one numeric value is required");
+      this.values = Object.freeze(values.map(cssNumericInput));
+    }
+  }
+
+  class CSSMathSum extends CSSMathVariadic {
+    constructor(...values) { super("sum", values); }
+    toString() { return "calc(" + this.values.map(String).join(" + ") + ")"; }
+  }
+
+  class CSSMathProduct extends CSSMathVariadic {
+    constructor(...values) { super("product", values); }
+    toString() { return "calc(" + this.values.map(String).join(" * ") + ")"; }
+  }
+
+  class CSSMathMin extends CSSMathVariadic {
+    constructor(...values) { super("min", values); }
+    toString() { return "min(" + this.values.map(String).join(", ") + ")"; }
+  }
+
+  class CSSMathMax extends CSSMathVariadic {
+    constructor(...values) { super("max", values); }
+    toString() { return "max(" + this.values.map(String).join(", ") + ")"; }
+  }
+
+  class CSSMathNegate extends CSSMathValue {
+    constructor(value) { super("negate"); this.value = cssNumericInput(value); }
+    toString() { return "calc(-1 * " + this.value + ")"; }
+  }
+
+  class CSSMathInvert extends CSSMathValue {
+    constructor(value) { super("invert"); this.value = cssNumericInput(value); }
+    toString() { return "calc(1 / " + this.value + ")"; }
+  }
+
+  class CSSKeywordValue extends CSSStyleValue {
+    constructor(value) {
+      super();
+      const keyword = String(value);
+      if (!keyword) throw new TypeError("CSSKeywordValue requires a non-empty value");
+      this.value = keyword;
+    }
+    toString() { return this.value; }
+  }
+
+  function cssNumericAdd(inputs, direction) {
+    const values = inputs.map(cssNumericInput);
+    const first = values[0];
+    if (first instanceof CSSUnitValue && values.every(value => value instanceof CSSUnitValue)) {
+      try {
+        const total = values.slice(1).reduce((sum, value) =>
+          sum + direction * value.__convert(first.unit).value, first.value);
+        return new CSSUnitValue(total, first.unit);
+      } catch (_) {}
+    }
+    const terms = direction === 1 ? values : [values[0], ...values.slice(1).map(value => new CSSMathNegate(value))];
+    return new CSSMathSum(...terms);
+  }
+
+  function cssNumericMultiply(inputs) {
+    const values = inputs.map(cssNumericInput);
+    const unitValues = values.filter(value => value instanceof CSSUnitValue && value.unit !== "number");
+    if (unitValues.length <= 1 && values.every(value => value instanceof CSSUnitValue)) {
+      const product = values.reduce((result, value) => result * value.value, 1);
+      return new CSSUnitValue(product, unitValues[0]?.unit || "number");
+    }
+    return new CSSMathProduct(...values);
   }
 
   function timelineAxis(value) {
@@ -28971,7 +29143,16 @@ let omoikaneUserActivationState;
   globalThis.KeyframeEffect = KeyframeEffect;
   globalThis.AnimationTimeline = AnimationTimeline;
   globalThis.DocumentTimeline = DocumentTimeline;
-  if (globalThis.CSSUnitValue === undefined) globalThis.CSSUnitValue = CSSUnitValue;
+  Object.assign(globalThis, {
+    CSSStyleValue, CSSNumericValue, CSSUnitValue, CSSKeywordValue,
+    CSSMathValue, CSSMathSum, CSSMathProduct, CSSMathMin, CSSMathMax,
+    CSSMathNegate, CSSMathInvert,
+  });
+  for (const unit of cssNumericUnits.keys()) {
+    const factoryName = unit === "q" ? "Q" : unit === "hz" ? "Hz" :
+      unit === "khz" ? "kHz" : unit;
+    CSS[factoryName] = value => new CSSUnitValue(value, unit);
+  }
   globalThis.ScrollTimeline = ScrollTimeline;
   globalThis.ViewTimeline = ViewTimeline;
   globalThis.Animation = Animation;
