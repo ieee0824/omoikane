@@ -27,15 +27,20 @@ fn script_dependencies(source: &[u8], test_path: &str) -> Vec<String> {
             } else {
                 parent.join(script)
             };
-            if path.components().any(|component| {
-                matches!(
-                    component,
-                    std::path::Component::ParentDir | std::path::Component::RootDir
-                )
-            }) {
-                return None;
+            let mut normalized = PathBuf::new();
+            for component in path.components() {
+                match component {
+                    std::path::Component::Normal(component) => normalized.push(component),
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => {
+                        if !normalized.pop() {
+                            return None;
+                        }
+                    }
+                    std::path::Component::Prefix(_) | std::path::Component::RootDir => return None,
+                }
             }
-            Some(format!("/{}", path.to_string_lossy()))
+            Some(format!("/{}", normalized.to_string_lossy()))
         })
         .collect()
 }
@@ -676,10 +681,15 @@ mod tests {
 
     #[test]
     fn script_dependencies_resolve_relative_and_absolute_meta_paths() {
-        let source = b"// META: script=lib/helper.js\n// META: script=/resources/shared.js\n// META: script=../outside.js\n// META: script=lib/../outside.js\n";
+        let source = b"// META: script=lib/helper.js\n// META: script=/resources/shared.js\n// META: script=../outside.js\n// META: script=lib/../outside.js\n// META: script=../../../escape.js\n";
         assert_eq!(
             script_dependencies(source, "dom/tests/case.any.js"),
-            ["/dom/tests/lib/helper.js", "/resources/shared.js"]
+            [
+                "/dom/tests/lib/helper.js",
+                "/resources/shared.js",
+                "/dom/outside.js",
+                "/dom/tests/outside.js"
+            ]
         );
     }
 }

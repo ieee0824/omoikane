@@ -1,5 +1,11 @@
 {
   "tests": [
+    { "path": "streams/readable-byte-streams/construct-byob-request.any.js" },
+    { "path": "streams/readable-streams/async-iterator.any.js" },
+    { "path": "streams/readable-streams/from.any.js" },
+    { "path": "FileAPI/blob/Blob-bytes.any.js" },
+    { "path": "fetch/api/body/formdata.any.js" },
+    { "path": "fetch/api/body/mime-type.any.js" },
     { "path": "url/url-statics-parse.any.js" },
     { "path": "url/urlsearchparams-size.any.js" }
   ]

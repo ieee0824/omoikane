@@ -393,6 +393,8 @@ collect_pattern \
   "/streams/readable-streams/async-iterator.any.js" \
   "/streams/readable-streams/from.any.js" \
   "/FileAPI/blob/Blob-bytes.any.js" \
+  "/fetch/api/body/formdata.any.js" \
+  "/fetch/api/body/mime-type.any.js" \
   "/FileAPI/support/Blob.js" \
   "/url/url-statics-parse.any.js" \
   "/url/urlsearchparams-size.any.js" \
