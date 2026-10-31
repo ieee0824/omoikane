@@ -8235,6 +8235,13 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
             return validate_keyword_value(value, &["normal", "inline-size", "size"]);
         }
         "animation-composition" => {
+            if let Value::Keyword(keyword) = value
+                && is_css_wide_keyword(&keyword.to_ascii_lowercase())
+            {
+                return DeclarationValidation::Valid(ComputedValue::Keyword(
+                    keyword.to_ascii_lowercase(),
+                ));
+            }
             let normalized = render_value(value)
                 .split(',')
                 .map(|value| {
