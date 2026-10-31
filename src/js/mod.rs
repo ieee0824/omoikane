@@ -74,6 +74,7 @@ mod highlight;
 mod idle_period;
 mod language;
 mod layout_structure;
+mod long_tasks;
 mod main_shadow_mask_cache;
 #[cfg(test)]
 mod main_shadow_mask_cache_tests;
@@ -9080,6 +9081,8 @@ pub struct JsRuntime {
     module_loader: Rc<HttpModuleLoader>,
     sandbox: SandboxConfig,
     task_pump_limit: usize,
+    /// Nesting depth of timed task turns (see `long_tasks`).
+    task_turn_depth: usize,
     retained_scroll: retained_scroll::RetainedScrollCapture,
 }
 
@@ -9382,6 +9385,7 @@ impl JsRuntime {
             module_loader,
             sandbox,
             task_pump_limit: usize::MAX,
+            task_turn_depth: 0,
             retained_scroll: retained_scroll::RetainedScrollCapture::default(),
         };
         let bindings = register_host_bindings(&mut runtime.context, &runtime.host_state)?;
@@ -11832,11 +11836,13 @@ impl JsRuntime {
                 };
                 TaskTurnDiagnostics::new(format!("{source:?}"), task_kind, timer_metadata)
             });
+            let turn = self.begin_task_turn();
             let task_result = self.run_task(task);
             if let Some(diagnostics) = task_diagnostics.as_mut() {
                 diagnostics.finish_callback(task_result.is_ok());
             }
             if let Err(error) = task_result {
+                self.end_task_turn(None);
                 if let Some(diagnostics) = task_diagnostics.take() {
                     diagnostics.finish_and_emit(false);
                 }
@@ -11849,6 +11855,7 @@ impl JsRuntime {
                 diagnostics.finish_background();
             }
             if self.is_terminated_worker() {
+                self.end_task_turn(None);
                 if let Some(diagnostics) = task_diagnostics.take() {
                     diagnostics.finish_and_emit(true);
                 }
@@ -11857,6 +11864,8 @@ impl JsRuntime {
             // HTML performs a microtask checkpoint after every task, including
             // host-only navigation tasks that do not directly invoke script.
             let jobs_result = self.run_jobs_for_document(task_document_id);
+            // A task's duration includes its microtask checkpoint.
+            self.end_task_turn(turn);
             if let Some(diagnostics) = task_diagnostics.as_mut() {
                 diagnostics.finish_jobs();
             }
@@ -12942,6 +12951,7 @@ impl JsRuntime {
         let mut callbacks_run = 0;
         let mut first_error = None;
         let mut first_jobs_error = None;
+        let turn = self.begin_task_turn();
 
         for id in callback_ids {
             let callback = self
@@ -13014,6 +13024,7 @@ impl JsRuntime {
         // Scroll-driven intersection checks wait until every animation-frame
         // callback has observed the new geometry. The microtask checkpoint
         // completes that work before the embedder proceeds to style/layout/paint.
+        self.end_task_turn(turn);
         let stage_started = detail.stage_start();
         self.flush_pending_layout_observers()?;
         self.flush_pending_scroll_intersection_observers()?;
@@ -13099,6 +13110,7 @@ impl JsRuntime {
         let mut callbacks_run = 0;
         let mut first_error = None;
         let mut first_jobs_error = None;
+        let turn = self.begin_task_turn();
         for id in callback_ids {
             let callback = self
                 .host_state
@@ -13170,6 +13182,7 @@ impl JsRuntime {
                 }
             }
         }
+        self.end_task_turn(turn);
         self.flush_pending_layout_observers()?;
         self.flush_pending_scroll_intersection_observers()?;
         let jobs_result = self.run_jobs();
@@ -15178,6 +15191,7 @@ impl JsRuntime {
             script.identity()
         ));
         // Execute immediately
+        let turn = self.begin_task_turn();
         let script_context = script_source_context(source_code);
         let external = script.get_attribute("src").is_some();
         let owner = document_root_for_node(script)
@@ -15213,6 +15227,7 @@ impl JsRuntime {
         let jobs_start = std::time::Instant::now();
         let jobs_result = self.run_jobs();
         let jobs_elapsed = jobs_start.elapsed();
+        self.end_task_turn(turn);
         if let Err(err) = jobs_result {
             self.record_document_script_failure("DOCUMENT_SCRIPT_JOBS_FAILED");
             errors.push(format!("[script jobs: {script_label}] {err}"));

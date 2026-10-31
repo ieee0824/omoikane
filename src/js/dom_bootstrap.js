@@ -3459,6 +3459,10 @@ let omoikaneUserActivationState;
   // No focus event is cancelable, and all four are composed so they cross
   // shadow boundaries. Bubbling differs per event — `focusin` and `focusout`
   // bubble, `focus` and `blur` do not — so each caller passes it in.
+  // Set by the Event Timing section once the performance timeline exists.
+  // `var` keeps dispatches during bootstrap from reading it before then.
+  var eventTimingRecorder = null;
+
   function fireFocusEvent(target, type, relatedTarget, bubbles) {
     const event = new FocusEvent(type, {
       bubbles,
@@ -4129,12 +4133,17 @@ let omoikaneUserActivationState;
     dispatchEvent(event) {
       const dispatchEvent = isEventInstance(event) ? event : new Event(event);
       const activationInfo = dispatchEvent.type === "click" ? { target: null } : null;
+      // Event Timing measures trusted input dispatch (see recordEventTiming).
+      const timing = eventTimingRecorder && dispatchEvent.isTrusted
+        ? eventTimingRecorder.begin(dispatchEvent) : null;
       let notCanceled;
       try { notCanceled = dispatchEventOnTarget(this, dispatchEvent, activationInfo); }
       catch (error) {
+        if (timing) eventTimingRecorder.end(timing, this);
         completeCheckableActivation(activationInfo?.checkable, true);
         throw error;
       }
+      if (timing) eventTimingRecorder.end(timing, this);
       completeCheckableActivation(activationInfo?.checkable, !notCanceled);
       // Run the event path's activation target after an uncanceled click. This
       // also covers a click on a descendant of a link or form control.
@@ -21991,6 +22000,11 @@ let omoikaneUserActivationState;
     return true;
   }
 
+  // Events the host creates from user input are trusted.
+  function trustedInputEvent(event) {
+    event.isTrusted = true;
+    return event;
+  }
   globalThis.__omoikane_dispatch_mouse_input = function(id, type, init, focusTarget) {
     if (type === "mousedown" || type === "click") stopLargestContentfulPaint();
     const locked = nativePointerLockTarget() !== null;
@@ -22014,9 +22028,9 @@ let omoikaneUserActivationState;
     }
     const activationEvent = type === "mousedown" || type === "pointerdown" || type === "click";
     if (activationEvent) grantFullscreenTransientActivation();
-    const notCanceled = target.dispatchEvent(new MouseEvent(type, {
+    const notCanceled = target.dispatchEvent(trustedInputEvent(new MouseEvent(type, {
       ...init, bubbles: true, cancelable: true, composed: true,
-    }));
+    })));
     if (notCanceled && type === "click" && !locked) {
       const activePicker = wrapNode(browsingInput.activeSelectPickerId);
       if (activePicker && target !== activePicker && !activePicker.contains(target)) {
@@ -22182,9 +22196,9 @@ let omoikaneUserActivationState;
     if (internalNodeId(inputDocument) !== __omoikane_document_id) return false;
     // The default was already accepted and committed by the trusted host.
     // Cancellation remains observable, but cannot run a second default.
-    target.dispatchEvent(new WheelEvent("wheel", {
+    target.dispatchEvent(trustedInputEvent(new WheelEvent("wheel", {
       ...init, bubbles: true, cancelable: true, composed: true, deltaMode: 0,
-    }));
+    })));
     return true;
   }
   globalThis.__omoikane_dispatch_wheel_input = function(id, init) {
@@ -22196,9 +22210,9 @@ let omoikaneUserActivationState;
     if (forwarded !== undefined) {
       return typeof forwarded === "number" ? forwarded : (forwarded ? 1 : 0);
     }
-    const notCanceled = target.dispatchEvent(new WheelEvent("wheel", {
+    const notCanceled = target.dispatchEvent(trustedInputEvent(new WheelEvent("wheel", {
       ...init, bubbles: true, cancelable: true, composed: true, deltaMode: 0,
-    }));
+    })));
     if (!notCanceled) return 0;
     if (locked) return 1;
     return 1 | performScrollBoundaryDefault(target, init.deltaX, init.deltaY);
@@ -22253,7 +22267,7 @@ let omoikaneUserActivationState;
       metaKey: !!init.metaKey,
       shiftKey: !!init.shiftKey,
     });
-    const notCanceled = target.dispatchEvent(event);
+    const notCanceled = target.dispatchEvent(trustedInputEvent(event));
     if (!notCanceled) return 0;
     if (type !== "touchmove" || init.defaultAllowed === false ||
         !touchActionAllowsDefault(target, init.deltaX, init.deltaY)) return 1;
@@ -22282,9 +22296,9 @@ let omoikaneUserActivationState;
       nativeExitPointerLock(null, false);
       if (locked) fullyExitFullscreenForUser(focusedDocument);
     }
-    const notCanceled = target.dispatchEvent(new KeyboardEvent(type, {
+    const notCanceled = target.dispatchEvent(trustedInputEvent(new KeyboardEvent(type, {
       ...init, bubbles: true, cancelable: true, composed: true,
-    }));
+    })));
     if (notCanceled && type === "keydown") {
       if (performSelectKeyDefault(target, init || {}) || performTemporalInputKeyDefault(target, init || {})) {
         // The component editor consumed this key before focus traversal.
@@ -25119,6 +25133,12 @@ let omoikaneUserActivationState;
       const type = String(options.type);
       if (!PerformanceObserver.supportedEntryTypes.includes(type)) return;
       this._mode = "single";
+      if (type === "event") {
+        // Event Timing: entries at least this long are observed (min 16ms).
+        const threshold = options.durationThreshold === undefined
+          ? 104 : Number(options.durationThreshold);
+        this._eventDurationThreshold = Math.max(16, Number.isFinite(threshold) ? threshold : 104);
+      }
       this._entryTypes.add(type);
       if (Boolean(options.buffered)) {
         this._queue.push(...performanceEntries.concat(observerOnlyPerformanceEntries)
@@ -25142,7 +25162,7 @@ let omoikaneUserActivationState;
   Object.defineProperty(PerformanceObserver, "supportedEntryTypes", {
     get() {
       return Object.freeze(["navigation", "resource", "mark", "measure", "visibility-state",
-        "paint", "largest-contentful-paint"]);
+        "paint", "largest-contentful-paint", "longtask", "event", "first-input"]);
     },
     enumerable: true,
   });
@@ -25263,9 +25283,12 @@ let omoikaneUserActivationState;
 
   function addObserverOnlyPerformanceEntry(entry) {
     Object.defineProperty(entry, "__sequence", { value: performanceEntrySequence++ });
-    observerOnlyPerformanceEntries.push(entry);
+    const isEvent = entry.entryType === "event";
+    // Only event entries of at least 104ms are buffered.
+    if (!isEvent || entry.duration >= 104) observerOnlyPerformanceEntries.push(entry);
     for (const observer of performanceObservers) {
       if (!observer._entryTypes.has(entry.entryType)) continue;
+      if (isEvent && entry.duration < (observer._eventDurationThreshold ?? 104)) continue;
       observer._queue.push(entry);
       schedulePerformanceObserver(observer);
     }
@@ -25331,6 +25354,160 @@ let omoikaneUserActivationState;
       }
     }
     finishPaintTimingIfDone();
+  };
+
+  // Long Tasks: one window attribution with unknown culprit.
+  class TaskAttributionTiming extends PerformanceEntry {
+    constructor() {
+      const [token] = arguments;
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      super(performanceEntryToken, "unknown", "taskattribution", 0, 0);
+    }
+    get containerType() { return "window"; }
+    get containerSrc() { return ""; }
+    get containerId() { return ""; }
+    get containerName() { return ""; }
+    toJSON() {
+      return { ...super.toJSON(), containerType: this.containerType,
+        containerSrc: this.containerSrc, containerId: this.containerId,
+        containerName: this.containerName };
+    }
+  }
+  const longTaskAttribution = new WeakMap();
+  class PerformanceLongTaskTiming extends PerformanceEntry {
+    constructor() {
+      const [token, startTime, duration] = arguments;
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      super(performanceEntryToken, "self", "longtask", startTime, duration);
+      longTaskAttribution.set(this,
+        Object.freeze([new TaskAttributionTiming(performanceEntryToken)]));
+    }
+    get attribution() {
+      const attribution = longTaskAttribution.get(this);
+      if (!attribution) throw new TypeError("Illegal invocation");
+      return attribution;
+    }
+    toJSON() { return { ...super.toJSON(), attribution: this.attribution }; }
+  }
+  for (const [prototype, names] of [
+    [TaskAttributionTiming.prototype, ["containerType", "containerSrc", "containerId", "containerName"]],
+    [PerformanceLongTaskTiming.prototype, ["attribution"]],
+  ]) {
+    for (const name of names) {
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+      Object.defineProperty(prototype, name, { ...descriptor, enumerable: true });
+    }
+  }
+  // ---- Event Timing ----
+  const eventTimingTypes = new Set([
+    "auxclick", "beforeinput", "click", "compositionend", "compositionstart",
+    "compositionupdate", "contextmenu", "dblclick", "dragend", "dragenter", "dragleave",
+    "dragover", "dragstart", "drop", "gotpointercapture", "input", "keydown", "keypress",
+    "keyup", "lostpointercapture", "mousedown", "mouseenter", "mouseleave", "mouseout",
+    "mouseover", "mouseup", "pointercancel", "pointerdown", "pointerenter", "pointerleave",
+    "pointerout", "pointerover", "pointerup", "touchcancel", "touchend", "touchstart",
+  ]);
+  const firstInputTypes = new Set(["keydown", "mousedown", "pointerdown", "click"]);
+  const eventTimingState = new WeakMap();
+  class PerformanceEventTiming extends PerformanceEntry {
+    constructor() {
+      const [token, state] = arguments;
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      super(performanceEntryToken, state.type, state.entryType, state.startTime, state.duration);
+      eventTimingState.set(this, state);
+    }
+    toJSON() {
+      return { ...super.toJSON(), processingStart: this.processingStart,
+        processingEnd: this.processingEnd, cancelable: this.cancelable,
+        interactionId: this.interactionId };
+    }
+  }
+  for (const name of ["processingStart", "processingEnd", "cancelable", "target", "interactionId"]) {
+    const get = function () {
+      const state = eventTimingState.get(this);
+      if (!state) throw new TypeError("Illegal invocation");
+      if (name === "target") return state.target && state.target.isConnected ? state.target : null;
+      return state[name];
+    };
+    Object.defineProperty(get, "name", { value: "get " + name });
+    Object.defineProperty(PerformanceEventTiming.prototype, name, {
+      configurable: true, enumerable: true, get,
+    });
+  }
+
+  // performance.eventCounts: a read-only maplike of dispatched event counts.
+  const eventCountsMap = new Map();
+  for (const type of eventTimingTypes) eventCountsMap.set(type, 0);
+  class EventCounts {
+    constructor() {
+      const [token] = arguments;
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+    }
+    get size() { return eventCountsMap.size; }
+    get(key) { return eventCountsMap.get(String(key)); }
+    has(key) { return eventCountsMap.has(String(key)); }
+    keys() { return eventCountsMap.keys(); }
+    values() { return eventCountsMap.values(); }
+    entries() { return eventCountsMap.entries(); }
+    forEach(callback, thisArg = undefined) {
+      eventCountsMap.forEach((value, key) => callback.call(thisArg, value, key, this));
+    }
+    [Symbol.iterator]() { return eventCountsMap.entries(); }
+  }
+  const eventCounts = new EventCounts(performanceEntryToken);
+
+  // Interactions group a key press or a pointer press with its follow-up
+  // events. Ids start at an arbitrary value and grow by 7, as in Chromium.
+  let interactionCount = 0;
+  let currentInteractionId = 0;
+  let nextInteractionId = 7 * 1000;
+  let firstInputReported = false;
+  function interactionIdFor(type) {
+    if (type === "keydown" || type === "pointerdown") {
+      interactionCount += 1;
+      currentInteractionId = nextInteractionId;
+      nextInteractionId += 7;
+      return currentInteractionId;
+    }
+    if (["keyup", "keypress", "pointerup", "click"].includes(type)) return currentInteractionId;
+    return 0;
+  }
+  // Durations are rounded to 8ms (Event Timing §3).
+  const roundEventDuration = duration => Math.max(0, Math.round(duration / 8) * 8);
+  const eventTimingRecorded = new WeakSet();
+  eventTimingRecorder = {
+    begin(event) {
+      // A redispatched event is measured once.
+      if (!eventTimingTypes.has(event.type) || eventTimingRecorded.has(event)) return null;
+      eventTimingRecorded.add(event);
+      eventCountsMap.set(event.type, eventCountsMap.get(event.type) + 1);
+      const processingStart = nativePerformanceNow();
+      const startTime = Math.min(Number(event.timeStamp) || processingStart, processingStart);
+      return { event, startTime, processingStart };
+    },
+    end(timing, target) {
+      const processingEnd = nativePerformanceNow();
+      const { event } = timing;
+      const state = {
+        type: event.type, entryType: "event", startTime: timing.startTime,
+        duration: roundEventDuration(processingEnd - timing.startTime),
+        processingStart: timing.processingStart, processingEnd,
+        cancelable: Boolean(event.cancelable), target: event.target || target,
+        interactionId: interactionIdFor(event.type),
+      };
+      addObserverOnlyPerformanceEntry(new PerformanceEventTiming(performanceEntryToken, state));
+      if (!firstInputReported && firstInputTypes.has(event.type)) {
+        firstInputReported = true;
+        addPerformanceEntry(new PerformanceEventTiming(performanceEntryToken,
+          { ...state, entryType: "first-input" }));
+      }
+    },
+  };
+
+  // Called by the host after a task turn longer than 50ms (long_tasks.rs).
+  globalThis.__omoikane_record_long_task = function(startTime, duration) {
+    addObserverOnlyPerformanceEntry(new PerformanceLongTaskTiming(
+      performanceEntryToken, Number(startTime), Number(duration)));
   };
 
   function recordVisibilityStateEntry(visibilityState, startTime) {
@@ -25647,12 +25824,22 @@ let omoikaneUserActivationState;
   globalThis.PerformanceMeasure = PerformanceMeasure;
   globalThis.PerformanceResourceTiming = PerformanceResourceTiming;
   for (const [name, value] of [["PerformancePaintTiming", PerformancePaintTiming],
-    ["LargestContentfulPaint", LargestContentfulPaint]]) {
+    ["LargestContentfulPaint", LargestContentfulPaint],
+    ["PerformanceLongTaskTiming", PerformanceLongTaskTiming],
+    ["PerformanceEventTiming", PerformanceEventTiming],
+    ["EventCounts", EventCounts],
+    ["TaskAttributionTiming", TaskAttributionTiming]]) {
     Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
   }
   globalThis.PerformanceNavigationTiming = PerformanceNavigationTiming;
   globalThis.PerformanceObserver = PerformanceObserver;
   globalThis.PerformanceObserverEntryList = PerformanceObserverEntryList;
+  Object.defineProperty(performance, "eventCounts", {
+    configurable: true, enumerable: true, get: () => eventCounts,
+  });
+  Object.defineProperty(performance, "interactionCount", {
+    configurable: true, enumerable: true, get: () => interactionCount,
+  });
   globalThis.performance = performance;
   recordVisibilityStateEntry(document.visibilityState, 0);
   globalThis.__omoikane_sync_initial_visibility_entry = function() {
