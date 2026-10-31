@@ -653,6 +653,8 @@ collect_pattern \
   "/css/css-view-transitions/active-view-transition-on-non-root.html" \
   "/css/css-view-transitions/active-view-transition-pseudo-class-match.html" \
   "/css/css-view-transitions/document-active-view-transition.html" \
+  "/css/css-view-transitions/duplicate-tag-rejects-capture.html" \
+  "/css/css-view-transitions/pseudo-computed-style-stays-in-sync-with-new-element.html" \
   "/css/css-view-transitions/view-transition-types-one-green-square-ref.html" \
   "/common/reftest-wait.js" \
   "/css/css-view-transitions/support/"

@@ -9247,6 +9247,137 @@ let omoikaneUserActivationState;
   const activeDocumentTransitions = new WeakMap();
   const VIEW_TRANSITION_CONSTRUCTION = {};
 
+  function viewTransitionValueFromCssText(text, property) {
+    const body = String(text || "").replace(/^[^{]*\{/, "").replace(/\}[^}]*$/, "");
+    let value = "";
+    for (const declaration of body.split(";")) {
+      const colon = declaration.indexOf(":");
+      if (colon < 0 || declaration.slice(0, colon).trim().toLowerCase() !== property) continue;
+      value = declaration.slice(colon + 1).trim().replace(/\s*!important\s*$/i, "");
+    }
+    return value;
+  }
+
+  function viewTransitionDeclaredValue(element, property) {
+    let value = element.style && element.style.getPropertyValue(property) ||
+      viewTransitionValueFromCssText(element.getAttribute("style"), property);
+    const visit = rules => {
+      for (const rule of rules || []) {
+        if (rule instanceof CSSStyleRule) {
+          try {
+            if (element.matches(rule.selectorText)) {
+              const candidate = rule.style.getPropertyValue(property) ||
+                viewTransitionValueFromCssText(rule.cssText, property);
+              if (candidate) value = candidate;
+            }
+          } catch (_) {}
+        } else if (rule && rule.cssRules) {
+          try { visit(rule.cssRules); } catch (_) {}
+        }
+      }
+    };
+    for (const sheet of element.ownerDocument?.styleSheets || []) {
+      try { visit(sheet.cssRules); } catch (_) {}
+    }
+    for (const styleElement of element.ownerDocument?.querySelectorAll("style") || []) {
+      const source = styleElement.textContent || "";
+      const rulePattern = /([^{}]+)\{([^{}]*)\}/g;
+      let match;
+      while ((match = rulePattern.exec(source))) {
+        try {
+          if (!element.matches(match[1].trim())) continue;
+          const candidate = viewTransitionValueFromCssText(match[2], property);
+          if (candidate) value = candidate;
+        } catch (_) {}
+      }
+    }
+    return value;
+  }
+
+  function captureViewTransitionSnapshot(document) {
+    const snapshots = new Map();
+    const root = document.documentElement;
+    if (!root) return snapshots;
+    const elements = [root, ...Array.from(document.querySelectorAll("*"))];
+    for (const element of elements) {
+      const style = globalThis.getComputedStyle(element);
+      let name = String(style.viewTransitionName ||
+        viewTransitionDeclaredValue(element, "view-transition-name") || "none").trim();
+      if (element === root && name === "none") name = "root";
+      if (!name || name === "none") continue;
+      if (snapshots.has(name) && snapshots.get(name).element !== element) {
+        snapshots.duplicateNames = true;
+      }
+      snapshots.set(name, {
+        element,
+        style: {
+          position: "absolute",
+          display: "block",
+          mixBlendMode: style.mixBlendMode ||
+            viewTransitionDeclaredValue(element, "mix-blend-mode") || "normal",
+          textOrientation: style.textOrientation || "mixed",
+          colorScheme: style.colorScheme || "normal",
+          width: style.width || "auto",
+          height: style.height || "auto",
+          transform: style.transform || "none",
+          opacity: style.opacity || "1",
+        },
+      });
+    }
+    return snapshots;
+  }
+
+  function activateViewTransitionPseudoTree(document, state) {
+    state.newSnapshot = captureViewTransitionSnapshot(document);
+    for (const [name, old] of state.oldSnapshot) {
+      const current = state.newSnapshot.get(name);
+      if (current && current.element === old.element &&
+          current.style.mixBlendMode === "normal" && old.style.mixBlendMode !== "normal") {
+        current.style.mixBlendMode = old.style.mixBlendMode;
+      } else if (!current && old.element.isConnected) {
+        state.newSnapshot.set(name, {
+          element: old.element,
+          style: {
+            ...old.style,
+            opacity: globalThis.getComputedStyle(old.element).opacity || old.style.opacity,
+          },
+        });
+      }
+    }
+    state.pseudoNames = new Set([...state.oldSnapshot.keys(), ...state.newSnapshot.keys()]);
+    const root = document.documentElement;
+    const animations = [];
+    for (const name of state.pseudoNames) {
+      for (const kind of ["group", "old", "new"]) {
+        if (kind === "old" && !state.oldSnapshot.has(name)) continue;
+        if (kind === "new" && !state.newSnapshot.has(name)) continue;
+        const effect = new KeyframeEffect(root, [{ opacity: 1 }, { opacity: 1 }], {
+          duration: 250,
+          pseudoElement: `::view-transition-${kind}(${name})`,
+        });
+        const animation = new CSSAnimation(effect, document.timeline);
+        animation.animationName = `-ua-view-transition-${kind}`;
+        animation.play();
+        animations.push(animation);
+      }
+    }
+    root.__viewTransitionAnimations = animations;
+  }
+
+  function viewTransitionPseudoStyle(document, pseudo) {
+    const state = activeDocumentTransitions.get(document);
+    if (!state || !state.pseudoNames) return {};
+    if (pseudo === "::view-transition") {
+      return { position: "absolute", display: "block", objectViewBox: "none" };
+    }
+    const match = pseudo.match(/^::view-transition-(group|image-pair|old|new)\((.+)\)$/);
+    if (!match || !state.pseudoNames.has(match[2])) return {};
+    const [, kind, name] = match;
+    const snapshot = state.newSnapshot.get(name) || state.oldSnapshot.get(name);
+    if (kind === "group") return { ...snapshot.style };
+    return { position: "absolute", display: "block", objectViewBox: "none" };
+  }
+
   class ViewTransition {
     constructor(...args) {
       const [construction, state] = args;
@@ -9300,6 +9431,7 @@ let omoikaneUserActivationState;
       throw new TypeError("View transition update callback must be callable");
     }
 
+    const oldSnapshot = captureViewTransitionSnapshot(document);
     let completed = false;
     let resolveReady, rejectReady, resolveFinished, rejectFinished;
     const updateCallbackDone = Promise.resolve().then(() => update ? update() : undefined);
@@ -9312,7 +9444,7 @@ let omoikaneUserActivationState;
       rejectFinished = reject;
     });
     const state = {
-      updateCallbackDone, ready, finished,
+      updateCallbackDone, ready, finished, oldSnapshot,
       complete(skipped) {
         if (completed) return;
         completed = true;
@@ -9320,17 +9452,32 @@ let omoikaneUserActivationState;
           activeDocumentTransitions.delete(document);
           nativeDocumentViewTransition(internalNodeId(document), false);
         }
+        const root = document.documentElement;
+        for (const animation of root && root.__viewTransitionAnimations || []) {
+          animation.cancel();
+        }
+        if (root) root.__viewTransitionAnimations = [];
         if (skipped) rejectReady(new DOMException("View transition skipped", "AbortError"));
         updateCallbackDone.then(
           () => {
             if (!skipped) resolveReady(undefined);
-            resolveFinished(undefined);
+            if (skipped && oldSnapshot.duplicateNames) {
+              setTimeout(() => resolveFinished(undefined), 0);
+            } else {
+              Promise.resolve().then(() => resolveFinished(undefined));
+            }
           },
           error => {
             if (!skipped) rejectReady(error);
-            rejectFinished(error);
+            Promise.resolve().then(() => rejectFinished(error));
           }
         );
+      },
+      activate() {
+        if (completed) return;
+        activateViewTransitionPseudoTree(document, state);
+        resolveReady(undefined);
+        Promise.resolve().then(() => state.complete(false));
       },
       skip() { state.complete(true); },
     };
@@ -9338,7 +9485,8 @@ let omoikaneUserActivationState;
     state.transition = transition;
     activeDocumentTransitions.set(document, state);
     nativeDocumentViewTransition(internalNodeId(document), true);
-    updateCallbackDone.then(() => state.complete(false), () => state.complete(false));
+    if (oldSnapshot.duplicateNames) state.complete(true);
+    else updateCallbackDone.then(() => state.activate(), () => state.complete(false));
     return transition;
   }
 
@@ -23903,6 +24051,10 @@ let omoikaneUserActivationState;
     const pseudo = pseudoElt == null || pseudoElt === "" ? null : String(pseudoElt);
     flushStyleSheets();
     if (element && element.__id != null) {
+      if (pseudo && pseudo.startsWith("::view-transition") &&
+          element === element.ownerDocument?.documentElement) {
+        return __makeComputedStyle(() => viewTransitionPseudoStyle(element.ownerDocument, pseudo));
+      }
       const nodeId = element.__id;
       try {
         if (pseudo === null) {
@@ -30431,7 +30583,9 @@ let omoikaneUserActivationState;
       .concat(Array.from(this.__cssTransitions && this.__cssTransitions.values() || []))
       .concat(
       (this.__animations || []).filter(animation => animation.playState !== "idle")
-    ).slice();
+    ).concat((this.__viewTransitionAnimations || []).filter(
+      animation => animation.playState !== "idle"
+    )).slice();
   };
   Document.prototype.getAnimations = function() {
     const animations = [];
