@@ -25564,6 +25564,7 @@ let omoikaneUserActivationState;
       getAll(name) { return this._entries.filter(entry => entry[0] === String(name)).map(entry => entry[1]); }
       has(name) { return this._entries.some(entry => entry[0] === String(name)); }
       delete(name) { this._entries = this._entries.filter(entry => entry[0] !== String(name)); }
+      get size() { return this._entries.length; }
       *entries() { yield* this._entries; }
       *keys() { for (const entry of this._entries) yield entry[0]; }
       *values() { for (const entry of this._entries) yield entry[1]; }
@@ -25597,6 +25598,12 @@ let omoikaneUserActivationState;
       }
       toJSON() { return this.toString(); }
       static canParse(input, base) { try { new URL(input, base); return true; } catch (_) { return false; } }
+      static parse(input, base) {
+        const convertedInput = String(input);
+        const convertedBase = base === undefined ? undefined : String(base);
+        try { return new URL(convertedInput, convertedBase); }
+        catch (_) { return null; }
+      }
     }
     globalThis.URL = URL;
     globalThis.URLSearchParams = URLSearchParams;
@@ -35600,6 +35607,7 @@ let omoikaneUserActivationState;
     text() { return consumeBody(this, bodyAsText); }
     json() { return this.text().then(JSON.parse); }
     arrayBuffer() { return consumeBody(this, body => bodyAsBytes(body).slice().buffer); }
+    bytes() { return consumeBody(this, body => bodyAsBytes(body).slice()); }
     blob() { return consumeBody(this, body => bodyAsBlob(body, this.headers)); }
     formData() { return consumeBody(this, body => formDataFromBody(body, this.headers.get("content-type"))); }
     clone() {
@@ -35629,6 +35637,7 @@ let omoikaneUserActivationState;
     text() { return consumeBody(this, bodyAsText); }
     json() { return this.text().then(JSON.parse); }
     arrayBuffer() { return consumeBody(this, body => bodyAsBytes(body).slice().buffer); }
+    bytes() { return consumeBody(this, body => bodyAsBytes(body).slice()); }
     blob() { return consumeBody(this, body => bodyAsBlob(body, this.headers)); }
     formData() { return consumeBody(this, body => formDataFromBody(body, this.headers.get("content-type"))); }
     clone() {
