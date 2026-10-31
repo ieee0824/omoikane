@@ -85,6 +85,7 @@ mod navigation_transport;
 mod paint_timing;
 mod retained_scroll;
 mod tree_style_invalidation;
+mod url_pattern;
 mod view_transition;
 mod window_members;
 use child_document::{FetchedChildResource, LoadedChildDocument, NavigationRedirect};
@@ -18149,6 +18150,11 @@ fn register_host_bindings(
             js_string!("__omoikane_parse_url"),
             2,
             NativeFunction::from_copy_closure(parse_url_native),
+        ),
+        (
+            js_string!("__omoikane_url_pattern"),
+            6,
+            NativeFunction::from_copy_closure(url_pattern::native),
         ),
         (
             js_string!("__omoikane_schedule_navigation"),

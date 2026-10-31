@@ -635,6 +635,13 @@
       "baseline_supported": true
     },
     {
+      "id": "data.url-pattern",
+      "area": "data",
+      "description": "URLPattern exposes component matching and named groups",
+      "probe": "typeof URLPattern === 'function' && (() => { const pattern = new URLPattern('https://:sub.example.test/:page'); const result = pattern.exec('https://www.example.test/home'); return result !== null && result.hostname.groups.sub === 'www' && result.pathname.groups.page === 'home'; })()",
+      "baseline_supported": true
+    },
+    {
       "id": "data.text-codecs",
       "area": "data",
       "description": "TextEncoder and TextDecoder round-trip UTF-8",

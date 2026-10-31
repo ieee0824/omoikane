@@ -44,6 +44,7 @@ let omoikaneUserActivationState;
   const nativeRunMicrotaskCallback = globalThis.__omoikane_run_microtask_callback;
   const nativeCaptureCspSource = globalThis.__omoikane_capture_csp_source;
   const nativeFetch = globalThis.__omoikane_fetch;
+  const nativeURLPattern = globalThis.__omoikane_url_pattern;
   const nativeComputedStyleMetadata = globalThis.__omoikane_computed_style_metadata;
   delete globalThis.__omoikane_computed_style_metadata;
   const computedStyleObjectKeys = Object.keys;
@@ -75,6 +76,7 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_import_scripts;
   delete globalThis.__omoikane_capture_csp_source;
   delete globalThis.__omoikane_fetch;
+  delete globalThis.__omoikane_url_pattern;
   delete globalThis.__omoikane_begin_fetch;
   delete globalThis.__omoikane_cancel_fetch;
   delete globalThis.__omoikane_websocket_connect;
@@ -518,6 +520,7 @@ let omoikaneUserActivationState;
   const safeWeakMapGet = Function.prototype.call.bind(WeakMap.prototype.get);
   const safeWeakMapSet = Function.prototype.call.bind(WeakMap.prototype.set);
   const safeWeakMapDelete = Function.prototype.call.bind(WeakMap.prototype.delete);
+  const safeStringToWellFormed = Function.prototype.call.bind(String.prototype.toWellFormed);
   const safeSetDelete = Function.prototype.call.bind(Set.prototype.delete);
   const safeWeakSetAdd = Function.prototype.call.bind(WeakSet.prototype.add);
   const safeWeakSetHas = Function.prototype.call.bind(WeakSet.prototype.has);
@@ -25640,6 +25643,166 @@ let omoikaneUserActivationState;
     globalThis.URL = URL;
     globalThis.URLSearchParams = URLSearchParams;
   }
+
+  const urlPatternStates = new WeakMap();
+  const urlPatternParse = JSON.parse;
+  const urlPatternSerialize = JSON.stringify;
+  const URLPatternRegExp = RegExp;
+  const urlPatternComponents = [
+    "protocol", "username", "password", "hostname",
+    "port", "pathname", "search", "hash",
+  ];
+  function urlPatternUSVString(value) {
+    return safeStringToWellFormed(String(value));
+  }
+  function convertURLPatternInput(value) {
+    if ((typeof value !== "object" && typeof value !== "function") || value === null) {
+      return urlPatternUSVString(value);
+    }
+    const converted = Object.create(null);
+    for (const key of urlPatternComponents) {
+      const member = value[key];
+      if (member !== undefined) converted[key] = urlPatternUSVString(member);
+    }
+    const baseURL = value.baseURL;
+    if (baseURL !== undefined) converted.baseURL = urlPatternUSVString(baseURL);
+    return converted;
+  }
+  function urlPatternOptions(value) {
+    if (value === undefined || value === null) return false;
+    const object = Object(value);
+    return Boolean(object.ignoreCase);
+  }
+  function urlPatternState(value) {
+    const state = safeWeakMapGet(urlPatternStates, value);
+    if (state === undefined) throw new TypeError("Illegal invocation");
+    return state;
+  }
+  function urlPatternBase(value) {
+    return urlPatternSerialize(value === undefined ? null : value);
+  }
+  function urlPatternInput(value) {
+    return urlPatternSerialize(value);
+  }
+  function convertURLPatternGroups(groups) {
+    for (const key of computedStyleObjectKeys(groups)) {
+      if (groups[key] === null) groups[key] = undefined;
+    }
+  }
+  class URLPattern {
+    constructor(input, baseURLOrOptions = undefined, maybeOptions = undefined) {
+      let convertedInput;
+      let baseURL;
+      let ignoreCase;
+      if (typeof baseURLOrOptions === "string") {
+        convertedInput = convertURLPatternInput(input);
+        baseURL = urlPatternUSVString(baseURLOrOptions);
+        ignoreCase = urlPatternOptions(maybeOptions);
+      } else {
+        convertedInput = input === undefined ? Object.create(null) : convertURLPatternInput(input);
+        ignoreCase = urlPatternOptions(baseURLOrOptions);
+      }
+      const parsed = urlPatternParse(nativeURLPattern(
+        "construct",
+        urlPatternInput(convertedInput),
+        urlPatternBase(baseURL),
+        ignoreCase,
+      ));
+      let useRustRegExp = false;
+      for (const key of urlPatternComponents) {
+        try {
+          parsed[key].regexp = new URLPatternRegExp(parsed[key].regexpString, ignoreCase ? "ui" : "u");
+        } catch (error) {
+          if (!parsed[key].regexpString.includes("--") && !parsed[key].regexpString.includes("&&")) {
+            throw new TypeError("Invalid URLPattern " + key + ": " + error.message);
+          }
+          useRustRegExp = true;
+        }
+      }
+      if (useRustRegExp) {
+        nativeURLPattern(
+          "validate-rust",
+          urlPatternInput(convertedInput),
+          urlPatternBase(baseURL),
+          ignoreCase,
+        );
+      }
+      safeWeakMapSet(urlPatternStates, this, {
+        input: convertedInput,
+        baseURL,
+        ignoreCase,
+        parsed,
+        useRustRegExp,
+      });
+    }
+    get protocol() { return urlPatternState(this).parsed.protocol.patternString; }
+    get username() { return urlPatternState(this).parsed.username.patternString; }
+    get password() { return urlPatternState(this).parsed.password.patternString; }
+    get hostname() { return urlPatternState(this).parsed.hostname.patternString; }
+    get port() { return urlPatternState(this).parsed.port.patternString; }
+    get pathname() { return urlPatternState(this).parsed.pathname.patternString; }
+    get search() { return urlPatternState(this).parsed.search.patternString; }
+    get hash() { return urlPatternState(this).parsed.hash.patternString; }
+    get hasRegExpGroups() { return urlPatternState(this).parsed.hasRegexpGroups; }
+    exec(input, baseURL = undefined) {
+      const state = urlPatternState(this);
+      const convertedInput = input === undefined ? Object.create(null) : convertURLPatternInput(input);
+      const convertedBase = baseURL === undefined ? undefined : urlPatternUSVString(baseURL);
+      if (state.useRustRegExp) {
+        const result = urlPatternParse(nativeURLPattern(
+          "exec-rust",
+          urlPatternInput(state.input),
+          urlPatternBase(state.baseURL),
+          state.ignoreCase,
+          urlPatternInput(convertedInput),
+          urlPatternBase(convertedBase),
+        ));
+        if (result === null) return null;
+        result.inputs = convertedBase === undefined
+          ? [convertedInput]
+          : [convertedInput, convertedBase];
+        for (const key of urlPatternComponents) convertURLPatternGroups(result[key].groups);
+        return result;
+      }
+      const values = urlPatternParse(nativeURLPattern(
+        "match",
+        urlPatternInput(state.input),
+        urlPatternBase(state.baseURL),
+        state.ignoreCase,
+        urlPatternInput(convertedInput),
+        urlPatternBase(convertedBase),
+      ));
+      if (values === null) return null;
+      const result = {};
+      for (const key of urlPatternComponents) {
+        const component = state.parsed[key];
+        const match = safeApply(safeRegExpExec, component.regexp, [values[key]]);
+        if (match === null) return null;
+        const groups = {};
+        for (let index = 0; index < component.groupNameList.length; index++) {
+          groups[component.groupNameList[index]] = match[index + 1];
+        }
+        result[key] = {input: values[key], groups};
+      }
+      result.inputs = convertedBase === undefined
+        ? [convertedInput]
+        : [convertedInput, convertedBase];
+      return result;
+    }
+    test(input, baseURL = undefined) {
+      urlPatternState(this);
+      return arguments.length < 2
+        ? this.exec(input) !== null
+        : this.exec(input, baseURL) !== null;
+    }
+  }
+  safeDefineProperty(URLPattern.prototype, Symbol.toStringTag, {
+    value: "URLPattern", configurable: true,
+  });
+  safeDefineProperty(globalThis, "URLPattern", {
+    value: URLPattern, writable: true, configurable: true,
+  });
+
   function resolveNetworkUrl(value) {
     const raw = String(value);
     const resolved = String(__omoikane_resolve_url(raw));
