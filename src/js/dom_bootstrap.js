@@ -25455,8 +25455,46 @@ let omoikaneUserActivationState;
       result.type = entry.type;
       result.redirectCount = entry.redirectCount;
     }
-    if ("serverTiming" in entry) result.serverTiming = entry.serverTiming.slice();
+    result.serverTiming = entry.serverTiming.map(metric => metric.toJSON());
     return result;
+  }
+
+  // Server Timing metrics. The host parses the header and applies the timing
+  // allow check (server_timing.rs).
+  const serverTimingMetrics = new WeakMap();
+  class PerformanceServerTiming {
+    constructor() {
+      const [token, metric] = arguments;
+      if (token !== performanceEntryToken) throw new TypeError("Illegal constructor");
+      serverTimingMetrics.set(this, {
+        name: String(metric?.name ?? ""),
+        duration: Number(metric?.duration) || 0,
+        description: String(metric?.description ?? ""),
+      });
+    }
+    toJSON() {
+      return { name: this.name, duration: this.duration, description: this.description };
+    }
+  }
+  for (const name of ["name", "duration", "description"]) {
+    const get = function () {
+      const metric = serverTimingMetrics.get(this);
+      if (!metric) throw new TypeError("Illegal invocation");
+      return metric[name];
+    };
+    Object.defineProperty(get, "name", { value: "get " + name });
+    Object.defineProperty(PerformanceServerTiming.prototype, name, {
+      configurable: true, enumerable: true, get,
+    });
+  }
+  Object.defineProperty(PerformanceServerTiming.prototype, "toJSON", { enumerable: true });
+  Object.defineProperty(PerformanceServerTiming.prototype, Symbol.toStringTag, {
+    configurable: true, value: "PerformanceServerTiming",
+  });
+  const resourceServerTiming = new WeakMap();
+  function setResourceServerTiming(entry, metrics) {
+    resourceServerTiming.set(entry, Object.freeze((Array.isArray(metrics) ? metrics : [])
+      .map(metric => new PerformanceServerTiming(performanceEntryToken, metric))));
   }
 
   class PerformanceResourceTiming extends PerformanceEntry {
@@ -25468,14 +25506,20 @@ let omoikaneUserActivationState;
       const safeEnd = Number.isFinite(responseEnd) && responseEnd >= safeStart ? responseEnd : safeStart;
       super(performanceEntryToken, options.name ?? "", options.entryType ?? "resource", safeStart, safeEnd - safeStart);
       definePerformanceTimingFields(this, { ...options, responseEnd: safeEnd }, performanceResourceTimingNumericFields);
-      Object.defineProperty(this, "serverTiming", {
-        value: Object.freeze(Array.isArray(options.serverTiming) ? options.serverTiming.slice() : []),
-        enumerable: true,
-      });
+      setResourceServerTiming(this, options.serverTiming);
+    }
+    get serverTiming() {
+      const metrics = resourceServerTiming.get(this);
+      if (!metrics) throw new TypeError("Illegal invocation");
+      return metrics;
     }
     toJSONBase() { return super.toJSON(); }
     toJSON() { return performanceTimingJSON(this, "resource"); }
   }
+  Object.defineProperty(PerformanceResourceTiming.prototype, "serverTiming", {
+    ...Object.getOwnPropertyDescriptor(PerformanceResourceTiming.prototype, "serverTiming"),
+    enumerable: true,
+  });
 
   class PerformanceNavigationTiming extends PerformanceResourceTiming {
     constructor(token, options = {}) {
@@ -26063,6 +26107,7 @@ let omoikaneUserActivationState;
       decodedBodySize: error ? 0 : bodyBytes,
       responseStatus: status,
       name: responseName || timing.name,
+      serverTiming: error ? [] : data.serverTiming,
     });
   }
 
@@ -26276,6 +26321,10 @@ let omoikaneUserActivationState;
   globalThis.PerformanceMark = PerformanceMark;
   globalThis.PerformanceMeasure = PerformanceMeasure;
   globalThis.PerformanceResourceTiming = PerformanceResourceTiming;
+  globalThis.PerformanceServerTiming = PerformanceServerTiming;
+  // Called by the host with the Document response's parsed Server-Timing.
+  globalThis.__omoikane_set_navigation_server_timing = metrics =>
+    setResourceServerTiming(initialNavigationEntry, metrics);
   for (const [name, value] of [["PerformancePaintTiming", PerformancePaintTiming],
     ["LargestContentfulPaint", LargestContentfulPaint],
     ["PerformanceLongTaskTiming", PerformanceLongTaskTiming],

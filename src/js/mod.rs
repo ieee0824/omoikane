@@ -244,6 +244,7 @@ mod resource_loading;
 mod script_loading;
 pub(crate) use document_script_startup::{DocumentScriptStartup, DocumentScriptWait};
 mod security_reporting;
+mod server_timing;
 mod storage;
 mod storage_access;
 #[cfg(test)]
@@ -10578,11 +10579,13 @@ impl JsRuntime {
         state.document_csp.insert(document.identity(), policy);
     }
 
-    /// Installs security and isolation metadata from the Document's response
-    /// before running author scripts in a manually constructed runtime.
+    /// Installs security and isolation metadata and the navigation entry's
+    /// Server Timing from the Document's response before running author
+    /// scripts in a manually constructed runtime.
     pub fn install_document_response_headers(&mut self, headers: &[(String, String)]) {
         self.install_response_security_headers(headers);
         self.install_isolation_policy(headers);
+        self.install_navigation_server_timing(headers);
     }
 
     /// Installs a top-level response's COOP, COEP and Permissions Policy before
