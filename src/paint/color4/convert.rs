@@ -57,6 +57,9 @@ pub(super) fn to_srgb(space: Space, values: Triple) -> Triple {
     if space == Space::Srgb {
         return gamut_map(values);
     }
+    if space == Space::Hsl {
+        return gamut_map(hsl(values));
+    }
     if space == Space::Hwb {
         return hwb(values);
     }
@@ -65,9 +68,45 @@ pub(super) fn to_srgb(space: Space, values: Triple) -> Triple {
     gamut_map(rgb)
 }
 
+/// Converts without gamut mapping so intermediate Color 5 calculations keep
+/// out-of-range channels until rasterization.
+pub(super) fn between(source: Space, values: Triple, destination: Space) -> Triple {
+    if source == destination {
+        return values;
+    }
+    let rgb = if source == Space::Srgb {
+        values
+    } else if source == Space::Hsl {
+        hsl(values)
+    } else if source == Space::Hwb {
+        hwb(values)
+    } else {
+        mul(XYZ_SRGB, to_xyz(source, values)).map(encode_srgb)
+    };
+    from_srgb(destination, rgb)
+}
+
 pub(super) fn from_srgb(space: Space, rgb: Triple) -> Triple {
     if space == Space::Srgb {
         return rgb;
+    }
+    if space == Space::Hsl {
+        let max = rgb.into_iter().fold(f64::NEG_INFINITY, f64::max);
+        let min = rgb.into_iter().fold(f64::INFINITY, f64::min);
+        let lightness = (max + min) / 2.0;
+        let delta = max - min;
+        if delta == 0.0 {
+            return [0.0, 0.0, lightness];
+        }
+        let saturation = delta / (1.0 - (2.0 * lightness - 1.0).abs());
+        let hue = if max == rgb[0] {
+            60.0 * ((rgb[1] - rgb[2]) / delta).rem_euclid(6.0)
+        } else if max == rgb[1] {
+            60.0 * ((rgb[2] - rgb[0]) / delta + 2.0)
+        } else {
+            60.0 * ((rgb[0] - rgb[1]) / delta + 4.0)
+        };
+        return [hue, saturation, lightness];
     }
     if space == Space::Hwb {
         let max = rgb.into_iter().fold(f64::NEG_INFINITY, f64::max);
@@ -130,7 +169,7 @@ pub(super) fn from_srgb(space: Space, rgb: Triple) -> Triple {
             }
         }),
         Space::Rec2020 => mul(XYZ_REC2020, xyz_d65).map(|value| signed_pow(value, 1.0 / 2.4)),
-        Space::Hwb | Space::Oklab | Space::Oklch | Space::Srgb => unreachable!(),
+        Space::Hsl | Space::Hwb | Space::Oklab | Space::Oklch | Space::Srgb => unreachable!(),
     }
 }
 
@@ -215,6 +254,7 @@ fn to_xyz(space: Space, mut v: Triple) -> Triple {
         v = [v[0], v[1] * angle.cos(), v[1] * angle.sin()];
     }
     match space {
+        Space::Hsl => mul(SRGB_XYZ, hsl(v).map(decode_srgb)),
         Space::Lab | Space::Lch => mul(D50_D65, lab_xyz(v)),
         Space::Oklab | Space::Oklch => oklab_xyz(v),
         Space::XyzD50 => mul(D50_D65, v),
@@ -269,6 +309,22 @@ fn to_xyz(space: Space, mut v: Triple) -> Triple {
         ),
         Space::Hwb => unreachable!(),
     }
+}
+
+fn hsl([hue, saturation, lightness]: Triple) -> Triple {
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let h = hue.rem_euclid(360.0) / 60.0;
+    let x = chroma * (1.0 - (h.rem_euclid(2.0) - 1.0).abs());
+    let pure = match h.floor() as u32 {
+        0 => [chroma, x, 0.0],
+        1 => [x, chroma, 0.0],
+        2 => [0.0, chroma, x],
+        3 => [0.0, x, chroma],
+        4 => [x, 0.0, chroma],
+        _ => [chroma, 0.0, x],
+    };
+    let offset = lightness - chroma / 2.0;
+    pure.map(|value| value + offset)
 }
 
 fn hwb([h, w, b]: Triple) -> Triple {

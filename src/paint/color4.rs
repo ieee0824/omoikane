@@ -12,6 +12,7 @@ pub(crate) use math::Context as ColorContext;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Space {
+    Hsl,
     Hwb,
     Lab,
     Lch,
@@ -50,6 +51,12 @@ impl CssColor {
         }
         let (name, body) = lower.split_once('(')?;
         let body = body.strip_suffix(')')?;
+        if body.trim_start().starts_with("from ") {
+            return parse_relative_color(name, body, context);
+        }
+        if matches!(name, "rgb" | "rgba" | "hsl" | "hsla") {
+            return parse_modern_legacy_color(name, body, context);
+        }
         let pieces = math::tokens(body)?;
         let mut tokens = pieces.iter().copied();
         let space = match name {
@@ -91,7 +98,12 @@ impl CssColor {
 
     /// Quantizes only after conversion and CSS gamut mapping to the sRGB target.
     pub fn to_color(&self) -> Color {
-        let rgb = convert::to_srgb(self.space, self.channels.map(|v| v.unwrap_or(0.0)));
+        let channels = self.channels.map(|v| v.unwrap_or(0.0));
+        let rgb = if self.space == Space::Hsl {
+            hsl_to_rgb(channels)
+        } else {
+            convert::to_srgb(self.space, channels)
+        };
         let bytes = rgb.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
         Color::rgba(
             bytes[0],
@@ -133,6 +145,7 @@ impl CssColor {
             };
         }
         let name = match self.space {
+            Space::Hsl => "hsl",
             Space::Hwb => "hwb",
             Space::Lab => "lab",
             Space::Lch => "lch",
@@ -152,7 +165,7 @@ impl CssColor {
             let value = component.map_or_else(
                 || "none".into(),
                 |value| {
-                    if self.space == Space::Hwb && index > 0 {
+                    if matches!(self.space, Space::Hsl | Space::Hwb) && index > 0 {
                         format!(
                             "{}{}",
                             css_number(value * 100.0),
@@ -194,6 +207,265 @@ impl CssColor {
         resolved.expressions = std::array::from_fn(|_| None);
         resolved.serialize_mode(true)
     }
+}
+
+fn parse_modern_legacy_color(
+    name: &str,
+    body: &str,
+    context: Option<ColorContext>,
+) -> Option<CssColor> {
+    let tokens = math::tokens(body)?;
+    let components = tokens.get(..3)?;
+    let is_hsl = matches!(name, "hsl" | "hsla");
+    let mut channels = [None; 3];
+    for (index, text) in components.iter().enumerate() {
+        channels[index] = if is_hsl {
+            if index == 0 {
+                angle(text, context)?
+            } else {
+                number(text, 100.0, context)?.map(|value| value / 100.0)
+            }
+        } else {
+            number(text, 255.0, context)?.map(|value| value / 255.0)
+        };
+    }
+    let alpha = match tokens.get(3..)? {
+        [] => Some(1.0),
+        ["/", text] => number(text, 1.0, context)?.map(|value| value.clamp(0.0, 1.0)),
+        _ => return None,
+    };
+    let space = if is_hsl { Space::Hsl } else { Space::Srgb };
+    if channels.iter().all(Option::is_some) && space == Space::Hsl {
+        channels = hsl_to_rgb(channels.map(Option::unwrap)).map(Some);
+        return Some(CssColor {
+            space: Space::Srgb,
+            channels,
+            alpha,
+            expressions: std::array::from_fn(|_| None),
+            specified: None,
+        });
+    }
+    Some(CssColor {
+        space,
+        channels,
+        alpha,
+        expressions: std::array::from_fn(|_| None),
+        specified: None,
+    })
+}
+
+fn parse_relative_color(name: &str, body: &str, context: Option<ColorContext>) -> Option<CssColor> {
+    let tokens = math::tokens(body)?;
+    if tokens.first() != Some(&"from") {
+        return None;
+    }
+    let origin_text = *tokens.get(1)?;
+    let origin = parse_absolute_mix_color(origin_text, context)?;
+    let (target, is_rgb, is_hsl, offset) = relative_target(name, &tokens)?;
+    let origin_channels = if is_hsl && origin.space == Space::Hsl {
+        origin.channels
+    } else if is_hsl {
+        let rgb = convert::between(
+            origin.space,
+            origin.channels.map(|value| value.unwrap_or(0.0)),
+            Space::Srgb,
+        );
+        rgb_to_hsl(rgb).map(Some)
+    } else if origin.space == target {
+        origin.channels
+    } else {
+        convert::between(
+            origin.space,
+            origin.channels.map(|value| value.unwrap_or(0.0)),
+            target,
+        )
+        .map(Some)
+    };
+    let references = relative_references(target, is_rgb, is_hsl, origin_channels, origin.alpha);
+    let components = tokens.get(offset..offset + 3)?;
+    let mut resolved = [None; 3];
+    for (index, expression) in components.iter().enumerate() {
+        resolved[index] = relative_component(
+            expression,
+            target,
+            is_rgb,
+            is_hsl,
+            index,
+            &references,
+            context,
+        )?;
+    }
+    let alpha = match tokens.get(offset + 3..)? {
+        [] => origin.alpha,
+        ["/", expression] => relative_alpha(expression, &references, context)?,
+        _ => return None,
+    };
+    let (space, channels) = if is_hsl && resolved.iter().all(Option::is_some) && alpha.is_some() {
+        (
+            Space::Srgb,
+            hsl_to_rgb(resolved.map(Option::unwrap)).map(Some),
+        )
+    } else if is_hsl {
+        (Space::Hsl, resolved)
+    } else if target == Space::Hwb && resolved.iter().all(Option::is_some) && alpha.is_some() {
+        (
+            Space::Srgb,
+            convert::between(Space::Hwb, resolved.map(Option::unwrap), Space::Srgb).map(Some),
+        )
+    } else {
+        (target, resolved)
+    };
+    Some(CssColor {
+        space,
+        channels,
+        alpha,
+        expressions: std::array::from_fn(|_| None),
+        specified: Some(format!("{name}({body})")),
+    })
+}
+
+fn relative_target(name: &str, tokens: &[&str]) -> Option<(Space, bool, bool, usize)> {
+    let target = match name {
+        "rgb" | "rgba" => return Some((Space::Srgb, true, false, 2)),
+        "hsl" | "hsla" => return Some((Space::Hsl, false, true, 2)),
+        "hwb" => Space::Hwb,
+        "lab" => Space::Lab,
+        "lch" => Space::Lch,
+        "oklab" => Space::Oklab,
+        "oklch" => Space::Oklch,
+        "color" => parse_space(*tokens.get(2)?)?,
+        _ => return None,
+    };
+    Some((target, false, false, if name == "color" { 3 } else { 2 }))
+}
+
+fn relative_references(
+    target: Space,
+    is_rgb: bool,
+    is_hsl: bool,
+    channels: [Option<f64>; 3],
+    alpha: Option<f64>,
+) -> Vec<(&'static str, Option<f64>)> {
+    let (names, values) = if is_rgb {
+        (
+            ["r", "g", "b"],
+            channels.map(|value| value.map(|value| value * 255.0)),
+        )
+    } else if is_hsl {
+        let hsl = if target == Space::Hsl {
+            channels
+        } else {
+            rgb_to_hsl(channels.map(|value| value.unwrap_or(0.0))).map(Some)
+        };
+        (
+            ["h", "s", "l"],
+            [
+                hsl[0],
+                hsl[1].map(|value| value * 100.0),
+                hsl[2].map(|value| value * 100.0),
+            ],
+        )
+    } else {
+        let names = match target {
+            Space::Hwb => ["h", "w", "b"],
+            Space::Lab | Space::Oklab => ["l", "a", "b"],
+            Space::Lch | Space::Oklch => ["l", "c", "h"],
+            Space::XyzD50 | Space::XyzD65 => ["x", "y", "z"],
+            _ => ["r", "g", "b"],
+        };
+        let values = if target == Space::Hwb {
+            [
+                channels[0],
+                channels[1].map(|value| value * 100.0),
+                channels[2].map(|value| value * 100.0),
+            ]
+        } else {
+            channels
+        };
+        (names, values)
+    };
+    let mut references = names.into_iter().zip(values).collect::<Vec<_>>();
+    references.push(("alpha", alpha));
+    references
+}
+
+fn substitute_relative_channels(text: &str, references: &[(&str, Option<f64>)]) -> Option<String> {
+    let mut output = String::new();
+    let mut offset = 0;
+    while offset < text.len() {
+        let byte = text.as_bytes()[offset];
+        if byte.is_ascii_alphabetic() {
+            let start = offset;
+            offset += 1;
+            while text
+                .as_bytes()
+                .get(offset)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+            {
+                offset += 1;
+            }
+            let identifier = &text[start..offset];
+            if let Some((_, value)) = references.iter().find(|(name, _)| *name == identifier) {
+                output.push_str(&css_number(value.unwrap_or(0.0)));
+            } else {
+                output.push_str(identifier);
+            }
+        } else {
+            output.push(char::from(byte));
+            offset += 1;
+        }
+    }
+    Some(output)
+}
+
+fn relative_component(
+    expression: &str,
+    space: Space,
+    is_rgb: bool,
+    is_hsl: bool,
+    index: usize,
+    references: &[(&str, Option<f64>)],
+    context: Option<ColorContext>,
+) -> Option<Option<f64>> {
+    if expression == "none" {
+        return Some(None);
+    }
+    if references
+        .iter()
+        .any(|(name, value)| *name == expression && value.is_none())
+    {
+        return Some(None);
+    }
+    let expression = substitute_relative_channels(expression, references)?;
+    if is_rgb {
+        return number(&expression, 255.0, context).map(|value| value.map(|value| value / 255.0));
+    }
+    if is_hsl {
+        return if index == 0 {
+            angle(&expression, context)
+        } else {
+            number(&expression, 100.0, context).map(|value| value.map(|value| value / 100.0))
+        };
+    }
+    component(&expression, space, index, context)
+}
+
+fn relative_alpha(
+    expression: &str,
+    references: &[(&str, Option<f64>)],
+    context: Option<ColorContext>,
+) -> Option<Option<f64>> {
+    if expression == "none" {
+        return Some(None);
+    }
+    if references
+        .iter()
+        .any(|(name, value)| *name == expression && value.is_none())
+    {
+        return Some(None);
+    }
+    let expression = substitute_relative_channels(expression, references)?;
+    number(&expression, 1.0, context).map(|value| value.map(|value| value.clamp(0.0, 1.0)))
 }
 
 #[derive(Debug)]
@@ -380,10 +652,23 @@ fn parse_absolute_mix_color(text: &str, context: Option<ColorContext>) -> Option
     if text.starts_with("color-mix(")
         || matches!(
             text.split_once('(').map(|(name, _)| name),
-            Some("hwb" | "lab" | "lch" | "oklab" | "oklch" | "color")
+            Some(
+                "rgb"
+                    | "rgba"
+                    | "hsl"
+                    | "hsla"
+                    | "hwb"
+                    | "lab"
+                    | "lch"
+                    | "oklab"
+                    | "oklch"
+                    | "color"
+            )
         )
     {
-        return CssColor::parse_with_context(text, context);
+        if let Some(color) = CssColor::parse_with_context(text, context) {
+            return Some(color);
+        }
     }
     let color = super::color::parse_color(text)?;
     Some(CssColor {
@@ -434,37 +719,66 @@ fn mix_css_colors(
         Space::Lch | Space::Oklch => Some(2),
         _ => None,
     };
-    let converted = components
+    let mut converted = components
         .iter()
         .map(|item| {
-            let rgb = convert::to_srgb(
-                item.color.space,
-                item.color.channels.map(|value| value.unwrap_or(0.0)),
-            );
-            let channels = if is_hsl {
-                rgb_to_hsl(rgb)
+            let channels = if is_hsl && item.color.space == Space::Hsl {
+                item.color.channels
+            } else if is_hsl {
+                let rgb = convert::between(
+                    item.color.space,
+                    item.color.channels.map(|value| value.unwrap_or(0.0)),
+                    Space::Srgb,
+                );
+                rgb_to_hsl(rgb).map(Some)
+            } else if item.color.space == space {
+                item.color.channels
             } else {
-                convert::from_srgb(space, rgb)
+                convert::between(
+                    item.color.space,
+                    item.color.channels.map(|value| value.unwrap_or(0.0)),
+                    space,
+                )
+                .map(Some)
             };
-            (
-                channels,
-                item.color.alpha.unwrap_or(0.0),
-                item.percentage.unwrap(),
-            )
+            (channels, item.color.alpha, item.percentage.unwrap())
         })
         .collect::<Vec<_>>();
+    for index in 0..3 {
+        if let Some(value) = converted
+            .iter()
+            .find_map(|(channels, _, _)| channels[index])
+        {
+            for (channels, _, _) in &mut converted {
+                channels[index].get_or_insert(value);
+            }
+        }
+    }
+    if let Some(value) = converted.iter().find_map(|(_, alpha, _)| *alpha) {
+        for (_, alpha, _) in &mut converted {
+            alpha.get_or_insert(value);
+        }
+    }
+    let missing_channels: [bool; 3] = std::array::from_fn(|index| {
+        converted
+            .iter()
+            .all(|(channels, _, _)| channels[index].is_none())
+    });
+    let missing_alpha = converted.iter().all(|(_, alpha, _)| alpha.is_none());
     let reference_hue = hue_index.and_then(|index| {
         converted
             .iter()
-            .find(|(channels, _, _)| !powerless_hue(space, is_hsl, channels))
-            .map(|(channels, _, _)| channels[index])
+            .map(|(channels, _, _)| channels.map(|value| value.unwrap_or(0.0)))
+            .find(|channels| !powerless_hue(space, is_hsl, channels))
+            .map(|channels| channels[index])
     });
     let mut premultiplied = [0.0; 3];
     let mut alpha = 0.0;
     let mut hue_total = 0.0;
-    for (component_index, (mut channels, source_alpha, percentage)) in
-        converted.into_iter().enumerate()
+    for (component_index, (channels, source_alpha, percentage)) in converted.into_iter().enumerate()
     {
+        let mut channels = channels.map(|value| value.unwrap_or(0.0));
+        let source_alpha = source_alpha.unwrap_or(1.0);
         let normalized = if sum == 0.0 {
             1.0 / components.len() as f64
         } else {
@@ -500,17 +814,27 @@ fn mix_css_colors(
     if let Some(index) = hue_index {
         channels[index] = channels[index].rem_euclid(360.0);
     }
-    let (space, channels) = if is_hsl {
-        (Space::Srgb, hsl_to_rgb(channels))
-    } else if space == Space::Hwb {
-        (Space::Srgb, convert::to_srgb(space, channels))
+    let channels =
+        std::array::from_fn(|index| (!missing_channels[index]).then_some(channels[index]));
+    let (space, channels) = if is_hsl && channels.iter().all(Option::is_some) {
+        (
+            Space::Srgb,
+            hsl_to_rgb(channels.map(Option::unwrap)).map(Some),
+        )
+    } else if is_hsl {
+        (Space::Hsl, channels)
+    } else if space == Space::Hwb && channels.iter().all(Option::is_some) {
+        (
+            Space::Srgb,
+            convert::between(Space::Hwb, channels.map(Option::unwrap), Space::Srgb).map(Some),
+        )
     } else {
         (space, channels)
     };
     Some(CssColor {
         space,
-        channels: channels.map(Some),
-        alpha: Some(alpha * alpha_multiplier),
+        channels,
+        alpha: (!missing_alpha).then_some(alpha * alpha_multiplier),
         expressions: std::array::from_fn(|_| None),
         specified: None,
     })
@@ -755,7 +1079,9 @@ fn space_name(space: Space) -> &'static str {
         Space::Rec2020 => "rec2020",
         Space::XyzD50 => "xyz-d50",
         Space::XyzD65 => "xyz-d65",
-        _ => unreachable!("only predefined spaces use color()"),
+        Space::Hsl | Space::Hwb | Space::Lab | Space::Lch | Space::Oklab | Space::Oklch => {
+            unreachable!("only predefined spaces use color()")
+        }
     }
 }
 
@@ -765,13 +1091,13 @@ fn component(
     index: usize,
     context: Option<ColorContext>,
 ) -> Option<Option<f64>> {
-    let hue = (space == Space::Hwb && index == 0)
+    let hue = (matches!(space, Space::Hsl | Space::Hwb) && index == 0)
         || (matches!(space, Space::Lch | Space::Oklch) && index == 2);
     if hue {
         return angle(text, context);
     }
     let scale = match (space, index) {
-        (Space::Hwb, _) => 100.0,
+        (Space::Hsl | Space::Hwb, _) => 100.0,
         (Space::Lab | Space::Lch, 0) => 100.0,
         (Space::Lab, _) => 125.0,
         (Space::Lch, 1) => 150.0,
@@ -791,7 +1117,7 @@ fn component(
     Some(value.map(|v| match (space, index) {
         (Space::Lab | Space::Lch | Space::Oklab | Space::Oklch, 0) => v.clamp(0.0, scale),
         (Space::Lch | Space::Oklch, 1) => v.max(0.0),
-        (Space::Hwb, _) => v.max(0.0) / 100.0,
+        (Space::Hsl | Space::Hwb, _) => v.max(0.0) / 100.0,
         _ => v,
     }))
 }
@@ -878,6 +1204,11 @@ mod tests {
                 "color(srgb 1 0 0 / 0.2)",
                 Color::rgba(255, 0, 0, 51),
             ),
+            (
+                "color-mix(in srgb, color(srgb none .2 .6), color(srgb .4 .2 .6))",
+                "color(srgb 0.4 0.2 0.6)",
+                Color::rgb(102, 51, 153),
+            ),
         ] {
             let color = CssColor::parse(input).unwrap();
             assert_eq!(color.serialize_computed(), expected, "{input}");
@@ -917,6 +1248,28 @@ mod tests {
             "color-mix(in srgb, red 120%, blue)",
         ] {
             assert!(CssColor::parse(invalid).is_none(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn relative_colors_resolve_origin_channels_and_calc_expressions() {
+        for (input, expected) in [
+            (
+                "rgb(from red r calc(g + 32) b / alpha)",
+                "color(srgb 1 0.12549 0)",
+            ),
+            (
+                "hsl(from red calc(h + 120) s l / 50%)",
+                "color(srgb 0 1 0 / 0.5)",
+            ),
+            (
+                "oklch(from color(srgb 1 0 0) l calc(c / 2) h)",
+                "oklch(0.627955 0.128842 29.2339)",
+            ),
+        ] {
+            let color = CssColor::parse(input).unwrap_or_else(|| panic!("{input}"));
+            assert_eq!(color.serialize(), input, "{input}");
+            assert_eq!(color.serialize_computed(), expected, "{input}");
         }
     }
 

@@ -15024,6 +15024,16 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
         Value::Function { name, .. }
             if matches!(
                 name.to_ascii_lowercase().as_str(),
+                "rgb" | "rgba" | "hsl" | "hsla"
+            ) && render_value(value)
+                .split_once('(')
+                .is_some_and(|(_, body)| body.trim_start().starts_with("from ")) =>
+        {
+            compute_color4_value(value, ctx)
+        }
+        Value::Function { name, .. }
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
                 "hwb" | "lab" | "lch" | "oklab" | "oklch" | "color" | "color-mix"
             ) =>
         {

@@ -101,6 +101,29 @@ fn color_mix_is_shared_by_supports_cssom_computed_style_and_paint() {
     );
 }
 
+#[test]
+fn relative_color_is_shared_by_supports_cssom_and_computed_style() {
+    let document = TreeBuilder::parse(
+        "<div id='target' style='color:rgb(from red r calc(g + 32) b / alpha)'></div>",
+    )
+    .document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let actual = runtime
+        .eval(
+            "(() => { const e=document.getElementById('target'); return JSON.stringify([\
+             CSS.supports('color','rgb(from red r calc(g + 32) b / alpha)'),\
+             e.style.color,getComputedStyle(e).color]); })()",
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        actual,
+        "[true,\"rgb(from red r calc(g + 32) b / alpha)\",\"color(srgb 1 0.12549 0)\"]"
+    );
+}
+
 fn color4_paint_cases() -> Vec<(String, String)> {
     let mut colors = vec![
         ("hwb(0 0% 0%)".to_owned(), "red".to_owned()),
