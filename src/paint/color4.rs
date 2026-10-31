@@ -295,6 +295,14 @@ fn parse_relative_color(name: &str, body: &str, context: Option<ColorContext>) -
             context,
         )?;
     }
+    if origin.space != target
+        && matches!(target, Space::Lch | Space::Oklch)
+        && components[1] == "c"
+        && components[2] == "h"
+        && resolved[1].is_some_and(|chroma| chroma.abs() <= 1e-12)
+    {
+        resolved[2] = None;
+    }
     let alpha = match tokens.get(offset + 3..)? {
         [] => origin.alpha,
         ["/", expression] => relative_alpha(expression, &references, context)?,
@@ -574,7 +582,11 @@ fn parse_mix_component(text: &str, context: Option<ColorContext>) -> Option<MixC
 
 fn specified_mix_color(input: &str, color: &CssColor) -> String {
     let lower = input.to_ascii_lowercase();
-    if lower.starts_with("hsl(") || lower.starts_with("hsla(") {
+    if (lower.starts_with("hsl(") || lower.starts_with("hsla("))
+        && !lower
+            .split_once('(')
+            .is_some_and(|(_, body)| body.trim_start().starts_with("from "))
+    {
         let rgba = color.to_color();
         return if rgba.a == 255 {
             format!("rgb({}, {}, {})", rgba.r, rgba.g, rgba.b)
@@ -715,6 +727,7 @@ fn mix_css_colors(
         .sum::<f64>();
     let alpha_multiplier = (sum / 100.0).min(1.0);
     let hue_index = match space {
+        _ if is_hsl => Some(0),
         Space::Hwb => Some(0),
         Space::Lch | Space::Oklch => Some(2),
         _ => None,
@@ -1287,6 +1300,22 @@ mod tests {
                 .unwrap()
                 .serialize_computed(),
             "hsl(270 50% 40% / none)"
+        );
+    }
+
+    #[test]
+    fn relative_and_mixed_polar_colors_preserve_missing_hues() {
+        assert_eq!(
+            CssColor::parse("lch(from color(display-p3 0 0 0) l c h / alpha)")
+                .unwrap()
+                .serialize_computed(),
+            "lch(0 0 none)"
+        );
+        assert_eq!(
+            CssColor::parse("color-mix(in hsl, hsl(from rebeccapurple none s l), rebeccapurple)")
+                .unwrap()
+                .serialize_computed(),
+            "color(srgb 0.4 0.2 0.6)"
         );
     }
 
