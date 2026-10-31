@@ -15088,7 +15088,14 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
         Value::Function { name, .. }
             if matches!(
                 name.to_ascii_lowercase().as_str(),
-                "hwb" | "lab" | "lch" | "oklab" | "oklch" | "color" | "color-mix"
+                "hwb"
+                    | "lab"
+                    | "lch"
+                    | "oklab"
+                    | "oklch"
+                    | "color"
+                    | "color-mix"
+                    | "contrast-color"
             ) =>
         {
             compute_color4_value(value, ctx)

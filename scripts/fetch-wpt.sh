@@ -61,6 +61,9 @@ collect_pattern \
   "/css/css-color/parsing/color-computed-color-mix-function.html" \
   "/css/css-color/parsing/color-invalid-color-mix-function.html" \
   "/css/css-color/parsing/color-valid-color-mix-function.html" \
+  "/css/css-color/parsing/color-computed-contrast-color-function.html" \
+  "/css/css-color/parsing/color-invalid-contrast-color-function.html" \
+  "/css/css-color/parsing/color-valid-contrast-color-function.html" \
   "/css/css-color/parsing/color-computed-relative-color.html" \
   "/css/css-color/parsing/color-invalid-relative-color.html" \
   "/css/css-color/parsing/color-valid-relative-color.html" \

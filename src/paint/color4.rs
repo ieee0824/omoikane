@@ -46,6 +46,9 @@ impl CssColor {
 
     pub fn parse_with_context(text: &str, context: Option<ColorContext>) -> Option<Self> {
         let lower = text.trim().to_ascii_lowercase();
+        if lower.starts_with("contrast-color(") {
+            return parse_contrast_color(&lower, context);
+        }
         if lower.starts_with("color-mix(") {
             return parse_color_mix(&lower, context);
         }
@@ -207,6 +210,72 @@ impl CssColor {
         resolved.expressions = std::array::from_fn(|_| None);
         resolved.serialize_mode(true)
     }
+}
+
+fn parse_contrast_color(text: &str, context: Option<ColorContext>) -> Option<CssColor> {
+    let body = text
+        .strip_prefix("contrast-color(")?
+        .strip_suffix(')')?
+        .trim();
+    let parts = crate::css::split_top_level_whitespace_strict(body)?;
+    if parts.len() != 1 {
+        return None;
+    }
+    let (source, specified_source) = if matches!(body, "currentcolor" | "buttonface") {
+        (
+            CssColor {
+                space: Space::Srgb,
+                channels: [Some(0.0); 3],
+                alpha: Some(1.0),
+                expressions: std::array::from_fn(|_| None),
+                specified: None,
+            },
+            body.to_string(),
+        )
+    } else {
+        let source = parse_absolute_mix_color(body, context)?;
+        let specified = if matches!(
+            body.split_once('(').map(|(name, _)| name),
+            Some("rgb" | "rgba" | "hsl" | "hsla")
+        ) {
+            body.to_string()
+        } else if body.contains('(') {
+            source.serialize()
+        } else {
+            body.to_string()
+        };
+        (source, specified)
+    };
+    let rgb = convert::between(
+        source.space,
+        source.channels.map(|value| value.unwrap_or(0.0)),
+        Space::Srgb,
+    )
+    .map(|value| value.clamp(0.0, 1.0));
+    let luminance = relative_luminance(rgb);
+    let channels = if (luminance + 0.05) / 0.05 >= 1.05 / (luminance + 0.05) {
+        [0.0, 0.0, 1.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    Some(CssColor {
+        space: Space::Hwb,
+        channels: channels.map(Some),
+        alpha: Some(1.0),
+        expressions: std::array::from_fn(|_| None),
+        specified: Some(format!("contrast-color({specified_source})")),
+    })
+}
+
+fn relative_luminance(rgb: [f64; 3]) -> f64 {
+    let linear = rgb.map(|value| {
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    });
+    0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
 }
 
 fn parse_modern_legacy_color(
@@ -944,6 +1013,7 @@ fn parse_mix_percentage(text: &str, context: Option<ColorContext>) -> Option<f64
 
 fn parse_absolute_mix_color(text: &str, context: Option<ColorContext>) -> Option<CssColor> {
     if text.starts_with("color-mix(")
+        || text.starts_with("contrast-color(")
         || matches!(
             text.split_once('(').map(|(name, _)| name),
             Some(
@@ -1632,6 +1702,19 @@ mod tests {
             "color-mix(in srgb, red 120%, blue)",
         ] {
             assert!(CssColor::parse(invalid).is_none(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn contrast_color_selects_an_opaque_black_or_white_result() {
+        for (input, expected) in [
+            ("contrast-color(white)", "rgb(0, 0, 0)"),
+            ("contrast-color(black)", "rgb(255, 255, 255)"),
+            ("contrast-color(contrast-color(black))", "rgb(0, 0, 0)"),
+        ] {
+            let color = CssColor::parse(input).unwrap();
+            assert_eq!(color.serialize(), input);
+            assert_eq!(color.serialize_computed(), expected);
         }
     }
 
