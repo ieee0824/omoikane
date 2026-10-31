@@ -11,6 +11,14 @@ use super::{
     resolved_length, sort_children_by_z_index, translate_layout_box_to_outer, visibility, z_index,
 };
 
+#[cfg(test)]
+mod occupancy_tests;
+
+#[cfg(test)]
+thread_local! {
+    static OCCUPANCY_ROW_UPDATES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum TrackSize {
     Px(f32),
@@ -1186,10 +1194,18 @@ fn normalize_grid_requests(
 }
 
 fn ensure_occupancy(occupied: &mut Vec<Vec<bool>>, rows: usize, columns: usize) {
-    for row in occupied.iter_mut() {
-        row.resize(columns, false);
+    // The table is rectangular. Growing only its height must not revisit all
+    // earlier rows for every placed item.
+    if occupied.first().is_some_and(|row| row.len() != columns) {
+        for row in occupied.iter_mut() {
+            #[cfg(test)]
+            OCCUPANCY_ROW_UPDATES.with(|count| count.set(count.get() + 1));
+            row.resize(columns, false);
+        }
     }
     if occupied.len() < rows {
+        #[cfg(test)]
+        OCCUPANCY_ROW_UPDATES.with(|count| count.set(count.get() + rows - occupied.len()));
         occupied.resize_with(rows, || vec![false; columns]);
     }
 }
