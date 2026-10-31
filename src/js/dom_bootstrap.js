@@ -1155,8 +1155,6 @@ let omoikaneUserActivationState;
     (!name.startsWith("--") && numericMathFunctionPattern.test(value)) ||
     (!name.startsWith("--") && /sibling-(?:index|count)\s*\(/i.test(value));
   const styleShorthandLonghands = Object.freeze({
-    "margin": ["margin-top", "margin-right", "margin-bottom", "margin-left"],
-    "padding": ["padding-top", "padding-right", "padding-bottom", "padding-left"],
     "margin-block": ["margin-block-start", "margin-block-end"],
     "margin-inline": ["margin-inline-start", "margin-inline-end"],
     "padding-block": ["padding-block-start", "padding-block-end"],
@@ -1206,9 +1204,13 @@ let omoikaneUserActivationState;
     "scroll-margin-inline": ["scroll-margin-inline-start", "scroll-margin-inline-end"],
     "scroll-margin-block": ["scroll-margin-block-start", "scroll-margin-block-end"],
   });
+  const physicalBoxShorthandLonghands = Object.freeze({
+    "margin": ["margin-top", "margin-right", "margin-bottom", "margin-left"],
+    "padding": ["padding-top", "padding-right", "padding-bottom", "padding-left"],
+  });
 
   function logicalShorthandValue(kebab, declarations) {
-    const longhands = styleShorthandLonghands[kebab];
+    const longhands = styleShorthandLonghands[kebab] || physicalBoxShorthandLonghands[kebab];
     if (!longhands) return null;
     const values = new Map();
     const priorities = new Map();
@@ -10405,21 +10407,24 @@ let omoikaneUserActivationState;
         let entries = JSON.parse(__omoikane_css_declarations(source));
         if (expandInitialShorthands && !allowedProperties) {
           entries = entries.flatMap(([name, value]) => {
-            if (!styleShorthandLonghands[name]) return [[name, value]];
+            if (!styleShorthandLonghands[name] && !physicalBoxShorthandLonghands[name])
+              return [[name, value]];
             const expanded = JSON.parse(__omoikane_expand_style_shorthand(name, value));
             return expanded.length ? expanded : [];
           });
-          entries = entries.filter(([name], index) =>
-            entries.findLastIndex(([laterName]) => laterName === name) === index
-          );
         }
-        const parsed = entries.map(([name, value]) => {
+        let parsed = entries.map(([name, value]) => {
           if (needsStyleValueNormalization(name, value)) {
             const normalized = __omoikane_normalize_style_value(name, value);
             if (normalized !== null) value = normalized;
           }
           return { name, value };
         }).filter(declaration => accepts(declaration.name, declaration.value));
+        if (expandInitialShorthands) {
+          parsed = parsed.filter((declaration, index) =>
+            parsed.findLastIndex(later => later.name === declaration.name) === index
+          );
+        }
         cachedDeclarations = parsed;
         cachedSource = source;
       }
@@ -10440,7 +10445,7 @@ let omoikaneUserActivationState;
       if (key === "contain-intrinsic-size") {
         return containIntrinsicSizeShorthand(values);
       }
-      if (key === "margin" || key === "padding") {
+      if (expandInitialShorthands && (key === "margin" || key === "padding")) {
         return logicalShorthandValue(key, values) || "";
       }
       const found = values.filter(declaration => declaration.name === key);
@@ -10456,7 +10461,8 @@ let omoikaneUserActivationState;
         value = normalized;
       }
       if (!accepts(key, value)) return;
-      const longhands = styleShorthandLonghands[key];
+      const longhands = styleShorthandLonghands[key] ||
+        (expandInitialShorthands ? physicalBoxShorthandLonghands[key] : null);
       if (longhands && !allowedProperties) {
         const expanded = JSON.parse(__omoikane_expand_style_shorthand(key, value));
         if (expanded.length === 0) return;
@@ -10482,7 +10488,8 @@ let omoikaneUserActivationState;
       for (let index = values.length - 1; index >= 0; index--) {
         if (values[index].name === key) { previous = values[index].value; break; }
       }
-      const longhands = styleShorthandLonghands[key] || [];
+      const longhands = styleShorthandLonghands[key] ||
+        (expandInitialShorthands ? physicalBoxShorthandLonghands[key] : null) || [];
       const removed = new Set([key, ...longhands]);
       const remaining = values.filter(declaration => !removed.has(declaration.name));
       if (remaining.length !== values.length) write(remaining, key);
