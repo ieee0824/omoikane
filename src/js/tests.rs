@@ -18834,6 +18834,145 @@ fn media_session_actions_use_host_dispatch_and_validate_state_boundaries() {
     );
 }
 
+fn test_gamepad(index: u32, timestamp: f64, axis: f64) -> GamepadSnapshot {
+    GamepadSnapshot {
+        id: "Deterministic Pad".to_string(),
+        index,
+        connected: true,
+        timestamp,
+        mapping: "standard".to_string(),
+        axes: vec![axis, -axis],
+        buttons: vec![GamepadButtonSnapshot {
+            pressed: axis > 0.5,
+            touched: axis > 0.0,
+            value: axis,
+        }],
+        haptic_effects: vec!["dual-rumble".to_string()],
+    }
+}
+
+#[test]
+fn gamepad_provider_preserves_slots_snapshots_and_connection_events() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicGamepadProvider::new(vec![test_gamepad(
+        2, 10.0, 0.25,
+    )]));
+    provider.set_user_gesture(true);
+    runtime.set_gamepad_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.gamepadEvents = [];
+               addEventListener('gamepadconnected', event => gamepadEvents.push('connect:' + event.gamepad.index));
+               addEventListener('gamepaddisconnected', event => gamepadEvents.push('disconnect:' + event.gamepad.index));"#,
+        )
+        .unwrap();
+    runtime.poll_gamepads().unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "gamepadEvents.join(',')"),
+        "connect:2"
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "JSON.stringify([navigator.getGamepads().length, navigator.getGamepads()[0], navigator.getGamepads()[2].id, navigator.getGamepads()[2].axes, navigator.getGamepads()[2].buttons[0].value])"
+        ),
+        r#"[3,null,"Deterministic Pad",[0.25,-0.25],0.25]"#
+    );
+    runtime
+        .eval("globalThis.firstGamepad = navigator.getGamepads()[2]")
+        .unwrap();
+
+    provider.publish(vec![test_gamepad(2, 20.0, 0.75)]);
+    runtime.poll_gamepads().unwrap();
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "String(firstGamepad === navigator.getGamepads()[2]) + ':' + firstGamepad.timestamp + ':' + firstGamepad.buttons[0].pressed"
+        ),
+        "true:20:true"
+    );
+
+    provider.publish(Vec::new());
+    runtime.poll_gamepads().unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "gamepadEvents.join(',')"),
+        "connect:2,disconnect:2"
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "String(firstGamepad.connected) + ':' + navigator.getGamepads().length"
+        ),
+        "false:0"
+    );
+}
+
+#[test]
+fn gamepad_haptics_validate_at_the_provider_boundary() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicGamepadProvider::new(vec![test_gamepad(
+        0, 1.0, 0.0,
+    )]));
+    provider.set_user_gesture(true);
+    runtime.set_gamepad_provider(provider.clone());
+    runtime.poll_gamepads().unwrap();
+    runtime
+        .eval(
+            r#"globalThis.hapticResult = '';
+               navigator.getGamepads()[0].vibrationActuator.playEffect('dual-rumble', {
+                 duration: 25, startDelay: 2, strongMagnitude: 1, weakMagnitude: 0.5
+               }).then(value => hapticResult = value);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "hapticResult"), "complete");
+    let requests = provider.haptic_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, 0);
+    let request = requests[0].1.as_ref().unwrap();
+    assert_eq!(request.effect, "dual-rumble");
+    assert_eq!(request.strong_magnitude, 1.0);
+    assert_eq!(request.weak_magnitude, 0.5);
+}
+
+#[test]
+fn gamepad_exposure_requires_a_gesture_and_permissions_policy() {
+    let mut runtime =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "https://gamepad.example.test/")
+            .unwrap();
+    let provider = Arc::new(DeterministicGamepadProvider::new(vec![test_gamepad(
+        0, 1.0, 0.0,
+    )]));
+    runtime.set_gamepad_provider(provider.clone());
+    assert_eq!(
+        eval_str(&mut runtime, "String(navigator.getGamepads().length)"),
+        "0"
+    );
+    provider.set_user_gesture(true);
+    assert_eq!(
+        eval_str(&mut runtime, "String(navigator.getGamepads().length)"),
+        "1"
+    );
+    runtime
+        .install_response_security_headers(&[("Permissions-Policy".into(), "gamepad=()".into())]);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "(() => { try { navigator.getGamepads(); return 'allowed'; } catch (error) { return error.name; } })()"
+        ),
+        "SecurityError"
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "String(!document.permissionsPolicy.allowsFeature('gamepad'))"
+        ),
+        "true"
+    );
+}
+
 #[test]
 fn web_speech_synthesis_queues_owned_requests_and_advances_on_host_events() {
     let mut runtime = JsRuntime::new().unwrap();

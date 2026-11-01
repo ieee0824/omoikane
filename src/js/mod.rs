@@ -166,6 +166,11 @@ mod form_submission;
 mod frame_policy;
 mod geolocation;
 pub use geolocation::GeolocationPositionData;
+mod gamepad;
+pub use gamepad::{
+    DeterministicGamepadProvider, GamepadButtonSnapshot, GamepadHapticRequest, GamepadHapticResult,
+    GamepadProvider, GamepadSnapshot,
+};
 mod media_capture;
 pub use media_capture::{
     MediaCaptureDevice, MediaCaptureProvider, MediaCaptureSnapshot, MediaDeviceKind,
@@ -2419,6 +2424,7 @@ struct HostState {
     clipboard_permission_granted: bool,
     notification_permission: String,
     geolocation: geolocation::State,
+    gamepad: gamepad::State,
     media_capture: media_capture::State,
     media_source: media_source::State,
     web_codecs: web_codecs::State,
@@ -3406,6 +3412,7 @@ impl HostState {
             clipboard_permission_granted: true,
             notification_permission: "default".to_string(),
             geolocation: geolocation::State::default(),
+            gamepad: gamepad::State::default(),
             media_capture: media_capture::State::default(),
             media_source: media_source::State::default(),
             web_codecs: web_codecs::State::default(),
@@ -16646,6 +16653,7 @@ fn register_host_bindings(
     form_selector_state::register(context, &mut bindings)?;
     form_submission::register(context, &mut bindings)?;
     geolocation::register(context, &mut bindings)?;
+    gamepad::register(context, &mut bindings)?;
     media_capture::register(context, &mut bindings)?;
     media_source::register(context, &mut bindings)?;
     web_codecs::register(context, &mut bindings)?;

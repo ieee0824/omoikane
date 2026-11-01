@@ -1,0 +1,7 @@
+{
+  "tests": [
+    { "path": "gamepad/gamepad-supported-by-permissions-policy.html" },
+    { "path": "gamepad/not-fully-active.html" },
+    { "path": "gamepad/idlharness.window.js" }
+  ]
+}
