@@ -53,6 +53,8 @@ collect_pattern "/picture-in-picture/" "/common/media.js" "/media/movie_5.mp4" "
 collect_pattern "/webvtt/" "/html/semantics/embedded-content/media-elements/track/"
 # Media capture streams and deterministic MediaRecorder behavior (#1612).
 collect_pattern "/mediacapture-streams/" "/mediacapture-record/"
+# Canvas capture streams (#1292).
+collect_pattern "/mediacapture-fromelement/"
 # Media Source Extensions state, object URL, and SourceBuffer contracts (#1613).
 collect_pattern "/media-source/"
 # Media Session metadata, playback, position, and action-handler contracts (#1618).
