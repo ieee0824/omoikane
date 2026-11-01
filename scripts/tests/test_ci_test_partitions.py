@@ -214,6 +214,12 @@ class ExecutionEvidenceTests(unittest.TestCase):
     def test_ansi_and_zero_test_feature_gated_targets_are_preserved(self):
         self.assertTrue(self.complete("\x1b[1m" + self.log + "\x1b[0m"))
 
+    def test_ignored_or_missing_ignored_count_cannot_certify_execution(self):
+        for summary in ["0 passed; 0 failed; 1 ignored;", "0 passed; 0 failed;"]:
+            with self.subTest(summary=summary):
+                changed = self.log.replace("0 passed; 0 failed; 0 ignored;", summary)
+                self.assertFalse(self.complete(changed))
+
     def test_compile_only_example_requires_non_harness_compiler_artifact(self):
         step = {"name": "examples", "command": ["cargo", "build"], "builds": ["examples/one.rs"]}
         result = {"name": "examples", "command": step["command"], "exit": 0}
@@ -314,6 +320,18 @@ class AggregateTests(unittest.TestCase):
         status, result = self.aggregate()
         self.assertEqual(status, 1)
         self.assertFalse(result["checks"]["unit-build"])
+
+    def test_ignored_or_missing_ignored_count_cannot_make_aggregate_green(self):
+        for relative in ["integration-0/integration.log", "unit-build/doc.log", "unit-build/gate2.log"]:
+            path = Path("parts") / relative
+            original = path.read_text()
+            for summary in ["0 passed; 0 failed; 1 ignored;", "0 passed; 0 failed;"]:
+                with self.subTest(log=relative, summary=summary):
+                    path.write_text(original.replace("1 passed; 0 failed; 0 ignored;", summary, 1))
+                    status, report = self.aggregate()
+                    self.assertEqual(status, 1)
+                    self.assertFalse(report["full_suite"])
+            path.write_text(original)
 
     def test_nonzero_exit_and_incomplete_partition_are_not_success(self):
         path = Path("parts/integration-0/result.json")

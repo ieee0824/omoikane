@@ -33,7 +33,9 @@ Gate4の分割（#1629）やActionsへのcache保存予算（#1451）とは別�
 prepareでrevision・Rust toolchain・lockfile hash・tracked diff hash・対象一覧・
 全コマンドを保存する。各partitionと最終`test` jobは同じ入力であることを照合する。
 終了コード0だけで成功とはせず、`Running`と各harnessの成功summaryを対象ごとに
-照合する。compile-only exampleは非harnessのcompiler artifactとbuild完了を照合する。
+照合する。`--include-ignored`でもignoredが残るsummaryやignored数の欠落は拒否する。
+0 passed / 0 failed / 0 ignoredの正当なfeature-gated対象は許容する。
+compile-only exampleは非harnessのcompiler artifactとbuild完了を照合する。
 最終jobは全ログを再検査し、欠落・重複・別対象・別source・未完了を拒否する。
 
 既存の`test` checkは全partitionの集約結果になる。matrixの一部が失敗しても

@@ -37,7 +37,8 @@ MANUAL_FIXTURES = (
 )
 LIBRARY_KINDS = {"lib", "rlib", "cdylib", "dylib", "staticlib", "proc-macro"}
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
-TEST_RESULT = re.compile(r"^test result: (\w+)\. (\d+) passed; (\d+) failed;", re.MULTILINE)
+TEST_RESULT = re.compile(
+    r"^test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored;", re.MULTILINE)
 
 
 def default_features(features):
@@ -173,7 +174,8 @@ def complete_step(planned, result, log, root):
         return False
     log = ANSI_ESCAPE.sub("", log)
     summaries = TEST_RESULT.findall(log)
-    if any(status != "ok" or failed != "0" for status, _, failed in summaries):
+    if any(status != "ok" or failed != "0" or ignored != "0"
+           for status, _, failed, ignored in summaries):
         return False
     if "runs" in planned:
         ran = re.findall(r"^\s*Running\s+(?:unittests\s+)?(.+?)\s+\([^\n]+\)\s*$", log, re.MULTILINE)
@@ -399,8 +401,8 @@ def aggregate(inputs, partitions, output, partition_job_result="success"):
             log_path = directory / (step["name"] + ".log")
             if log_path.exists():
                 matches = TEST_RESULT.findall(ANSI_ESCAPE.sub("", log_path.read_text(errors="replace")))
-                passed[partition][step["name"]] = sum(int(passed) for status, passed, failed in matches
-                                                     if status == "ok" and failed == "0")
+                passed[partition][step["name"]] = sum(int(passed) for status, passed, failed, ignored in matches
+                                                     if status == "ok" and failed == "0" and ignored == "0")
     benchmarks = [partitions / name / "js-benchmark/report.json" for name in PARTITIONS]
     benchmarks = [path for path in benchmarks if path.is_file()]
     complete["benchmark_once"] = len(benchmarks) == 1
