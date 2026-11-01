@@ -1158,6 +1158,7 @@ let omoikaneUserActivationState;
     /(?:^|[^\w-])(?:calc|min|max|clamp|round|mod|rem|hypot|abs|sign|sin|cos|tan|asin|acos|atan|atan2|pow|sqrt|log|exp)\s*\(/i;
   const needsStyleValueNormalization = (name, value) =>
     name === "transition" || name.startsWith("transition-") ||
+    name === "animation-composition" ||
     name === "hyphenate-character" ||
     name === "initial-letter" || name === "text-box-edge" ||
     logicalBoxStyleProperties.has(name) ||

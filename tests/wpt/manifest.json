@@ -1492,6 +1492,7 @@
     {"path": "layout-instability/visibility-hidden.html"},
     {"path": "layout-instability/visible-to-hidden.html"},
     {"path": "css/css-animations/parsing/animation-composition-invalid.tentative.html"},
+    {"path": "css/css-animations/parsing/animation-composition-valid.tentative.html"},
     {"path": "css/css-transitions/parsing/transition-behavior.html"},
     {"path": "scroll-animations/scroll-timelines/constructor.html"}
   ]

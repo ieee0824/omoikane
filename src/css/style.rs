@@ -7273,6 +7273,41 @@ fn serialize_font_size_adjust_ratio(value: &Value) -> String {
     component(value, false)
 }
 
+/// Canonicalizes composition keywords while preserving unresolved custom properties.
+pub(crate) fn normalize_animation_composition_specified(text: &str) -> Option<String> {
+    if !supports_declaration("animation-composition", text) {
+        return None;
+    }
+    let declarations = super::parse_style_attribute(&format!("animation-composition: {text}"));
+    let value = &declarations.first()?.value;
+    if value_contains_var_function(value) {
+        return Some(text.trim().to_string());
+    }
+    match validate_animation_composition(value) {
+        DeclarationValidation::Valid(computed) => Some(computed_value_css_text(&computed)),
+        _ => None,
+    }
+}
+
+/// Validates the complete animation-composition list before per-layer recursion.
+fn validate_animation_composition(value: &Value) -> DeclarationValidation {
+    if let Value::Keyword(keyword) = value
+        && is_css_wide_keyword(&keyword.to_ascii_lowercase())
+    {
+        return DeclarationValidation::Valid(ComputedValue::Keyword(keyword.to_ascii_lowercase()));
+    }
+    let normalized = render_value(value)
+        .split(',')
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "replace" | "add" | "accumulate").then_some(value)
+        })
+        .collect::<Option<Vec<_>>>();
+    normalized.map_or(DeclarationValidation::Invalid, |values| {
+        DeclarationValidation::Valid(ComputedValue::Keyword(values.join(", ")))
+    })
+}
+
 /// Validates a resolved declaration value against the property's grammar.
 ///
 /// This is the extension point for per-property validation and normalization.
@@ -7449,6 +7484,10 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
     // this lowercase key instead of re-deriving it with `to_ascii_lowercase()`
     // or `eq_ignore_ascii_case()` per branch.
     let key = name.to_ascii_lowercase();
+
+    if key == "animation-composition" {
+        return validate_animation_composition(value);
+    }
 
     if let Some(validation) = validate_anchor_position_declaration(&key, value) {
         return validation;
@@ -8233,25 +8272,6 @@ fn validate_declaration(name: &str, value: &Value) -> DeclarationValidation {
         }
         "container-type" => {
             return validate_keyword_value(value, &["normal", "inline-size", "size"]);
-        }
-        "animation-composition" => {
-            if let Value::Keyword(keyword) = value
-                && is_css_wide_keyword(&keyword.to_ascii_lowercase())
-            {
-                return DeclarationValidation::Valid(ComputedValue::Keyword(
-                    keyword.to_ascii_lowercase(),
-                ));
-            }
-            let normalized = render_value(value)
-                .split(',')
-                .map(|value| {
-                    let value = value.trim().to_ascii_lowercase();
-                    matches!(value.as_str(), "replace" | "add" | "accumulate").then_some(value)
-                })
-                .collect::<Option<Vec<_>>>();
-            return normalized.map_or(DeclarationValidation::Invalid, |values| {
-                DeclarationValidation::Valid(ComputedValue::Keyword(values.join(", ")))
-            });
         }
         "container-name" => return validate_container_name_declaration(value),
         "contain" => return validate_contain_declaration(value),
