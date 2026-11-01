@@ -6,6 +6,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -22,6 +23,50 @@ def acid3_report():
     } for mode in ("faithful", "direct")}
 
 
+def integration_log(targets):
+    chunks = []
+    for name in targets:
+        chunks.append(f"Running tests/{name}.rs (binary)\n")
+        if name == "jit_native_gate":
+            chunks.extend([
+                "test native_policy_and_seeded_workloads_produce_execution_evidence ... ok\n",
+                "test stress::child_failure_preserves_seed_source_code_and_stack_maps ... ok\n",
+                "test stress::seed_replay ... ok\n",
+                "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; "
+                "1 filtered out; finished in 0.1s\n",
+            ])
+        else:
+            chunks.extend(["test ordinary ... ok\n",
+                           "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
+                           "0 filtered out; finished in 0.1s\n"])
+    return "".join(chunks)
+
+
+
+class PartitioningTests(unittest.TestCase):
+    def test_matrix_separates_build_from_two_integration_jobs(self):
+        self.assertIn("integration-0", gate.SHARDS)
+        self.assertIn("integration-1", gate.SHARDS)
+        self.assertIn("build", gate.SHARDS)
+        self.assertNotIn("integration", gate.SHARDS)
+        for name in ("integration-0", "integration-1"):
+            self.assertEqual(gate.STEPS[name], ["integration"])
+        self.assertEqual(gate.STEPS["build"], ["examples-and-bins", "doc", "build"])
+
+    def test_integration_partition_is_stable_disjoint_and_complete(self):
+        targets = sorted(["jit_native_gate", *[f"target_{i}" for i in range(1000)]])
+        partitions = [gate.integration_partition(targets, i)
+                      for i in range(gate.INTEGRATION_SHARDS)]
+        self.assertTrue(all(partitions))
+        flattened = [name for partition in partitions for name in partition]
+        self.assertEqual(sorted(flattened), targets)
+        self.assertEqual(len(flattened), len(set(flattened)))
+        self.assertEqual(flattened.count("jit_native_gate"), 1)
+        for index, partition in enumerate(partitions):
+            self.assertEqual(partition, gate.integration_partition(targets, index))
+            expanded = gate.integration_partition(sorted([*targets, "new_future_target"]), index)
+            self.assertEqual([name for name in expanded if name != "new_future_target"], partition)
+
 
 class GateTests(unittest.TestCase):
     def setUp(self):
@@ -32,15 +77,22 @@ class GateTests(unittest.TestCase):
                          "rustc": "same-rustc", "target": "host", "lock_sha256": "same-lock"}
         (self.root / "inputs").mkdir()
         gate.write_json(self.root / "inputs/identity.json", self.identity)
-        targets = ["jit_native_gate", "new_test"]
+        targets = sorted(["jit_native_gate", "new_test", *[f"new_test_{i}" for i in range(8)]])
+        self.targets = targets
         gate.write_json(self.root / "inputs/integration-targets.json", targets)
         names = [f"module::test_{i}" for i in range(100)]
         for shard in gate.SHARDS:
             folder = self.root / shard
             folder.mkdir()
             steps = [{"name": name, "exit": 0} for name in gate.STEPS[shard]]
-            if shard == "integration":
-                steps[0]["command"] = gate.integration_command(targets)
+            if shard in gate.INTEGRATION_NAMES:
+                selected = gate.integration_partition(targets, gate.INTEGRATION_NAMES.index(shard))
+                steps[0]["command"] = gate.integration_command(selected)
+                gate.write_json(folder / "targets.json", selected)
+                (folder / "integration.log").write_text(integration_log(selected))
+            if shard == "build":
+                steps = [{"name": name, "command": command, "exit": 0}
+                         for name, command in gate.build_commands()]
             if shard == "stress":
                 steps[0]["command"] = gate.stress_command()
             if shard == "acid3":
@@ -57,18 +109,6 @@ class GateTests(unittest.TestCase):
             if shard.startswith("unit-"):
                 gate.write_json(folder / "all-tests.json", names)
                 gate.write_json(folder / "selected-tests.json", gate.unit_partition(names, int(shard[-1])))
-        gate.write_json(self.root / "integration/targets.json", targets)
-        (self.root / "integration/integration.log").write_text(
-            "Running tests/jit_native_gate.rs (native)\n"
-            "test native_policy_and_seeded_workloads_produce_execution_evidence ... ok\n"
-            "test stress::child_failure_preserves_seed_source_code_and_stack_maps ... ok\n"
-            "test stress::seed_replay ... ok\n"
-            "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; "
-            "1 filtered out; finished in 0.1s\n"
-            "Running tests/new_test.rs (ordinary)\n"
-            "test ordinary ... ok\n"
-            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; "
-            "0 filtered out; finished in 0.1s\n")
         (self.root / "stress/stress.log").write_text(
             "Running tests/jit_deopt.rs (stress)\n"
             "test stress::reproducible_stress_matrix ... "
@@ -94,13 +134,86 @@ class GateTests(unittest.TestCase):
         change(value)
         gate.write_json(path, value)
 
+    def integration_path(self, target, filename):
+        name = next(name for index, name in enumerate(gate.INTEGRATION_NAMES)
+                    if target in gate.integration_partition(self.targets, index))
+        return f"{name}/{filename}"
+
     def test_complete_gate_passes(self):
         self.assertTrue(self.decide())
+
+    def test_run_each_batch_records_its_exact_command_and_passed_targets(self):
+        root = self.root / "execute"
+        (root / "inputs").mkdir(parents=True)
+        gate.write_json(root / "inputs/identity.json", self.identity)
+        gate.write_json(root / "inputs/integration-targets.json", self.targets)
+        commands = []
+
+        def execute(command, **kwargs):
+            commands.append(command)
+            selected = [command[i + 1] for i, value in enumerate(command) if value == "--test"]
+            kwargs["stdout"].write(integration_log(selected))
+            return SimpleNamespace(returncode=0)
+
+        with patch.object(gate, "identity", return_value=self.identity), \
+                patch.object(gate, "integration_targets_from_metadata", return_value=self.targets), \
+                patch.object(gate.subprocess, "run", side_effect=execute), \
+                contextlib.redirect_stdout(io.StringIO()):
+            for name in gate.INTEGRATION_NAMES:
+                self.assertTrue(gate.run_shard(name, root))
+        rows = {name: gate.read_json(root / name / "shard.json") for name in gate.INTEGRATION_NAMES}
+        self.assertTrue(gate.complete_integration_coverage(root, rows))
+        self.assertEqual(len(commands), gate.INTEGRATION_SHARDS)
+        self.assertEqual(sum(command.count("jit_native_gate") for command in commands), 1)
+
+    def test_missing_integration_batch_rejects_gate(self):
+        for name in gate.INTEGRATION_NAMES:
+            path = self.root / name / "shard.json"
+            original = path.read_text()
+            path.unlink()
+            self.assertFalse(self.decide())
+            path.write_text(original)
+
+    def test_cross_batch_duplicate_or_omission_fails_even_with_matching_command_and_log(self):
+        first, second = gate.INTEGRATION_NAMES
+        selected = gate.read_json(self.root / first / "targets.json")
+        other = gate.read_json(self.root / second / "targets.json")
+        for changed in (sorted([*selected, other[0]]), selected[:-1]):
+            with self.subTest(changed=changed):
+                gate.write_json(self.root / first / "targets.json", changed)
+                self.modify(f"{first}/shard.json",
+                            lambda row: row["steps"][0].update(command=gate.integration_command(changed)))
+                (self.root / first / "integration.log").write_text(integration_log(changed))
+                self.assertFalse(self.decide())
+
+    def test_native_policy_target_remains_required_in_the_global_inventory(self):
+        targets = [name for name in self.targets if name != "jit_native_gate"]
+        gate.write_json(self.root / "inputs/integration-targets.json", targets)
+        for index, name in enumerate(gate.INTEGRATION_NAMES):
+            selected = gate.integration_partition(targets, index)
+            gate.write_json(self.root / name / "targets.json", selected)
+            self.modify(f"{name}/shard.json",
+                        lambda row: row["steps"][0].update(command=gate.integration_command(selected)))
+            (self.root / name / "integration.log").write_text(integration_log(selected))
+        self.assertFalse(self.decide())
+
+    def test_build_examples_and_docs_each_require_the_original_command_and_success(self):
+        path = self.root / "build/shard.json"
+        original = path.read_text()
+        for index, (name, _) in enumerate(gate.build_commands()):
+            for change in (lambda row: row["steps"].pop(index),
+                           lambda row: row["steps"][index].update(exit=101),
+                           lambda row: row["steps"][index]["command"].append("--skip")):
+                with self.subTest(step=name, change=str(change)):
+                    self.modify("build/shard.json", change)
+                    self.assertFalse(self.decide())
+                    path.write_text(original)
 
     def test_missing_and_malformed_artifacts_fail(self):
         for name in [f"{s}/shard.json" for s in gate.SHARDS] + [
                 "inputs/identity.json", "inputs/integration-targets.json",
-                "integration/targets.json", "acid3/acid3.json", "compatibility/wpt.json",
+                *[f"{name}/targets.json" for name in gate.INTEGRATION_NAMES],
+                "acid3/acid3.json", "compatibility/wpt.json",
                 "compatibility/web-api.json", "stress/stress.json"]:
             path = self.root / name
             original = path.read_text()
@@ -112,12 +225,13 @@ class GateTests(unittest.TestCase):
                 path.write_text(original)
 
     def test_failed_or_incomplete_job_fails(self):
-        path = self.root / "integration/shard.json"
+        relative = self.integration_path("jit_native_gate", "shard.json")
+        path = self.root / relative
         original = path.read_text()
-        self.modify("integration/shard.json", lambda row: row["steps"][0].update(exit=101))
+        self.modify(relative, lambda row: row["steps"][0].update(exit=101))
         self.assertFalse(self.decide())
         path.write_text(original)
-        self.modify("integration/shard.json", lambda row: row["steps"].pop())
+        self.modify(relative, lambda row: row["steps"].pop())
         self.assertFalse(self.decide())
         path.write_text(original)
         self.assertFalse(self.decide(success=False))
@@ -185,12 +299,14 @@ class GateTests(unittest.TestCase):
         self.assertEqual(gate.integration_targets(package), ["native", "new_test"])
 
     def test_integration_target_or_command_drift_fails(self):
+        selected = self.integration_path("jit_native_gate", "targets.json")
+        shard = self.integration_path("jit_native_gate", "shard.json")
         changes = [
             ("inputs/integration-targets.json", lambda row: row.append({"invalid": True})),
-            ("integration/targets.json", lambda row: row.pop()),
-            ("integration/targets.json", lambda row: row.append(row[0])),
-            ("integration/shard.json", lambda row: row["steps"][0]["command"].remove("--skip")),
-            ("integration/shard.json", lambda row: row["steps"][0]["command"].remove("jit_native_gate")),
+            (selected, lambda row: row.pop()),
+            (selected, lambda row: row.append(row[0])),
+            (shard, lambda row: row["steps"][0]["command"].remove("--skip")),
+            (shard, lambda row: row["steps"][0]["command"].remove("jit_native_gate")),
             ("stress/shard.json", lambda row: row["steps"][0]["command"].append("--skip")),
         ]
         for name, change in changes:
@@ -202,20 +318,23 @@ class GateTests(unittest.TestCase):
                 path.write_text(original)
 
     def test_integration_log_requires_one_native_skip_and_all_targets(self):
-        path = self.root / "integration/integration.log"
-        original = path.read_text()
+        native = self.integration_path("jit_native_gate", "integration.log")
+        ordinary = self.integration_path("new_test", "integration.log")
         changes = [
-            lambda text: text.replace("1 filtered out", "0 filtered out"),
-            lambda text: text.replace("Running tests/new_test.rs", "Running tests/other.rs"),
-            lambda text: text.replace("test native_policy_and_seeded_workloads_produce_execution_evidence ... ok\n", ""),
-            lambda text: text.replace("test stress::seed_replay ... ok", "test stress::reproducible_stress_matrix ... ok"),
-            lambda text: text.replace("0 filtered out", "1 filtered out"),
+            (native, lambda text: text.replace("1 filtered out", "0 filtered out")),
+            (ordinary, lambda text: text.replace("Running tests/new_test.rs", "Running tests/other.rs")),
+            (native, lambda text: text.replace("test native_policy_and_seeded_workloads_produce_execution_evidence ... ok\n", "")),
+            (native, lambda text: text.replace("test stress::seed_replay ... ok", "test stress::reproducible_stress_matrix ... ok")),
+            (ordinary, lambda text: text.replace("0 filtered out", "1 filtered out")),
         ]
-        for change in changes:
-            with self.subTest(change=str(change)):
+        for name, change in changes:
+            path = self.root / name
+            original = path.read_text()
+            with self.subTest(path=name, change=str(change)):
                 path.write_text(change(original))
                 self.assertFalse(self.decide())
-        path.write_text(original)
+            path.write_text(original)
+        path = self.root / native
         path.unlink()
         self.assertFalse(self.decide())
 

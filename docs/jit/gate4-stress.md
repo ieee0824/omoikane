@@ -51,7 +51,8 @@ uses separate Ubuntu 24.04 x86_64 runners with Rust 1.98.1:
 | Partition | Coverage |
 | --- | --- |
 | `unit-0` through `unit-3` | All library tests, assigned by a stable hash of each exact test name |
-| `integration` | Remaining integration targets (skipping only the duplicate `jit_native_gate` stress matrix), examples, enabled binaries, doctests, and build |
+| `integration-0`, `integration-1` | Remaining integration targets, assigned by stable target-name hash (skipping only the duplicate `jit_native_gate` stress matrix) |
+| `build` | Examples, enabled binaries, doctests, and the existing `jit-stress` build |
 | `acid3` | Standalone and embedded Acid3 harness, both drive modes |
 | `compatibility` | Required pinned WPT and standalone/embedded Web API surface |
 | `stress` | Deopt/exception/interrupt contracts and the generated stress corpus |
@@ -70,18 +71,26 @@ all four lists agree and that their selections cover every test exactly once.
 New integration targets are discovered through Cargo metadata. Acid3 and Web API
 modules embedded in `jit_deopt` run in their corresponding partitions, so its
 stress partition does not duplicate those heavy tests.
-The preparation job records the complete integration-target list. The
-integration log must show every selected test binary and exactly one filtered
-test, in `jit_native_gate`; its native execution-policy contract still runs.
+The preparation job records the complete integration-target list. Each batch
+records its exact selection, command and execution log. The aggregator requires
+the union of both batches to equal that inventory without duplicates or omissions.
+Their logs must show every selected test binary and exactly one filtered test,
+in `jit_native_gate`; its native execution-policy contract still runs once.
+The separate build partition retains all three original validation commands and
+their successful exit codes. The job limit remains 60 minutes and test process
+deadlines are unchanged; the split avoids appending a development-profile build
+to the formerly near-hour-long integration job (#1629). Cold-cache cost, queue
+time and the resulting critical path still need measurement in CI.
 The dedicated stress log must show the matrix once and match its retained
 summary. The aggregator checks those logs, commands, target lists and the
 existing minimum seed/duration requirements before issuing `go`.
 
 One preparation job resolves `Cargo.lock` and distributes it to every runner.
 Each partition records its revision, compiler, target, lockfile digest, tracked
-working-tree status, commands, exit codes, timings and test counts. Unit runners
-share a build cache with one writer; other partitions have separate caches,
-including on failure. The matrix disables fail-fast so a failure in Acid3 does
+working-tree status, commands, exit codes, timings and test counts. Partitions
+share one build cache; only the build partition writes it after success on main,
+retaining the single-writer cache budget. The matrix disables fail-fast so a
+failure in Acid3 does
 not prevent WPT or the ten-minute stress from running. This reduces elapsed time
 at the cost of more concurrent runners and compilation on an initially cold
 cache; measured timings must distinguish cold and warm runs.
