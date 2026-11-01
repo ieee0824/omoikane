@@ -187,6 +187,7 @@ let omoikaneUserActivationState;
   const nativeWorkletRegister = globalThis.__omoikane_worklet_register;
   const nativeWorkletRegisteredNames = globalThis.__omoikane_worklet_registered_names;
   const nativeWorkletModuleCount = globalThis.__omoikane_worklet_module_count;
+  const nativeWorkletProcess = globalThis.__omoikane_worklet_process;
   const nativeWorkletTeardown = globalThis.__omoikane_worklet_teardown;
   const nativeCryptoRandom = globalThis.__omoikane_crypto_random;
   const nativeCryptoDigest = globalThis.__omoikane_crypto_digest;
@@ -464,6 +465,7 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_worklet_register;
   delete globalThis.__omoikane_worklet_registered_names;
   delete globalThis.__omoikane_worklet_module_count;
+  delete globalThis.__omoikane_worklet_process;
   delete globalThis.__omoikane_worklet_teardown;
   delete globalThis.__omoikane_crypto_random;
   delete globalThis.__omoikane_crypto_digest;
@@ -31282,6 +31284,7 @@ let omoikaneUserActivationState;
       this.__destination = new AudioDestinationNode(audioConstructionToken, this);
       this.listener = Object.create(null);
       this.onstatechange = null;
+      this.audioWorklet = new AudioWorklet(workletConstructionToken);
     }
     get state() { return this.__state; }
     get currentTime() { return audioNow(this); }
@@ -31341,7 +31344,303 @@ let omoikaneUserActivationState;
     }
     createGain() { if (this.__state === "closed") throw new DOMException("The AudioContext is closed.", "InvalidStateError"); return new GainNode(this); }
     createOscillator() { if (this.__state === "closed") throw new DOMException("The AudioContext is closed.", "InvalidStateError"); return new OscillatorNode(this); }
+    createBuffer(numberOfChannels, length, sampleRate) {
+      return new AudioBuffer({numberOfChannels, length, sampleRate});
+    }
+    decodeAudioData(audioData, successCallback = undefined, errorCallback = undefined) {
+      let result;
+      try {
+        if (!(audioData instanceof ArrayBuffer)) throw new TypeError("decodeAudioData requires an ArrayBuffer");
+        const bytes = new Uint8Array(audioData.slice(0));
+        const view = new DataView(bytes.buffer);
+        const tag = offset => String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
+        if (bytes.length < 44 || tag(0) !== "RIFF" || tag(8) !== "WAVE") throw new DOMException("Unsupported audio data.", "EncodingError");
+        let format = null;
+        let dataOffset = 0;
+        let dataLength = 0;
+        for (let offset = 12; offset + 8 <= bytes.length;) {
+          const name = tag(offset);
+          const size = view.getUint32(offset + 4, true);
+          const payload = offset + 8;
+          if (payload + size > bytes.length) throw new DOMException("Truncated audio data.", "EncodingError");
+          if (name === "fmt " && size >= 16) {
+            format = {
+              encoding:view.getUint16(payload, true), channels:view.getUint16(payload + 2, true),
+              sampleRate:view.getUint32(payload + 4, true), blockAlign:view.getUint16(payload + 12, true),
+              bits:view.getUint16(payload + 14, true),
+            };
+          } else if (name === "data") {
+            dataOffset = payload;
+            dataLength = size;
+          }
+          offset = payload + size + (size & 1);
+        }
+        if (!format || !dataOffset || !format.channels || !format.sampleRate || !format.blockAlign ||
+            !((format.encoding === 1 && [8, 16, 24, 32].includes(format.bits)) || (format.encoding === 3 && format.bits === 32))) {
+          throw new DOMException("Unsupported audio encoding.", "EncodingError");
+        }
+        const sourceFrames = Math.floor(dataLength / format.blockAlign);
+        if (!sourceFrames) throw new DOMException("Audio data contains no frames.", "EncodingError");
+        const frames = Math.max(1, Math.ceil(sourceFrames * this.sampleRate / format.sampleRate));
+        const buffer = new AudioBuffer({numberOfChannels:format.channels, length:frames, sampleRate:this.sampleRate});
+        const width = format.bits / 8;
+        const readSample = (frame, channel) => {
+          const offset = dataOffset + frame * format.blockAlign + channel * width;
+          let sample;
+          if (format.encoding === 3) sample = view.getFloat32(offset, true);
+          else if (format.bits === 8) sample = (view.getUint8(offset) - 128) / 128;
+          else if (format.bits === 16) sample = view.getInt16(offset, true) / 32768;
+          else if (format.bits === 24) {
+            let value = view.getUint8(offset) | (view.getUint8(offset + 1) << 8) | (view.getUint8(offset + 2) << 16);
+            if (value & 0x800000) value |= 0xff000000;
+            sample = value / 8388608;
+          } else sample = view.getInt32(offset, true) / 2147483648;
+          return Math.max(-1, Math.min(1, sample));
+        };
+        for (let frame = 0; frame < frames; frame++) for (let channel = 0; channel < format.channels; channel++) {
+          const position = frame * format.sampleRate / this.sampleRate;
+          const before = Math.min(sourceFrames - 1, Math.floor(position));
+          const after = Math.min(sourceFrames - 1, before + 1);
+          const mix = position - before;
+          buffer.__channels[channel][frame] = readSample(before, channel) * (1 - mix) + readSample(after, channel) * mix;
+        }
+        result = Promise.resolve(buffer);
+      } catch (error) { result = Promise.reject(error); }
+      if (typeof successCallback === "function") result.then(successCallback);
+      if (typeof errorCallback === "function") result.catch(errorCallback);
+      return result;
+    }
     get [Symbol.toStringTag]() { return "AudioContext"; }
+  }
+  class AudioBuffer {
+    constructor(options) {
+      const init = Object(options);
+      const numberOfChannels = Number(init.numberOfChannels) >>> 0;
+      const length = Number(init.length) >>> 0;
+      const sampleRate = audioNumber(init.sampleRate, "AudioBuffer sampleRate");
+      if (!numberOfChannels || numberOfChannels > 32 || !length || sampleRate <= 0) {
+        throw new DOMException("Invalid AudioBuffer dimensions.", "NotSupportedError");
+      }
+      Object.defineProperties(this, {
+        numberOfChannels: { enumerable: true, value: numberOfChannels },
+        length: { enumerable: true, value: length },
+        sampleRate: { enumerable: true, value: sampleRate },
+        duration: { enumerable: true, value: length / sampleRate },
+      });
+      this.__channels = Array.from({length:numberOfChannels}, () => new Float32Array(length));
+    }
+    getChannelData(channel) {
+      const index = Number(channel) >>> 0;
+      if (index >= this.numberOfChannels) throw new DOMException("Invalid channel.", "IndexSizeError");
+      return this.__channels[index];
+    }
+    copyFromChannel(destination, channelNumber, startInChannel = 0) {
+      const source = this.getChannelData(channelNumber);
+      const start = Number(startInChannel) >>> 0;
+      destination.set(source.subarray(start, start + destination.length));
+    }
+    copyToChannel(source, channelNumber, startInChannel = 0) {
+      const destination = this.getChannelData(channelNumber);
+      const start = Number(startInChannel) >>> 0;
+      destination.set(source.subarray(0, destination.length - start), start);
+    }
+    get [Symbol.toStringTag]() { return "AudioBuffer"; }
+  }
+
+  function audioNodeReaches(node, target, seen = new Set()) {
+    if (node === target) return true;
+    if (seen.has(node)) return false;
+    seen.add(node);
+    return node.__connections.some(connection =>
+      connection.destination instanceof AudioNode && audioNodeReaches(connection.destination, target, seen));
+  }
+
+  class OfflineAudioCompletionEvent extends Event {
+    constructor(type, init) {
+      super(type, init);
+      if (!init || !(init.renderedBuffer instanceof AudioBuffer)) {
+        throw new TypeError("OfflineAudioCompletionEvent requires renderedBuffer");
+      }
+      Object.defineProperty(this, "renderedBuffer", { enumerable:true, value:init.renderedBuffer });
+    }
+  }
+
+  class OfflineAudioContext extends AudioContext {
+    constructor(numberOfChannelsOrOptions, length, sampleRate) {
+      const dictionaryConstructor = arguments.length === 1 && numberOfChannelsOrOptions !== null &&
+        typeof numberOfChannelsOrOptions === "object";
+      if (!dictionaryConstructor && arguments.length !== 3) throw new TypeError("OfflineAudioContext requires one options dictionary or three arguments");
+      const init = dictionaryConstructor ? Object(numberOfChannelsOrOptions) :
+        {numberOfChannels:numberOfChannelsOrOptions, length, sampleRate};
+      if (init.sampleRate === undefined) throw new TypeError("OfflineAudioContext sampleRate is required");
+      const channelValue = init.numberOfChannels === undefined ? 1 : Number(init.numberOfChannels);
+      const lengthValue = init.length === undefined || init.length === null ? null : Number(init.length);
+      const channels = Math.trunc(channelValue);
+      const frames = lengthValue === null ? null : Math.trunc(lengthValue);
+      const rate = audioNumber(init.sampleRate, "OfflineAudioContext sampleRate");
+      if (!Number.isFinite(channelValue) || channels !== channelValue || channels < 1 || channels > 32 ||
+          (lengthValue !== null && (!Number.isFinite(lengthValue) || frames !== lengthValue || frames < 1)) ||
+          rate < 8000 || rate > 192000) {
+        throw new DOMException("Invalid offline rendering dimensions.", "NotSupportedError");
+      }
+      const renderSizeHint = init.renderSizeHint === undefined || init.renderSizeHint === "default" ? 128 : Number(init.renderSizeHint);
+      if (!Number.isInteger(renderSizeHint) || renderSizeHint < 1) throw new DOMException("Invalid renderSizeHint.", "NotSupportedError");
+      super({sampleRate:rate});
+      this.destination.channelCount = channels;
+      this.destination.channelCountMode = "explicit";
+      Object.defineProperties(this, {
+        length: { enumerable:true, value:frames },
+        __offlineChannels: { value:channels, writable:false },
+      });
+      this.oncomplete = null;
+      this.__renderStarted = false;
+      this.__renderQuantumSize = renderSizeHint;
+      this.__committedFrames = 0;
+      this.__renderQueue = Promise.resolve();
+      this.__suspensions = [];
+      this.__resumeRendering = null;
+    }
+    get currentTime() { return this.__currentTime; }
+    suspend(suspendTime) {
+      if (this.__renderStarted || this.__state === "closed") return Promise.reject(new DOMException("Rendering has started.", "InvalidStateError"));
+      const time = audioTime(suspendTime, "OfflineAudioContext suspend time");
+      if ((this.length !== null && time >= this.length / this.sampleRate) || this.__suspensions.some(entry => entry.time === time)) {
+        return Promise.reject(new DOMException("Invalid suspend time.", "InvalidStateError"));
+      }
+      return new Promise(resolve => this.__suspensions.push({time, resolve}));
+    }
+    resume() {
+      if (this.__state !== "suspended" || !this.__renderStarted) {
+        return Promise.reject(new DOMException("Offline rendering is not suspended.", "InvalidStateError"));
+      }
+      this.__state = "running";
+      const resumeRendering = this.__resumeRendering;
+      this.__resumeRendering = null;
+      if (resumeRendering) resumeRendering();
+      return Promise.resolve();
+    }
+    startRendering(chunkSize = null) {
+      if (this.__state === "closed") return Promise.reject(new DOMException("Rendering already completed.", "InvalidStateError"));
+      const requested = chunkSize === null || chunkSize === undefined ? null : Number(chunkSize);
+      if (requested !== null && (!Number.isInteger(requested) || requested < 1)) {
+        return Promise.reject(new DOMException("Invalid render chunk size.", "NotSupportedError"));
+      }
+      const quantum = this.__renderQuantumSize;
+      const rounded = requested === null ? quantum : Math.ceil(requested / quantum) * quantum;
+      const remaining = this.length === null ? rounded : this.length - this.__committedFrames;
+      if (remaining <= 0) return Promise.reject(new DOMException("Rendering already committed.", "InvalidStateError"));
+      const frameCount = this.length !== null && requested === null ? remaining : Math.min(remaining, rounded);
+      const firstFrame = this.__committedFrames;
+      this.__committedFrames += frameCount;
+      this.__renderStarted = true;
+      const renderChunk = () => {
+        if (this.__state !== "suspended") this.__state = "running";
+        const output = new AudioBuffer({numberOfChannels:this.__offlineChannels, length:frameCount, sampleRate:this.sampleRate});
+        const lastFrame = firstFrame + frameCount;
+        const suspensions = this.__suspensions.filter(entry => entry.time * this.sampleRate < lastFrame)
+          .sort((left, right) => left.time - right.time);
+        this.__suspensions = this.__suspensions.filter(entry => !suspensions.includes(entry));
+        let frame = firstFrame;
+        const renderUntil = endFrame => {
+          for (; frame < endFrame; frame++) {
+            const time = frame / this.sampleRate;
+            let sample = 0;
+            for (const node of this.__nodes) {
+              if (node instanceof AudioWorkletNode && audioNodeReaches(node, this.destination)) {
+                sample += node.__sample(frame);
+                continue;
+              }
+              if (!(node instanceof OscillatorNode) || !node.__started || !audioNodeReaches(node, this.destination)) continue;
+              if (time < node.__startRequested || (node.__stopRequested !== undefined && time >= node.__stopRequested)) continue;
+              const frequency = node.frequency.__valueAt(time) * Math.pow(2, node.detune.__valueAt(time) / 1200);
+              let value = Math.sin(2 * Math.PI * frequency * (time - node.__startRequested));
+              const gainConnection = node.__connections.find(connection => connection.destination instanceof GainNode);
+              if (gainConnection) value *= gainConnection.destination.gain.__valueAt(time);
+              sample += value;
+            }
+            for (const channel of output.__channels) channel[frame - firstFrame] = Math.max(-1, Math.min(1, sample));
+          }
+          this.__currentTime = frame / this.sampleRate;
+        };
+        const continueRendering = () => Promise.resolve().then(() => {
+          const suspension = suspensions.shift();
+          if (suspension) {
+            // Web Audio schedules offline suspensions at the start of the render
+            // quantum containing the requested time.
+            const suspendFrame = Math.min(lastFrame, Math.floor(suspension.time * this.sampleRate / quantum) * quantum);
+            renderUntil(suspendFrame);
+            this.__state = "suspended";
+            suspension.resolve();
+            return new Promise(resolve => { this.__resumeRendering = resolve; }).then(continueRendering);
+          }
+          renderUntil(lastFrame);
+          this.__currentTime = Math.ceil(lastFrame / quantum) * quantum / this.sampleRate;
+          this.__state = this.length !== null && lastFrame >= this.length ? "closed" : "running";
+          const event = new OfflineAudioCompletionEvent("complete", {renderedBuffer:output});
+          if (typeof this.oncomplete === "function") __omoikane_call_event_listener(this.oncomplete, this, event);
+          this.dispatchEvent(event);
+          return output;
+        });
+        return continueRendering();
+      };
+      const result = this.__renderQueue.then(renderChunk);
+      this.__renderQueue = result.then(() => undefined, () => undefined);
+      return result;
+    }
+    get [Symbol.toStringTag]() { return "OfflineAudioContext"; }
+  }
+
+  class AudioWorkletNode extends AudioNode {
+    constructor(context, name, options = {}) {
+      const owner = audioContextValue(context);
+      const processorName = String(name);
+      if (!owner.audioWorklet || !owner.audioWorklet.registeredNames.includes(processorName)) {
+        throw new DOMException("AudioWorklet processor is not registered.", "InvalidStateError");
+      }
+      const init = Object(options);
+      super(audioConstructionToken, owner, Number(init.numberOfInputs ?? 1) >>> 0, Number(init.numberOfOutputs ?? 1) >>> 0);
+      const channel = new MessageChannel();
+      Object.defineProperty(this, "port", { enumerable:true, value:channel.port1 });
+      this.__processorPort = channel.port2;
+      this.onprocessorerror = null;
+      this.parameters = new Map();
+      this.__processorName = processorName;
+      this.__processorOptions = init.processorOptions === undefined ? {} : init.processorOptions;
+      const outputChannelCount = init.outputChannelCount === undefined
+        ? Array.from({length:this.numberOfOutputs}, () => 1)
+        : Array.from(init.outputChannelCount, value => Number(value) >>> 0);
+      if (outputChannelCount.length !== this.numberOfOutputs || outputChannelCount.some(value => value < 1 || value > 32)) {
+        throw new DOMException("Invalid outputChannelCount.", "NotSupportedError");
+      }
+      this.__outputChannelCount = outputChannelCount;
+      this.__renderQuantum = -1;
+      this.__renderedOutputs = [];
+    }
+    __sample(frame, output = 0, channel = 0) {
+      const quantum = Math.floor(frame / 128);
+      if (quantum !== this.__renderQuantum) {
+        const request = JSON.stringify({
+          name:this.__processorName,
+          frames:128,
+          currentFrame:quantum * 128,
+          sampleRate:this.context.sampleRate,
+          outputChannelCount:this.__outputChannelCount,
+          processorOptions:this.__processorOptions,
+        });
+        try {
+          const response = JSON.parse(nativeWorkletProcess(this.context.audioWorklet.__id, request));
+          this.__renderedOutputs = response && response.ok ? response.outputs : [];
+        } catch (error) {
+          this.__renderedOutputs = [];
+          const event = new Event("processorerror");
+          if (typeof this.onprocessorerror === "function") __omoikane_call_event_listener(this.onprocessorerror, this, event);
+          this.dispatchEvent(event);
+        }
+        this.__renderQuantum = quantum;
+      }
+      return Number(this.__renderedOutputs[output]?.[channel]?.[frame % 128] ?? 0);
+    }
+    get [Symbol.toStringTag]() { return "AudioWorkletNode"; }
   }
   globalThis.AudioParam = AudioParam;
   globalThis.AudioNode = AudioNode;
@@ -31349,6 +31648,10 @@ let omoikaneUserActivationState;
   globalThis.GainNode = GainNode;
   globalThis.OscillatorNode = OscillatorNode;
   globalThis.AudioContext = AudioContext;
+  globalThis.AudioBuffer = AudioBuffer;
+  globalThis.OfflineAudioCompletionEvent = OfflineAudioCompletionEvent;
+  globalThis.OfflineAudioContext = OfflineAudioContext;
+  globalThis.AudioWorkletNode = AudioWorkletNode;
   function notificationOptionString(options, name, fallback = "") {
     const value = options && options[name];
     return value === undefined ? fallback : String(value);
@@ -36274,7 +36577,17 @@ let omoikaneUserActivationState;
     terminate() { return this.teardown(); }
     get [Symbol.toStringTag]() { return "Worklet"; }
   }
+  class AudioWorklet extends Worklet {
+    constructor(token) {
+      super(token);
+      const channel = new MessageChannel();
+      Object.defineProperty(this, "port", { enumerable:true, value:channel.port1 });
+      this.__globalPort = channel.port2;
+    }
+    get [Symbol.toStringTag]() { return "AudioWorklet"; }
+  }
   globalThis.Worklet = Worklet;
+  globalThis.AudioWorklet = AudioWorklet;
   globalThis.WorkletGlobalScope = WorkletGlobalScope;
 
   // CSS.paintWorklet is a stable Worklet instance.  Keep this assignment near
@@ -36337,6 +36650,42 @@ let omoikaneUserActivationState;
         throw new DOMException("WorkletGlobalScope has been torn down.", "InvalidStateError");
       }
       registrations.set(key, Object.freeze({ name: key, value }));
+    };
+    globalThis.AudioWorkletProcessor = class AudioWorkletProcessor {
+      constructor() {
+        const channel = new MessageChannel();
+        Object.defineProperty(this, "port", { enumerable:true, value:channel.port1 });
+      }
+    };
+    globalThis.registerProcessor = function(name, processorCtor) {
+      const key = String(name);
+      if (!key) throw new DOMException("A processor name is required.", "NotSupportedError");
+      if (typeof processorCtor !== "function") throw new TypeError("Processor constructor must be callable");
+      if (registrations.has(key)) throw new DOMException("Processor name already registered.", "NotSupportedError");
+      if (typeof nativeRegister !== "function" || !nativeRegister(workletId, key)) {
+        throw new DOMException("AudioWorkletGlobalScope has been torn down.", "InvalidStateError");
+      }
+      registrations.set(key, Object.freeze({ name:key, constructor:processorCtor }));
+    };
+    const audioProcessorInstances = new Map();
+    globalThis.__omoikane_audio_process = function(encodedRequest) {
+      const request = JSON.parse(String(encodedRequest));
+      const registration = registrations.get(String(request.name));
+      if (!registration || typeof registration.constructor !== "function") return JSON.stringify({ok:false});
+      let processor = audioProcessorInstances.get(request.name);
+      if (!processor) {
+        processor = new registration.constructor({processorOptions:request.processorOptions ?? {}});
+        audioProcessorInstances.set(request.name, processor);
+      }
+      const frames = Number(request.frames) >>> 0;
+      globalThis.currentFrame = Number(request.currentFrame) || 0;
+      globalThis.currentTime = globalThis.currentFrame / Number(request.sampleRate);
+      globalThis.sampleRate = Number(request.sampleRate);
+      const outputs = Array.from(request.outputChannelCount ?? [], count =>
+        Array.from({length:Number(count) >>> 0}, () => new Float32Array(frames)));
+      const keepAlive = processor.process([], outputs, Object.create(null)) !== false;
+      if (!keepAlive) audioProcessorInstances.delete(request.name);
+      return JSON.stringify({ok:true, outputs:outputs.map(output => output.map(channel => Array.from(channel))), keepAlive});
     };
   };
 

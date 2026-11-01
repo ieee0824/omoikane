@@ -17624,6 +17624,93 @@ fn web_audio_models_context_state_param_automation_and_node_lifecycle() {
 }
 
 #[test]
+fn offline_audio_context_renders_the_existing_graph_deterministically() {
+    let mut runtime = runtime_from_html("<html><body></body></html>");
+    runtime.eval(r#"
+        globalThis.offlineEvents = [];
+        const context = new OfflineAudioContext({numberOfChannels: 2, length: 480, sampleRate: 48000});
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.frequency.value = 1000;
+        gain.gain.value = 0.5;
+        oscillator.connect(gain).connect(context.destination);
+        oscillator.start(0); oscillator.stop(0.005);
+        context.oncomplete = event => offlineEvents.push('complete:' + event.renderedBuffer.length);
+        context.startRendering().then(buffer => {
+          offlineEvents.push('promise:' + context.state + ':' + buffer.numberOfChannels);
+          globalThis.offlineSample = buffer.getChannelData(0)[12];
+          globalThis.offlineSilent = buffer.getChannelData(0)[300];
+        });
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "offlineEvents.join(',')"),
+        "complete:480,promise:closed:2"
+    );
+    assert!((eval_num(&mut runtime, "offlineSample") - 0.5).abs() < 0.0001);
+    assert_eq!(eval_num(&mut runtime, "offlineSilent"), 0.0);
+}
+
+#[test]
+fn offline_audio_context_suspends_on_a_render_quantum_and_decodes_pcm_wave() {
+    let mut runtime = runtime_from_html("<html><body></body></html>");
+    runtime.eval(r#"
+        globalThis.offlineOrder = [];
+        const context = new OfflineAudioContext(1, 384, 48000);
+        context.suspend(129 / 48000).then(() => {
+          offlineOrder.push('suspended:' + context.currentTime + ':' + context.state);
+          return context.resume();
+        }).then(() => offlineOrder.push('resumed'));
+        context.startRendering().then(() => offlineOrder.push('complete:' + context.state));
+
+        const wave = new ArrayBuffer(48);
+        const bytes = new Uint8Array(wave);
+        const view = new DataView(wave);
+        const text = (offset, value) => { for (let index = 0; index < value.length; index++) bytes[offset + index] = value.charCodeAt(index); };
+        text(0, 'RIFF'); view.setUint32(4, 40, true); text(8, 'WAVE'); text(12, 'fmt ');
+        view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+        view.setUint32(24, 8000, true); view.setUint32(28, 16000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+        text(36, 'data'); view.setUint32(40, 4, true); view.setInt16(44, 16384, true); view.setInt16(46, -16384, true);
+        const decoderContext = new OfflineAudioContext(1, 1, 8000);
+        decoderContext.decodeAudioData(wave).then(buffer => globalThis.decodedAudio = [buffer.length, buffer.sampleRate,
+          buffer.getChannelData(0)[0], buffer.getChannelData(0)[1]].join('|'));
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "offlineOrder.join(',')"),
+        "suspended:0.0026666666666666666:suspended,resumed,complete:closed"
+    );
+    assert_eq!(eval_str(&mut runtime, "decodedAudio"), "2|8000|0.5|-0.5");
+}
+
+#[test]
+fn audio_worklet_reuses_the_worklet_runtime_and_registers_nodes() {
+    let mut runtime = runtime_from_html("<html><body></body></html>");
+    runtime.eval(r#"
+        globalThis.workletResult = [];
+        const context = new OfflineAudioContext(1, 128, 48000);
+        const source = encodeURIComponent(`registerProcessor('fixture', class extends AudioWorkletProcessor {
+          process(inputs, outputs) { outputs[0][0].fill(0.25); return true; }
+        })`);
+        context.audioWorklet.addModule('data:text/javascript,' + source)
+          .then(() => {
+            const node = new AudioWorkletNode(context, 'fixture');
+            node.connect(context.destination);
+            workletResult.push(node instanceof AudioNode, node.port instanceof MessagePort,
+              context.audioWorklet.registeredNames.join('|'));
+            return context.startRendering();
+          }).then(buffer => {
+            workletResult.push(buffer.getChannelData(0)[64]);
+          });
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "workletResult.join(',')"),
+        "true,true,fixture,0.25"
+    );
+}
+
+#[test]
 fn notifications_model_permission_and_task_queued_lifecycle() {
     let mut runtime = runtime_from_html("<html><body></body></html>");
     assert_eq!(eval_str(&mut runtime, "Notification.permission"), "default");
