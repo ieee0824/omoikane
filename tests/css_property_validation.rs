@@ -397,3 +397,47 @@ fn malformed_shorthands_cannot_fall_back_to_generic_computed_values() {
         Some(true)
     );
 }
+
+#[test]
+fn cssom_computation_source_preserves_css_utf16_preprocessing() {
+    let mut runtime =
+        JsRuntime::with_document(TreeBuilder::parse("<body></body>").document()).unwrap();
+    let actual = runtime
+        .eval(
+            r#"(() => {
+        const cases = [
+            [String.fromCharCode(0xd800), '\ufffd'],
+            [String.fromCharCode(0xdc00), '\ufffd'],
+            [String.fromCharCode(0xd83d, 0xde00), '\ud83d\ude00'],
+        ];
+        for (const [input, expected] of cases) {
+            for (const closed of [true, false]) {
+                const value = 'fn("' + input + '"' + (closed ? ')' : '');
+                const control = document.body.appendChild(document.createElement('div'));
+                control.setAttribute('style', '--probe:' + value);
+                const wanted = getComputedStyle(control).getPropertyValue('--probe');
+                if (!wanted.includes(expected)) return 'control';
+                for (const mode of ['setter', 'cssText']) {
+                    const element = document.body.appendChild(document.createElement('div'));
+                    if (mode === 'setter') element.style.setProperty('--probe', value);
+                    else element.style.cssText = '--probe:' + value;
+                    if (getComputedStyle(element).getPropertyValue('--probe') !== wanted)
+                        return mode + ':' + closed;
+                }
+            }
+            const element = document.body.appendChild(document.createElement('div'));
+            element.style.setProperty('--plain', input);
+            element.style.wordSpacing = '0';
+            if (getComputedStyle(element).getPropertyValue('--plain') !== expected)
+                return 'shared source';
+            if (getComputedStyle(element).wordSpacing !== '0px') return 'word spacing';
+        }
+        return 'ok';
+    })()"#,
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(actual, "ok");
+}

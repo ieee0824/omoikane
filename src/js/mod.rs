@@ -23661,6 +23661,50 @@ fn match_media_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     })
 }
 
+/// Completes CSSOM component values before they are embedded in a declaration list.
+fn close_style_value_functions_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    // CSS input preprocessing replaces unpaired UTF-16 surrogates with U+FFFD.
+    let value = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_lossy();
+    let completed = crate::css::style::close_unfinished_functions(&value);
+    Ok(js_string!(completed).into())
+}
+
+fn set_style_computation_source_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    let source = args
+        .get(1)
+        .filter(|value| !value.is_null() && !value.is_undefined())
+        .map(|value| {
+            value
+                .to_string(context)
+                .map(|value| value.to_std_string_lossy())
+        })
+        .transpose()?;
+    with_node_render_mutation(&[node_id], |state| {
+        let node = state
+            .borrow()
+            .get_node(node_id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        node.set_style_computation_source(source);
+        state.borrow_mut().mark_style_dirty_for_node(&node);
+        Ok(JsValue::undefined())
+    })
+}
+
 fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, node_id)?;
@@ -23778,49 +23822,6 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
                     csp_source.as_ref(),
                 );
         }
-        Ok(JsValue::undefined())
-    })
-}
-
-/// Completes CSSOM component values before they are embedded in a declaration list.
-fn close_style_value_functions_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let value = args
-        .first()
-        .cloned()
-        .unwrap_or_default()
-        .to_string(context)?
-        .to_std_string_escaped();
-    let completed = crate::css::style::close_unfinished_functions(&value);
-    Ok(js_string!(completed).into())
-}
-
-fn set_style_computation_source_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let node_id = parse_node_id(args.first(), context)?;
-    ensure_same_origin_node(context, node_id)?;
-    let source = args
-        .get(1)
-        .filter(|value| !value.is_null() && !value.is_undefined())
-        .map(|value| {
-            value
-                .to_string(context)
-                .map(|value| value.to_std_string_escaped())
-        })
-        .transpose()?;
-    with_node_render_mutation(&[node_id], |state| {
-        let node = state
-            .borrow()
-            .get_node(node_id)
-            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
-        node.set_style_computation_source(source);
-        state.borrow_mut().mark_style_dirty_for_node(&node);
         Ok(JsValue::undefined())
     })
 }
