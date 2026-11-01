@@ -128,6 +128,59 @@ fn webassembly_promise_and_streaming_entry_points() {
 }
 
 #[test]
+fn webassembly_tag_exception_and_supported_proposals() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let value = runtime
+        .eval(
+            r#"
+            (() => {
+              const tag = new WebAssembly.Tag({ parameters: ["i32", "i64", "f32", "f64"] });
+              const exception = new WebAssembly.Exception(tag, [0xffffffff, 7n, 1.1, 2.5]);
+              const other = new WebAssembly.Tag({ parameters: tag.type().parameters });
+              const simdBytes = Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,6,1,96,1,127,1,127,
+                3,2,1,0,
+                7,8,1,4,115,105,109,100,0,0,
+                10,11,1,9,0,32,0,253,17,253,163,1,11
+              );
+              const referenceBytes = Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,5,1,96,0,1,127,
+                3,2,1,0,
+                7,13,1,9,114,101,102,101,114,101,110,99,101,0,0,
+                10,7,1,5,0,208,111,209,11
+              );
+              let simd, reference;
+              try { simd = new WebAssembly.Instance(new WebAssembly.Module(simdBytes)); }
+              catch (error) { return `simd: ${error.name}: ${error.message}`; }
+              try { reference = new WebAssembly.Instance(new WebAssembly.Module(referenceBytes)); }
+              catch (error) { return `reference: ${error.name}: ${error.message}`; }
+              return JSON.stringify({
+                types: tag.type().parameters.join(","),
+                i32: exception.getArg(tag, 0),
+                i64: String(exception.getArg(tag, 1)),
+                f32: exception.getArg(tag, 2),
+                f64: exception.getArg(tag, 3),
+                same: exception.is(tag),
+                other: exception.is(other),
+                tagBrand: Object.prototype.toString.call(tag),
+                exceptionBrand: Object.prototype.toString.call(exception),
+                simdTrue: simd.exports.simd(1),
+                simdFalse: simd.exports.simd(0),
+                reference: reference.exports.reference(),
+              });
+            })()
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        r#"{"types":"i32,i64,f32,f64","i32":-1,"i64":"7","f32":1.100000023841858,"f64":2.5,"same":true,"other":false,"tagBrand":"[object WebAssembly.Tag]","exceptionBrand":"[object WebAssembly.Exception]","simdTrue":1,"simdFalse":0,"reference":1}"#
+    );
+}
+
+#[test]
 fn webassembly_compilation_obeys_its_distinct_csp_permission() {
     let bytes = "Uint8Array.of(0,97,115,109,1,0,0,0)";
     let mut blocked = runtime_at_document_url("https://example.test/");
