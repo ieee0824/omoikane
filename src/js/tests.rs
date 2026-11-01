@@ -3296,6 +3296,67 @@ fn canvas_2d_pixels_transform_clip_image_data_draw_image_and_png() {
 }
 
 #[test]
+fn canvas_origin_clean_taints_propagates_and_resets() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut image = crate::paint::Canvas::new(1, 1);
+    image.set_pixel(0, 0, crate::paint::Color::rgb(1, 2, 3));
+    let png = image.encode_png();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 1024];
+        let _ = std::io::Read::read(&mut stream, &mut request);
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            png.len()
+        )
+        .unwrap();
+        std::io::Write::write_all(&mut stream, &png).unwrap();
+    });
+
+    let mut runtime = runtime_at_document_url("http://origin.test/page");
+    let result = eval_str(
+        &mut runtime,
+        &format!(
+            r#"(() => {{
+              const name = call => {{ try {{ call(); return 'none'; }} catch (error) {{ return error.name; }} }};
+              const image = document.createElement('img');
+              image.src = 'http://{address}/image.png';
+              if (image.crossOrigin !== null) return 'crossOrigin default';
+              const source = document.createElement('canvas'); source.width = source.height = 1;
+              const patternBefore = source.getContext('2d').createPattern(source, 'repeat');
+              source.getContext('2d').drawImage(image, 0, 0);
+              const target = document.createElement('canvas'); target.width = target.height = 1;
+              target.getContext('2d').drawImage(source, 0, 0);
+              const errors = [name(() => target.getContext('2d').getImageData(0, 0, 1, 1)),
+                name(() => target.toDataURL()), name(() => target.toBlob(() => {{}})),
+                name(() => target.captureStream())];
+              target.width = 1;
+              errors.push(name(() => target.toDataURL()));
+              const patternTarget = document.createElement('canvas');
+              const patternContext = patternTarget.getContext('2d');
+              patternContext.fillStyle = patternBefore; patternContext.fillRect(0, 0, 1, 1);
+              errors.push(name(() => patternTarget.toDataURL()));
+              const taintedPattern = source.getContext('2d').createPattern(source, 'repeat');
+              const clearTarget = document.createElement('canvas');
+              const clearContext = clearTarget.getContext('2d');
+              clearContext.fillStyle = taintedPattern; clearContext.clearRect(0, 0, 1, 1);
+              errors.push(name(() => clearTarget.toDataURL()));
+              patternContext.fillStyle = taintedPattern; patternContext.fillRect(0, 0, 1, 1);
+              errors.push(name(() => patternTarget.toDataURL()));
+              return errors.join();
+            }})()"#
+        ),
+    );
+    server.join().unwrap();
+    assert_eq!(
+        result,
+        "SecurityError,SecurityError,SecurityError,SecurityError,none,none,none,SecurityError"
+    );
+}
+
+#[test]
 fn canvas_clear_rect_clips_large_untransformed_rectangles() {
     let mut runtime = JsRuntime::new().unwrap();
     let result = eval_str(
