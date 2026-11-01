@@ -18,7 +18,8 @@ import subprocess
 import time
 
 
-PARTITIONS = ("unit-build", "integration-0", "integration-1")
+INTEGRATION_PARTITIONS = 4
+PARTITIONS = ("unit-build", *(f"integration-{i}" for i in range(INTEGRATION_PARTITIONS)))
 # These are the existing normal CI's manual utilities, not regression tests.
 MANUAL_FIXTURES = (
     "refresh_acid2_baseline_png",
@@ -101,11 +102,11 @@ def inventory_from_metadata(metadata, root, package_name="omoikane"):
 
 
 def integration_partition(inventory, index):
-    if index not in (0, 1):
-        raise ValueError("integration partition must be 0 or 1")
+    if index not in range(INTEGRATION_PARTITIONS):
+        raise ValueError("invalid integration partition index")
     targets = [t for t in inventory["targets"] if t["kind"] == "test" and t["test"]]
     return [t for t in targets
-            if int.from_bytes(hashlib.sha256(t["name"].encode()).digest()[:8], "big") % 2 == index]
+            if int.from_bytes(hashlib.sha256(t["name"].encode()).digest()[:8], "big") % INTEGRATION_PARTITIONS == index]
 
 
 def test_arguments():
@@ -239,7 +240,8 @@ def snapshot(output, stage):
                "filesystem": {"total": usage.total, "used": usage.used, "free": usage.free},
                "sizes": sizes, "image_version": os.environ.get("ImageVersion"),
                "cargo_incremental": os.environ.get("CARGO_INCREMENTAL"),
-               "cache": {"shared_key": "workspace-v2", "exact_hit": os.environ.get("OMOIKANE_CI_CACHE_HIT")}})
+               "cache": {"shared_key": "workspace-v2", "lookup_only": True, "restored": False,
+                         "lookup_exact_hit": os.environ.get("OMOIKANE_CI_CACHE_HIT")}})
 
 
 def capacity_limit(value):
@@ -409,7 +411,8 @@ def aggregate(inputs, partitions, output, partition_job_result="success"):
     report = {"identity": prepared["identity"], "checks": complete,
               "full_suite": all(complete.values()), "passed_by_partition_step": passed,
               "maximum_target_gib": maximum_target_gib,
-              "integration_targets": sum(len(integration_partition(inventory, i)) for i in (0, 1))}
+              "integration_targets": sum(len(integration_partition(inventory, i))
+                                         for i in range(INTEGRATION_PARTITIONS))}
     write_json(output / "gate.json", report)
     return 0 if report["full_suite"] else 1
 

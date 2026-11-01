@@ -76,7 +76,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        partition: [unit-build, integration-0, integration-1]
+        partition: [unit-build, integration-0, integration-1, integration-2, integration-3]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -90,9 +90,9 @@ jobs:
         run: |
           mkdir -p .artifacts/normal-test-results
           python3 scripts/select-gate-artifacts.py .artifacts/normal-test-input-attempts .artifacts/normal-test-inputs --prefix normal-test- > .artifacts/normal-test-results/input-${{ matrix.partition }}-selection.json
-      - name: Record capacity before restoring cache
+      - name: Record capacity before cache lookup
         run: python3 scripts/ci-test-partitions.py space .artifacts/normal-test-results/space-${{ matrix.partition }} before-cache
-      - name: Bind the empty target before restoring the existing Cargo cache
+      - name: Bind the empty target before checking the existing Cargo cache
         run: |
           python3 scripts/cargo-space-guard.py run --required-free-gib 2 --maximum-target-gib 10 -- true
           python3 scripts/ci-test-partitions.py save-cache-binding .artifacts/normal-test-results/space-${{ matrix.partition }}/target-binding.json
@@ -103,7 +103,10 @@ jobs:
           shared-key: workspace-v2
           save-if: ${{ github.ref == 'refs/heads/main' && matrix.partition == 'unit-build' }}
           cache-workspace-crates: true
-      - name: Record capacity after restoring cache
+          # Do not expand an unbounded old archive outside the capacity guard.
+          # Preserve the existing key and main-only writer for sibling jobs.
+          lookup-only: true
+      - name: Record capacity after cache lookup
         env:
           OMOIKANE_CI_CACHE_HIT: ${{ steps.normal-cache.outputs.cache-hit }}
         run: python3 scripts/ci-test-partitions.py space .artifacts/normal-test-results/space-${{ matrix.partition }} after-cache

@@ -98,12 +98,25 @@ class InventoryTests(unittest.TestCase):
             ci.inventory_from_metadata(metadata, Path("/repo"))
 
 
+class CacheTelemetryTests(unittest.TestCase):
+    def test_existing_key_is_not_reported_as_a_restored_archive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.dict(os.environ, {"CARGO_TARGET_DIR": str(root / "missing"),
+                                              "OMOIKANE_CI_CACHE_HIT": "true"}):
+                ci.snapshot(root / "report", "probe")
+            cache = json.loads((root / "report/probe.json").read_text())["cache"]
+            self.assertTrue(cache["lookup_only"])
+            self.assertFalse(cache["restored"])
+            self.assertEqual(cache["lookup_exact_hit"], "true")
+
+
 class PlanTests(unittest.TestCase):
     def setUp(self):
         self.inventory = ci.inventory_from_metadata(package(), Path("/repo"))
 
     def test_every_default_integration_executes_once_without_disabled_targets(self):
-        parts = [ci.integration_partition(self.inventory, index) for index in (0, 1)]
+        parts = [ci.integration_partition(self.inventory, index) for index in range(ci.INTEGRATION_PARTITIONS)]
         names = [t["name"] for part in parts for t in part]
         self.assertEqual(sorted(names), sorted([f"case_{index}" for index in range(20)] + ["jit_differential"]))
         self.assertEqual(len(names), len(set(names)))
@@ -115,11 +128,11 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(selected, [t["name"] for t in targets])
 
     def test_unrelated_new_target_does_not_move_existing_targets_between_runners(self):
-        previous = [{t["name"] for t in ci.integration_partition(self.inventory, i)} for i in (0, 1)]
+        previous = [{t["name"] for t in ci.integration_partition(self.inventory, i)} for i in range(ci.INTEGRATION_PARTITIONS)]
         modified = copy.deepcopy(self.inventory)
         modified["targets"].append({"name": "new_case", "kind": "test", "test": True,
                                     "doctest": False, "source": "tests/new_case.rs"})
-        for index in (0, 1):
+        for index in range(ci.INTEGRATION_PARTITIONS):
             current = {t["name"] for t in ci.integration_partition(modified, index)}
             self.assertEqual(current - {"new_case"}, previous[index])
 
@@ -158,7 +171,7 @@ class PlanTests(unittest.TestCase):
                 self.assertEqual(len(skipped), 12)
 
     def test_invalid_and_empty_partitions_fail_instead_of_green_empty_work(self):
-        for name in ["integration-2", "unknown"]:
+        for name in [f"integration-{ci.INTEGRATION_PARTITIONS}", "unknown"]:
             with self.assertRaises(ValueError):
                 ci.partition_plan(self.inventory, name)
         self.inventory["targets"] = []
@@ -425,7 +438,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("fail-fast: false", self.normal)
 
     def test_every_partition_uses_guarded_execution_and_preserves_all_artifacts(self):
-        self.assertIn("partition: [unit-build, integration-0, integration-1]", self.normal)
+        self.assertIn("partition: [unit-build, integration-0, integration-1, integration-2, integration-3]", self.normal)
         self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/target", self.normal)
         self.assertIn('CARGO_INCREMENTAL: "0"', self.normal)
         self.assertIn("ci-test-partitions.py run ${{ matrix.partition }}", self.normal)
@@ -438,6 +451,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("name: js-benchmark-report-attempt-${{ github.run_attempt }}", self.aggregate)
 
     def test_cache_has_only_the_main_unit_writer_and_capacity_evidence(self):
+        self.assertIn("lookup-only: true", self.normal)
         self.assertIn("github.ref == 'refs/heads/main' && matrix.partition == 'unit-build'", self.normal)
         self.assertLess(self.normal.index("Bind the empty target"), self.normal.index("uses: Swatinem/rust-cache@v2"))
         self.assertIn("cargo-space-guard.py run --required-free-gib 2 --maximum-target-gib 10 -- true", self.normal)

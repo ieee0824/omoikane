@@ -13,8 +13,7 @@ Gate4の分割（#1629）やActionsへのcache保存予算（#1451）とは別�
 | partition | 対象 |
 | --- | --- |
 | `unit-build` | library・有効なbinary・`test=true` exampleのテスト、compile-only example、doc test、Gate2、locked build |
-| `integration-0` | 統合テスト名のSHA-256による固定分割の前半 |
-| `integration-1` | 同じ分割の後半 |
+| `integration-0`〜`integration-3` | 統合テスト名のSHA-256先頭8 byte（big-endian）を4で割った余りによる固定分割 |
 
 統合テストの追加で既存の対象は別partitionへ移らない。新しいtargetはmetadataから
 自動で加わる。GUIなどrequired-featureが通常実行で有効でないtargetは除外理由を
@@ -52,7 +51,7 @@ prepareでrevision・Rust toolchain・lockfile hash・tracked diff hash・対象
 小さなローカルfixtureでは上限を下げられるが、10 GiBを超えて緩めることはできない。
 実CIでの完走と容量の確認は、この構成を導入しただけでは完了扱いにしない。
 
-cache復元前後・font導入後・partition終了時にはfilesystemとtarget/Cargo homeの
+cache lookup前後・font導入後・partition終了時にはfilesystemとtarget/Cargo homeの
 容量を保存する。各実行段階の前後にもtargetと空き容量を記録する。`du`は10秒で
 打ち切り、その場合は測定不能と記録する。テストやJSの期限は緩和しない。
 
@@ -63,14 +62,22 @@ cache復元前後・font導入後・partition終了時にはfilesystemとtarget/
 中身はpartition別のディレクトリで、元ログや画像を上書きして混ぜない。
 JS benchmark artifactも`js-benchmark-report-attempt-N`になる。
 
-cacheは従来の`workspace-v2`を復元し、mainの`unit-build`だけが保存する。
-統合テストpartitionは保存主体を増やさない。
+cacheは従来の`workspace-v2`をlookup-onlyで確認し、mainの`unit-build`だけが保存する。
+normal partitionでは既存archiveを展開しないため、展開中にguardの外で空き容量を
+使い切る経路を避ける。compile cacheの利益は失われるので、60分以内の完走は
+実CIで再確認する。保存キー・保存主体は維持し、他の既存jobの復元経路を変えない。
+telemetryは`lookup_only=true`・`restored=false`とkeyの存在`lookup_exact_hit`を分け、
+cache-hit=trueをarchive復元済みとは扱わない。統合テストpartitionは保存主体を増やさない。
 成功した旧通常CIと同じ`CARGO_INCREMENTAL=0`をjob側でも明示し、容量記録に含める。
-旧cacheにはguardのworktree bindingが無い場合があるため、復元前の空targetを
-guardで初期化する。rust-cacheはpartial hit時の整理でbindingも消すため、cache外へ
+lookup前の空targetをguardで初期化する。lookup-onlyでもrust-cacheはpartial hit時の
+整理でbindingを消すため、cache外へ
 保存した自分のbindingだけを戻す。別target・別worktree・別UIDや既存の異なるbindingを
-上書きせず、復元後もguardの所有者・worktree・容量検査を必ず再実行する。
+上書きせず、lookup後もguardの所有者・worktree・容量検査を必ず再実行する。
 [cache側の整理処理](https://github.com/Swatinem/rust-cache/blob/v2/src/cleanup.ts)を参照。
+
+4分割の根拠は、fresh default-only x86 targetの実測で2分割の一方がbinary単独でも
+10 GiBを超えたことにある。4分割のbinaryと共通物の机上合計は約6.76〜7.59 GiBだが、
+link時の一時領域・cache保存の圧縮領域・実CIのpeakを証明する値ではない。
 
 ## ローカル検証
 
