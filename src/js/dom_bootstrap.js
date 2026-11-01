@@ -204,6 +204,9 @@ let omoikaneUserActivationState;
   const nativeWasmValidate = globalThis.__omoikane_wasm_validate;
   const nativeWasmCompile = globalThis.__omoikane_wasm_compile;
   const nativeWasmModuleMetadata = globalThis.__omoikane_wasm_module_metadata;
+  const nativeWasmInstantiate = globalThis.__omoikane_wasm_instantiate;
+  const nativeWasmInstanceExports = globalThis.__omoikane_wasm_instance_exports;
+  const nativeWasmCall = globalThis.__omoikane_wasm_call;
   const nativeArrayBufferInfo = globalThis.__omoikane_array_buffer_info;
   const nativeCloneArrayBuffer = globalThis.__omoikane_clone_array_buffer;
   const nativeTransferArrayBuffer = globalThis.__omoikane_transfer_array_buffer;
@@ -40256,6 +40259,7 @@ let omoikaneUserActivationState;
   };
   {
     const moduleHandles = new WeakMap();
+    const instanceExports = new WeakMap();
     class CompileError extends Error {
       constructor(message) { super(message); this.name = "CompileError"; }
     }
@@ -40297,9 +40301,64 @@ let omoikaneUserActivationState;
       Object.defineProperty(WasmModule, name, { ...Object.getOwnPropertyDescriptor(WasmModule, name), enumerable: true });
     }
     Object.defineProperty(WasmModule.prototype, Symbol.toStringTag, { value: "WebAssembly.Module", configurable: true });
+    class WasmInstance {
+      constructor(module, imports = undefined) {
+        const moduleHandle = moduleHandles.get(module);
+        if (moduleHandle === undefined) throw new TypeError("Argument 0 must be a WebAssembly.Module");
+        const descriptors = WasmModule.imports(module);
+        const signatures = JSON.parse(nativeWasmModuleMetadata(moduleHandle, "runtimeImports", ""));
+        if (descriptors.length && (imports === null || (typeof imports !== "object" && typeof imports !== "function"))) {
+          throw new TypeError("WebAssembly imports argument must be an object");
+        }
+        const values = descriptors.map((descriptor, index) => {
+          const namespace = imports[descriptor.module];
+          if (namespace === null || (typeof namespace !== "object" && typeof namespace !== "function")) {
+            throw new TypeError(`WebAssembly import module ${descriptor.module} must be an object`);
+          }
+          const value = namespace[descriptor.name];
+          if (descriptor.kind !== "function") return value;
+          if (typeof value !== "function") throw new LinkError(`WebAssembly import ${descriptor.module}.${descriptor.name} must be callable`);
+          if (signatures[index].results <= 1) return value;
+          return (...args) => collectHTMLRoots(value(...args));
+        });
+        let handle;
+        try { handle = nativeWasmInstantiate(moduleHandle, values); }
+        catch (error) {
+          if (error instanceof TypeError) throw new LinkError(error.message);
+          if (error instanceof Error && error.message.startsWith("__WASM_LINK__")) throw new LinkError(error.message.slice(13));
+          if (error instanceof Error && error.message.startsWith("__WASM_RUNTIME__")) throw new RuntimeError(error.message.slice(16));
+          throw error;
+        }
+        const exports = Object.create(null);
+        for (const descriptor of JSON.parse(nativeWasmInstanceExports(handle))) {
+          if (descriptor.kind !== "function") continue;
+          const fn = (...args) => {
+            try { return nativeWasmCall(handle, descriptor.name, args); }
+            catch (error) {
+              if (error instanceof TypeError || error instanceof RangeError) throw error;
+              if (error instanceof Error && error.message.startsWith("__WASM_RUNTIME__")) throw new RuntimeError(error.message.slice(16));
+              throw error;
+            }
+          };
+          Object.defineProperty(fn, "name", { value: descriptor.name, configurable: true });
+          Object.defineProperty(fn, "length", { value: descriptor.params, configurable: true });
+          Object.defineProperty(exports, descriptor.name, { value: fn, enumerable: true });
+        }
+        Object.preventExtensions(exports);
+        instanceExports.set(this, exports);
+      }
+      get exports() {
+        const exports = instanceExports.get(this);
+        if (exports === undefined) throw new TypeError("WebAssembly.Instance.exports called on incompatible receiver");
+        return exports;
+      }
+    }
+    Object.defineProperty(WasmInstance, "name", { value: "Instance" });
+    Object.defineProperty(WasmInstance.prototype, Symbol.toStringTag, { value: "WebAssembly.Instance", configurable: true });
     const WebAssembly = {};
     Object.defineProperties(WebAssembly, {
       Module: { value: WasmModule, writable: true, configurable: true },
+      Instance: { value: WasmInstance, writable: true, configurable: true },
       CompileError: { value: CompileError, writable: true, configurable: true },
       LinkError: { value: LinkError, writable: true, configurable: true },
       RuntimeError: { value: RuntimeError, writable: true, configurable: true },

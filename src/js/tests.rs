@@ -92,6 +92,85 @@ fn webassembly_validates_modules_and_exposes_owned_metadata() {
 }
 
 #[test]
+fn webassembly_instances_call_exported_and_imported_functions() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let value = runtime
+        .eval(
+            r#"
+            (() => {
+              const addModule = new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,7,1,96,2,127,127,1,127,
+                3,2,1,0,
+                7,7,1,3,97,100,100,0,0,
+                10,9,1,7,0,32,0,32,1,106,11
+              ));
+              const instance = new WebAssembly.Instance(addModule);
+              const importedModule = new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,6,1,96,1,127,1,127,
+                2,9,1,3,101,110,118,1,102,0,0,
+                7,7,1,3,114,117,110,0,0
+              ));
+              let seen = 0;
+              const imported = new WebAssembly.Instance(importedModule, { env: { f(value) { seen = value; return value + 1; } } });
+              const sentinel = new Error("sentinel");
+              const throwing = new WebAssembly.Instance(importedModule, { env: { f() { throw sentinel; } } });
+              let reentrantModule;
+              try { reentrantModule = new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,6,1,96,1,127,1,127,
+                2,9,1,3,101,110,118,1,102,0,0,
+                3,2,1,0,
+                7,18,2,3,114,117,110,0,0,8,105,100,101,110,116,105,116,121,0,1,
+                10,6,1,4,0,32,0,11
+              )); } catch (error) { return JSON.stringify({ compile: `${error.name}:${error.message}` }); }
+              let reentrant;
+              reentrant = new WebAssembly.Instance(reentrantModule, { env: { f(value) { return reentrant.exports.identity(value) + 1; } } });
+              const numeric = new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,21,4,96,1,126,1,126,96,1,125,1,125,96,1,124,1,124,96,0,2,127,126,
+                3,5,4,0,1,2,3,
+                7,27,4,3,105,54,52,0,0,3,102,51,50,0,1,3,102,54,52,0,2,5,109,117,108,116,105,0,3,
+                10,23,4,4,0,32,0,11,4,0,32,0,11,4,0,32,0,11,6,0,65,7,66,9,11
+              )));
+              const trap = new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,1,4,1,96,0,0,3,2,1,0,7,8,1,4,98,111,111,109,0,0,10,5,1,3,0,0,11
+              )));
+              const spin = new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,1,4,1,96,0,0,3,2,1,0,7,8,1,4,115,112,105,110,0,0,10,9,1,7,0,3,64,12,0,11,11
+              )));
+              return JSON.stringify({
+                sum: instance.exports.add(20, 22),
+                length: instance.exports.add.length,
+                name: instance.exports.add.name,
+                imported: imported.exports.run(8),
+                seen,
+                exception: (() => { try { throwing.exports.run(1); } catch (error) { return error === sentinel; } })(),
+                reentrant: reentrant.exports.run(11),
+                i64: String(numeric.exports.i64(9223372036854775807n)),
+                f32: numeric.exports.f32(1.25),
+                f64: numeric.exports.f64(2.5),
+                multi: numeric.exports.multi().map(String).join(","),
+                trap: (() => { try { trap.exports.boom(); } catch (error) { return error instanceof WebAssembly.RuntimeError; } })(),
+                fuel: (() => { try { spin.exports.spin(); } catch (error) { return error instanceof WebAssembly.RuntimeError; } })(),
+                brand: Object.prototype.toString.call(instance),
+                nullPrototype: Object.getPrototypeOf(instance.exports) === null,
+                stable: instance.exports === instance.exports,
+                immutable: !Object.isExtensible(instance.exports),
+                receiver: (() => { try { return Object.getOwnPropertyDescriptor(WebAssembly.Instance.prototype, "exports").get.call({}); } catch (e) { return e instanceof TypeError; } })(),
+              });
+            })()
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        r#"{"sum":42,"length":2,"name":"add","imported":9,"seen":8,"exception":true,"reentrant":12,"i64":"9223372036854775807","f32":1.25,"f64":2.5,"multi":"7,9","trap":true,"fuel":true,"brand":"[object WebAssembly.Instance]","nullPrototype":true,"stable":true,"immutable":true,"receiver":true}"#
+    );
+}
+
+#[test]
 fn native_host_call_identifies_the_immediate_javascript_caller_realm() {
     let mut context = Context::default();
     context
