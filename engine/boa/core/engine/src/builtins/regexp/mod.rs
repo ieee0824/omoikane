@@ -1029,12 +1029,11 @@ impl RegExp {
         sticky: bool,
     ) -> Option<regress::Match> {
         match input.as_str().variant() {
-            JsStrVariant::Latin1(_) => {
-                let units = input.to_vec();
+            JsStrVariant::Latin1(units) => {
                 if sticky {
-                    matcher.match_at_ucs2(&units, start)
+                    matcher.match_at_latin1(units, start)
                 } else {
-                    matcher.find_from_ucs2(&units, start).next()
+                    matcher.find_from_latin1(units, start).next()
                 }
             }
             JsStrVariant::Utf16(units) if full_unicode => {
