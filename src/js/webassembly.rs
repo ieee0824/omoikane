@@ -8,12 +8,77 @@ use wasmi::{
     Caller, Config, Engine, Extern, ExternRef, ExternType, Func, Global, Instance, Linker, Memory,
     MemoryType, Module, Mutability, Nullable, Ref, RefType, Store, Table, TableType, Val, ValType,
 };
-use wasmparser::{ExternalKind, Parser, Payload, TypeRef};
+use wasmparser::{ExternalKind, Operator, Parser, Payload, TypeRef};
+
+#[path = "wasm_legacy_eh.rs"]
+mod legacy_eh;
 
 const MAX_MODULE_BYTES: usize = 64 * 1024 * 1024;
 const CALL_FUEL: u64 = 10_000_000;
 const LINK_ERROR_PREFIX: &str = "__WASM_LINK__";
 const RUNTIME_ERROR_PREFIX: &str = "__WASM_RUNTIME__";
+const EXCEPTION_ERROR_PREFIX: &str = "__WASM_EXCEPTION__";
+
+fn module_uses_exceptions(bytes: &[u8]) -> bool {
+    Parser::new(0)
+        .parse_all(bytes)
+        .any(|payload| match payload {
+            Ok(Payload::TagSection(_)) => true,
+            Ok(Payload::ImportSection(imports)) => imports.into_iter().any(|import| {
+                import
+                    .map(|import| matches!(import.ty, TypeRef::Tag(_)))
+                    .unwrap_or(false)
+            }),
+            Ok(Payload::CodeSectionEntry(body)) => body
+                .get_operators_reader()
+                .map(|mut reader| {
+                    while !reader.eof() {
+                        if matches!(
+                            reader.read(),
+                            Ok(Operator::Try { .. }
+                                | Operator::TryTable { .. }
+                                | Operator::Catch { .. }
+                                | Operator::CatchAll
+                                | Operator::Throw { .. }
+                                | Operator::ThrowRef
+                                | Operator::Rethrow { .. }
+                                | Operator::Delegate { .. })
+                        ) {
+                            return true;
+                        }
+                    }
+                    false
+                })
+                .unwrap_or(false),
+            _ => false,
+        })
+}
+
+fn module_uses_legacy_exceptions(bytes: &[u8]) -> bool {
+    Parser::new(0)
+        .parse_all(bytes)
+        .any(|payload| match payload {
+            Ok(Payload::CodeSectionEntry(body)) => body
+                .get_operators_reader()
+                .map(|mut reader| {
+                    while !reader.eof() {
+                        if matches!(
+                            reader.read(),
+                            Ok(Operator::Try { .. }
+                                | Operator::Catch { .. }
+                                | Operator::CatchAll
+                                | Operator::Rethrow { .. }
+                                | Operator::Delegate { .. })
+                        ) {
+                            return true;
+                        }
+                    }
+                    false
+                })
+                .unwrap_or(false),
+            _ => false,
+        })
+}
 
 thread_local! {
     static ACTIVE_WASM_CONTEXT: std::cell::Cell<*mut Context> = const {
@@ -28,7 +93,9 @@ thread_local! {
 /// types and lifetimes do not leak through the JavaScript API.
 pub(super) struct State {
     engine: Engine,
+    exception_engine: wasmtime::Engine,
     runtime: Rc<RefCell<RealmRuntime>>,
+    exception_runtime: Rc<RefCell<ExceptionRuntime>>,
 }
 
 impl Default for State {
@@ -36,6 +103,10 @@ impl Default for State {
         let mut config = Config::default();
         config.consume_fuel(true);
         let engine = Engine::new(&config);
+        let mut exception_config = wasmtime::Config::new();
+        exception_config.wasm_exceptions(true).consume_fuel(true);
+        let exception_engine = wasmtime::Engine::new(&exception_config)
+            .expect("WebAssembly exception runtime configuration must be valid");
         let store = Store::new(
             &engine,
             StoreData {
@@ -46,6 +117,17 @@ impl Default for State {
         );
         Self {
             engine,
+            exception_runtime: Rc::new(RefCell::new(ExceptionRuntime {
+                store: wasmtime::Store::new(
+                    &exception_engine,
+                    ExceptionStoreData {
+                        callbacks: Vec::new(),
+                        pending_error: None,
+                        roots: Vec::new(),
+                    },
+                ),
+            })),
+            exception_engine,
             runtime: Rc::new(RefCell::new(RealmRuntime { store })),
         }
     }
@@ -57,10 +139,33 @@ impl State {
     }
 
     fn compile(&self, bytes: &[u8]) -> Result<CompiledModule, wasmi::Error> {
-        let module = Module::new(&self.engine, bytes)?;
         let metadata =
             ModuleMetadata::parse(bytes).map_err(|error| wasmi::Error::new(error.to_string()))?;
-        Ok(CompiledModule { module, metadata })
+        match Module::new(&self.engine, bytes) {
+            Ok(module) => Ok(CompiledModule {
+                module: Some(module),
+                exception_module: None,
+                metadata,
+            }),
+            Err(_error) if module_uses_exceptions(bytes) => {
+                let lowered;
+                let runtime_bytes = if module_uses_legacy_exceptions(bytes) {
+                    lowered = legacy_eh::lower(bytes)
+                        .map_err(|error| wasmi::Error::new(error.to_string()))?;
+                    lowered.as_slice()
+                } else {
+                    bytes
+                };
+                let module = wasmtime::Module::new(&self.exception_engine, runtime_bytes)
+                    .map_err(|fallback| wasmi::Error::new(fallback.to_string()))?;
+                Ok(CompiledModule {
+                    module: None,
+                    exception_module: Some(module),
+                    metadata,
+                })
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 
@@ -68,7 +173,9 @@ impl State {
 struct CompiledModule {
     #[allow(dead_code)]
     #[unsafe_ignore_trace]
-    module: Module,
+    module: Option<Module>,
+    #[unsafe_ignore_trace]
+    exception_module: Option<wasmtime::Module>,
     #[unsafe_ignore_trace]
     metadata: ModuleMetadata,
 }
@@ -83,6 +190,16 @@ struct RealmRuntime {
     store: Store<StoreData>,
 }
 
+struct ExceptionStoreData {
+    callbacks: Vec<JsObject>,
+    pending_error: Option<JsError>,
+    roots: Vec<JsValue>,
+}
+
+struct ExceptionRuntime {
+    store: wasmtime::Store<ExceptionStoreData>,
+}
+
 #[derive(Trace, Finalize, boa_engine::JsData)]
 struct CompiledInstance {
     /// Keeps imported JavaScript callables live while Wasmi stores untraced
@@ -93,9 +210,13 @@ struct CompiledInstance {
     #[unsafe_ignore_trace]
     function_export_names: Vec<(String, String)>,
     #[unsafe_ignore_trace]
-    instance: Instance,
+    instance: Option<Instance>,
+    #[unsafe_ignore_trace]
+    exception_instance: Option<wasmtime::Instance>,
     #[unsafe_ignore_trace]
     runtime: Rc<RefCell<RealmRuntime>>,
+    #[unsafe_ignore_trace]
+    exception_runtime: Option<Rc<RefCell<ExceptionRuntime>>>,
     export_handles: boa_gc::GcRefCell<Vec<JsObject>>,
 }
 
@@ -131,6 +252,9 @@ struct RuntimeFunc {
     #[unsafe_ignore_trace]
     function: Func,
 }
+
+#[derive(Trace, Finalize, boa_engine::JsData)]
+struct RuntimeFuncMarker;
 
 impl RuntimeTable {
     fn reference(&self, value: JsValue) -> JsResult<Ref> {
@@ -497,15 +621,26 @@ fn metadata_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
                     .map(|section| section.data.as_slice())
                     .collect::<Vec<_>>(),
             ),
-            "runtimeImports" => serde_json::to_string(
-                &module
-                    .module
-                    .imports()
-                    .map(|import| RuntimeImport {
-                        results: import.ty().func().map_or(0, |ty| ty.results().len()),
-                    })
-                    .collect::<Vec<_>>(),
-            ),
+            "runtimeImports" => {
+                serde_json::to_string(&if let Some(compiled) = module.module.as_ref() {
+                    compiled
+                        .imports()
+                        .map(|import| RuntimeImport {
+                            results: import.ty().func().map_or(0, |ty| ty.results().len()),
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    module
+                        .exception_module
+                        .as_ref()
+                        .expect("compiled module must have a runtime")
+                        .imports()
+                        .map(|import| RuntimeImport {
+                            results: import.ty().func().map_or(0, |ty| ty.results().len()),
+                        })
+                        .collect::<Vec<_>>()
+                })
+            }
             _ => {
                 return Err(JsNativeError::typ()
                     .with_message("Unknown WebAssembly.Module metadata operation")
@@ -607,6 +742,236 @@ fn imported_function(
     )
 }
 
+fn js_to_exception_wasm(
+    value: &JsValue,
+    ty: &wasmtime::ValType,
+    context: &mut Context,
+) -> JsResult<wasmtime::Val> {
+    match ty {
+        wasmtime::ValType::I32 => Ok(wasmtime::Val::I32(value.to_i32(context)?)),
+        wasmtime::ValType::I64 => Ok(wasmtime::Val::I64(value.to_big_int64(context)?)),
+        wasmtime::ValType::F32 => Ok(wasmtime::Val::F32(
+            (value.to_number(context)? as f32).to_bits(),
+        )),
+        wasmtime::ValType::F64 => Ok(wasmtime::Val::F64(value.to_number(context)?.to_bits())),
+        ty if ty.is_externref() && value.is_null_or_undefined() => {
+            Ok(wasmtime::Val::ExternRef(None))
+        }
+        ty if ty.is_funcref() && value.is_null() => Ok(wasmtime::Val::FuncRef(None)),
+        _ => Err(JsNativeError::typ()
+            .with_message("Unsupported WebAssembly exception-runtime value type")
+            .into()),
+    }
+}
+
+fn exception_wasm_to_js(value: &wasmtime::Val) -> JsResult<JsValue> {
+    match value {
+        wasmtime::Val::I32(value) => Ok((*value).into()),
+        wasmtime::Val::I64(value) => Ok(boa_engine::JsBigInt::from(*value).into()),
+        wasmtime::Val::F32(value) => Ok((f32::from_bits(*value) as f64).into()),
+        wasmtime::Val::F64(value) => Ok(f64::from_bits(*value).into()),
+        wasmtime::Val::FuncRef(None)
+        | wasmtime::Val::ExternRef(None)
+        | wasmtime::Val::AnyRef(None)
+        | wasmtime::Val::ExnRef(None)
+        | wasmtime::Val::ContRef(None) => Ok(JsValue::null()),
+        _ => Err(JsNativeError::typ()
+            .with_message("Unsupported WebAssembly exception-runtime value type")
+            .into()),
+    }
+}
+
+fn js_to_exception_call_input(
+    value: &JsValue,
+    ty: &wasmtime::ValType,
+    context: &mut Context,
+    store: &mut wasmtime::Store<ExceptionStoreData>,
+) -> JsResult<wasmtime::Val> {
+    if ty.is_externref() && !value.is_null_or_undefined() {
+        let index = store.data().roots.len();
+        store.data_mut().roots.push(value.clone());
+        let reference = wasmtime::ExternRef::new(&mut *store, index)
+            .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
+        return Ok(wasmtime::Val::ExternRef(Some(reference)));
+    }
+    js_to_exception_wasm(value, ty, context)
+}
+
+fn instantiate_exception_native(
+    compiled: &CompiledModule,
+    import_values: &JsObject,
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let module = compiled
+        .exception_module
+        .as_ref()
+        .expect("exception module dispatch requires an exception module");
+    let runtime = with_host_state(|host| Ok(host.borrow().webassembly.exception_runtime.clone()))?;
+    let mut callbacks = Vec::new();
+    for (index, import) in compiled.metadata.imports.iter().enumerate() {
+        let value = import_values
+            .get(index, context)?
+            .as_object()
+            .ok_or_else(|| {
+                JsNativeError::typ().with_message(format!(
+                    "WebAssembly import {}.{} has an incompatible value",
+                    import.module, import.name
+                ))
+            })?;
+        if import.kind == "function" && !value.is_callable() {
+            return Err(JsNativeError::typ()
+                .with_message(format!(
+                    "WebAssembly import {}.{} must be callable",
+                    import.module, import.name
+                ))
+                .into());
+        }
+        callbacks.push(value);
+    }
+    let mut runtime_ref = runtime.try_borrow_mut().map_err(|_| {
+        JsNativeError::error().with_message("WebAssembly realm is already executing")
+    })?;
+    let callback_offset = runtime_ref.store.data().callbacks.len();
+    runtime_ref
+        .store
+        .data_mut()
+        .callbacks
+        .extend(callbacks.iter().cloned());
+    runtime_ref
+        .store
+        .set_fuel(CALL_FUEL)
+        .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
+    let mut linker: wasmtime::Linker<ExceptionStoreData> = wasmtime::Linker::new(module.engine());
+    for (index, import) in module.imports().enumerate() {
+        match import.ty() {
+            wasmtime::ExternType::Func(ty) => {
+                let callback_index = callback_offset + index;
+                let result_types = ty.results().collect::<Vec<_>>();
+                linker
+                    .func_new(
+                        import.module(),
+                        import.name(),
+                        ty,
+                        move |mut caller, inputs, outputs| {
+                            let callback = caller.data().callbacks[callback_index].clone();
+                            let result = ACTIVE_WASM_CONTEXT.with(|slot| {
+                                let context = slot.get();
+                                if context.is_null() {
+                                    return Err(JsNativeError::error()
+                                        .with_message(
+                                            "WebAssembly callback has no active JavaScript context",
+                                        )
+                                        .into());
+                                }
+                                // SAFETY: ContextGuard limits this pointer to the synchronous call.
+                                let context = unsafe { &mut *context };
+                                let args = inputs
+                                    .iter()
+                                    .map(exception_wasm_to_js)
+                                    .collect::<JsResult<Vec<_>>>()?;
+                                let value = callback.call(&JsValue::undefined(), &args, context)?;
+                                if result_types.is_empty() {
+                                    return Ok(Vec::new());
+                                }
+                                if result_types.len() == 1 {
+                                    return Ok(vec![js_to_exception_wasm(
+                                        &value,
+                                        &result_types[0],
+                                        context,
+                                    )?]);
+                                }
+                                let values = value.as_object().ok_or_else(|| {
+                                    JsNativeError::typ().with_message(
+                                        "WebAssembly multi-value result must be iterable",
+                                    )
+                                })?;
+                                result_types
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(index, ty)| {
+                                        js_to_exception_wasm(
+                                            &values.get(index, context)?,
+                                            ty,
+                                            context,
+                                        )
+                                    })
+                                    .collect()
+                            });
+                            match result {
+                                Ok(values) => {
+                                    outputs.clone_from_slice(&values);
+                                    Ok(())
+                                }
+                                Err(error) => {
+                                    caller.data_mut().pending_error = Some(error);
+                                    Err(wasmtime::Error::msg("JavaScript WebAssembly import threw"))
+                                }
+                            }
+                        },
+                    )
+                    .map_err(|error| {
+                        JsNativeError::error().with_message(format!("{LINK_ERROR_PREFIX}{error}"))
+                    })?;
+            }
+            wasmtime::ExternType::Tag(ty) => {
+                let tag = wasmtime::Tag::new(&mut runtime_ref.store, &ty).map_err(|error| {
+                    JsNativeError::error().with_message(format!("{LINK_ERROR_PREFIX}{error}"))
+                })?;
+                linker
+                    .define(&runtime_ref.store, import.module(), import.name(), tag)
+                    .map_err(|error| {
+                        JsNativeError::error().with_message(format!("{LINK_ERROR_PREFIX}{error}"))
+                    })?;
+            }
+            _ => {
+                return Err(JsNativeError::error()
+                    .with_message(format!(
+                        "{LINK_ERROR_PREFIX}unsupported exception-module import {}.{}",
+                        import.module(),
+                        import.name()
+                    ))
+                    .into());
+            }
+        }
+    }
+    let _guard = ContextGuard::enter(context);
+    let instance = linker
+        .instantiate(&mut runtime_ref.store, module)
+        .map_err(|error| {
+            runtime_ref
+                .store
+                .data_mut()
+                .pending_error
+                .take()
+                .unwrap_or_else(|| {
+                    JsNativeError::error()
+                        .with_message(format!("{LINK_ERROR_PREFIX}{error}"))
+                        .into()
+                })
+        })?;
+    drop(runtime_ref);
+    Ok(JsObject::from_proto_and_data(
+        None,
+        CompiledInstance {
+            callbacks,
+            reexported_imports: compiled.metadata.reexported_imports(),
+            function_export_names: compiled
+                .metadata
+                .exports
+                .iter()
+                .filter(|export| export.kind == "function")
+                .map(|export| (export.name.clone(), export.index.to_string()))
+                .collect(),
+            instance: None,
+            exception_instance: Some(instance),
+            runtime: with_host_state(|host| Ok(host.borrow().webassembly.runtime.clone()))?,
+            exception_runtime: Some(runtime),
+            export_handles: boa_gc::GcRefCell::new(Vec::new()),
+        },
+    )
+    .into())
+}
+
 fn instantiate_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let module_handle = args
         .first()
@@ -619,7 +984,13 @@ fn instantiate_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     let compiled = module_handle
         .downcast_ref::<CompiledModule>()
         .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Module handle"))?;
-    let module = compiled.module.clone();
+    if compiled.exception_module.is_some() {
+        return instantiate_exception_native(&compiled, &import_values, context);
+    }
+    let module = compiled
+        .module
+        .clone()
+        .expect("normal module dispatch requires a Wasmi module");
     let reexported_imports = compiled.metadata.reexported_imports();
     let function_export_names = compiled
         .metadata
@@ -761,8 +1132,10 @@ fn instantiate_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
             callbacks,
             reexported_imports,
             function_export_names,
-            instance,
+            instance: Some(instance),
+            exception_instance: None,
             runtime,
+            exception_runtime: None,
             export_handles: boa_gc::GcRefCell::new(Vec::new()),
         },
     )
@@ -777,9 +1150,52 @@ fn exports_native(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<Js
     let instance = instance_handle
         .downcast_ref::<CompiledInstance>()
         .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Instance handle"))?;
+    if let (Some(exception_instance), Some(exception_runtime)) = (
+        instance.exception_instance,
+        instance.exception_runtime.as_ref(),
+    ) {
+        let mut runtime = exception_runtime.borrow_mut();
+        let exports = exception_instance
+            .exports(&mut runtime.store)
+            .map(|export| (export.name().to_owned(), export.into_extern()))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|(export_name, export)| {
+                let ty = export.ty(&runtime.store);
+                RuntimeExport {
+                    name: export_name.clone(),
+                    kind: match ty {
+                        wasmtime::ExternType::Func(_) => "function",
+                        wasmtime::ExternType::Global(_) => "global",
+                        wasmtime::ExternType::Memory(_) => "memory",
+                        wasmtime::ExternType::Table(_) => "table",
+                        wasmtime::ExternType::Tag(_) => "tag",
+                    },
+                    params: ty.func().map_or(0, |ty| ty.params().len()),
+                    element: None,
+                    function_name: ty.func().and_then(|_| {
+                        instance
+                            .function_export_names
+                            .iter()
+                            .find_map(|(name, function_name)| {
+                                (name == &export_name).then(|| function_name.clone())
+                            })
+                    }),
+                }
+            })
+            .collect::<Vec<_>>();
+        return serde_json::to_string(&exports)
+            .map(|json| js_string!(json).into())
+            .map_err(|error| {
+                JsNativeError::error()
+                    .with_message(error.to_string())
+                    .into()
+            });
+    }
     let runtime = instance.runtime.borrow();
     let exports = instance
         .instance
+        .expect("normal instance must have a Wasmi instance")
         .exports(&runtime.store)
         .map(|export| {
             let ty = export.ty(&runtime.store);
@@ -863,6 +1279,12 @@ fn call_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
     let instance = instance_handle
         .downcast_ref::<CompiledInstance>()
         .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Instance handle"))?;
+    if instance.exception_instance.is_some() {
+        return call_exception_native(&instance, &name, &js_args, context);
+    }
+    let normal_instance = instance
+        .instance
+        .expect("normal call dispatch requires a Wasmi instance");
     sync_memories_to_store(&instance)?;
     let mut runtime = match instance.runtime.try_borrow_mut() {
         Ok(runtime) => runtime,
@@ -878,7 +1300,7 @@ fn call_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
                 // callback's Caller is alive on this thread. Nested JS executes
                 // synchronously and cannot retain this private native hook.
                 let caller = unsafe { &mut *pointer.cast::<Caller<'_, StoreData>>() };
-                let function = instance.instance.get_func(&*caller, &name).ok_or_else(|| {
+                let function = normal_instance.get_func(&*caller, &name).ok_or_else(|| {
                     JsNativeError::typ().with_message("Unknown WebAssembly function export")
                 })?;
                 let ty = function.ty(&*caller);
@@ -919,9 +1341,8 @@ fn call_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
         .store
         .set_fuel(CALL_FUEL)
         .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
-    runtime.store.data_mut().instance = Some(instance.instance);
-    let function = instance
-        .instance
+    runtime.store.data_mut().instance = Some(normal_instance);
+    let function = normal_instance
         .get_func(&runtime.store, &name)
         .ok_or_else(|| JsNativeError::typ().with_message("Unknown WebAssembly function export"))?;
     let ty = function.ty(&runtime.store);
@@ -958,6 +1379,78 @@ fn call_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
             values
                 .iter()
                 .map(wasm_to_js)
+                .collect::<JsResult<Vec<_>>>()?,
+            context,
+        )
+        .into()),
+    }
+}
+
+fn call_exception_native(
+    instance: &CompiledInstance,
+    name: &str,
+    js_args: &JsObject,
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let exception_instance = instance
+        .exception_instance
+        .expect("exception call dispatch requires an exception instance");
+    let runtime = instance
+        .exception_runtime
+        .as_ref()
+        .expect("exception instance must retain its runtime");
+    let mut runtime = runtime.try_borrow_mut().map_err(|_| {
+        JsNativeError::error().with_message("WebAssembly instance is already executing")
+    })?;
+    runtime
+        .store
+        .set_fuel(CALL_FUEL)
+        .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
+    let function = exception_instance
+        .get_func(&mut runtime.store, name)
+        .ok_or_else(|| JsNativeError::typ().with_message("Unknown WebAssembly function export"))?;
+    let ty = function.ty(&runtime.store);
+    let mut inputs = Vec::new();
+    for (index, ty) in ty.params().enumerate() {
+        let value = js_args.get(index, context)?;
+        inputs.push(js_to_exception_call_input(
+            &value,
+            &ty,
+            context,
+            &mut runtime.store,
+        )?);
+    }
+    let mut outputs = ty
+        .results()
+        .map(|ty| {
+            wasmtime::Val::default_for_ty(&ty).ok_or_else(|| {
+                JsNativeError::typ()
+                    .with_message("Unsupported non-nullable WebAssembly exception-runtime result")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let _guard = ContextGuard::enter(context);
+    if let Err(error) = function.call(&mut runtime.store, &inputs, &mut outputs) {
+        if let Some(error) = runtime.store.data_mut().pending_error.take() {
+            return Err(error);
+        }
+        if error.is::<wasmtime::ThrownException>() {
+            let _ = runtime.store.take_pending_exception();
+            return Err(JsNativeError::error()
+                .with_message(EXCEPTION_ERROR_PREFIX)
+                .into());
+        }
+        return Err(JsNativeError::error()
+            .with_message(format!("{RUNTIME_ERROR_PREFIX}{error}"))
+            .into());
+    }
+    match outputs.as_slice() {
+        [] => Ok(JsValue::undefined()),
+        [value] => exception_wasm_to_js(value),
+        values => Ok(JsArray::from_iter(
+            values
+                .iter()
+                .map(exception_wasm_to_js)
                 .collect::<JsResult<Vec<_>>>()?,
             context,
         )
@@ -1104,22 +1597,24 @@ fn export_handle_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         .unwrap_or(&JsValue::undefined())
         .to_string(context)?
         .to_std_string_escaped();
+    if kind == "function" && instance.exception_instance.is_some() {
+        return Ok(JsObject::from_proto_and_data(None, RuntimeFuncMarker).into());
+    }
     let runtime = instance.runtime.borrow();
+    let normal_instance = instance
+        .instance
+        .expect("normal export dispatch requires a Wasmi instance");
     let external = match kind.as_str() {
-        "function" => instance
-            .instance
+        "function" => normal_instance
             .get_func(&runtime.store, &name)
             .map(Extern::Func),
-        "global" => instance
-            .instance
+        "global" => normal_instance
             .get_global(&runtime.store, &name)
             .map(Extern::Global),
-        "memory" => instance
-            .instance
+        "memory" => normal_instance
             .get_memory(&runtime.store, &name)
             .map(Extern::Memory),
-        "table" => instance
-            .instance
+        "table" => normal_instance
             .get_table(&runtime.store, &name)
             .map(Extern::Table),
         _ => None,

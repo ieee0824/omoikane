@@ -40519,6 +40519,9 @@ let omoikaneUserActivationState;
             try { return nativeWasmCall(handle, descriptor.name, args); }
             catch (error) {
               if (error instanceof TypeError || error instanceof RangeError) throw error;
+              if (error instanceof Error && error.message.startsWith("__WASM_EXCEPTION__")) {
+                throw new WasmException(new WasmTag({ parameters: [] }), []);
+              }
               if (error instanceof Error && error.message.startsWith("__WASM_RUNTIME__")) throw new RuntimeError(error.message.slice(16));
               throw error;
             }
@@ -40539,6 +40542,80 @@ let omoikaneUserActivationState;
     }
     Object.defineProperty(WasmInstance, "name", { value: "Instance" });
     Object.defineProperty(WasmInstance.prototype, Symbol.toStringTag, { value: "WebAssembly.Instance", configurable: true });
+    const tagTypes = new WeakMap();
+    class WasmTag {
+      constructor(descriptor) {
+        if (descriptor === null || (typeof descriptor !== "object" && typeof descriptor !== "function")) {
+          throw new TypeError("WebAssembly.Tag descriptor must be an object");
+        }
+        const parameters = Array.from(descriptor.parameters, value => String(value));
+        if (parameters.some(type => !["i32", "i64", "f32", "f64", "externref", "funcref"].includes(type))) {
+          throw new TypeError("Invalid WebAssembly.Tag parameter type");
+        }
+        tagTypes.set(this, parameters);
+      }
+      type() {
+        const parameters = tagTypes.get(this);
+        if (parameters === undefined) throw new TypeError("WebAssembly.Tag.type called on incompatible receiver");
+        return { parameters: parameters.slice() };
+      }
+    }
+    Object.defineProperty(WasmTag, "name", { value: "Tag" });
+    Object.defineProperty(WasmTag.prototype, Symbol.toStringTag, { value: "WebAssembly.Tag", configurable: true });
+    const exceptionStates = new WeakMap();
+    const convertExceptionValue = (type, value) => {
+      if (type === "i64") return BigInt(value);
+      if (type === "externref") return value;
+      if (type === "funcref") {
+        if (value === null || wasmFunctionHandles.has(value)) return value;
+        throw new TypeError("WebAssembly.Exception funcref values must be null or Wasm functions");
+      }
+      if (typeof value === "bigint") throw new TypeError(`WebAssembly.Exception ${type} values must be numbers`);
+      const number = Number(value);
+      if (type === "i32") return number >> 0;
+      return type === "f32" ? Math.fround(number) : number;
+    };
+    const exceptionIndex = value => {
+      const number = Number(value);
+      if (!Number.isFinite(number) || number < 0 || Math.floor(number) !== number || number > 0xffffffff) {
+        throw new RangeError("WebAssembly.Exception argument index is out of range");
+      }
+      return number;
+    };
+    class WasmException {
+      constructor(tag, values, options = undefined) {
+        const parameters = tagTypes.get(tag);
+        if (parameters === undefined) throw new TypeError("Argument 0 must be a WebAssembly.Tag");
+        const payload = Array.from(values);
+        if (payload.length !== parameters.length) throw new TypeError("WebAssembly.Exception argument count does not match its tag");
+        exceptionStates.set(this, {
+          tag,
+          values: payload.map((value, index) => convertExceptionValue(parameters[index], value)),
+        });
+        if (options !== undefined && options !== null && Boolean(Object(options).traceStack)) {
+          Object.defineProperty(this, "stack", { value: new Error().stack, configurable: true, writable: true });
+        }
+      }
+      getArg(tag, index) {
+        const state = exceptionStates.get(this);
+        if (state === undefined) throw new TypeError("WebAssembly.Exception.getArg called on incompatible receiver");
+        if (arguments.length < 2) throw new TypeError("WebAssembly.Exception.getArg requires a tag and index");
+        if (!tagTypes.has(tag)) throw new TypeError("Argument 0 must be a WebAssembly.Tag");
+        const convertedIndex = exceptionIndex(index);
+        if (tag !== state.tag || convertedIndex >= state.values.length) {
+          throw new RangeError("WebAssembly.Exception argument index is out of range");
+        }
+        return state.values[convertedIndex];
+      }
+      is(tag) {
+        const state = exceptionStates.get(this);
+        if (state === undefined) throw new TypeError("WebAssembly.Exception.is called on incompatible receiver");
+        if (!tagTypes.has(tag)) throw new TypeError("Argument 0 must be a WebAssembly.Tag");
+        return tag === state.tag;
+      }
+    }
+    Object.defineProperty(WasmException, "name", { value: "Exception" });
+    Object.defineProperty(WasmException.prototype, Symbol.toStringTag, { value: "WebAssembly.Exception", configurable: true });
     const WebAssembly = {};
     const compile = bytes => Promise.resolve().then(() => new WasmModule(bytes));
     const instantiate = (source, imports) => Promise.resolve().then(() => {
@@ -40565,6 +40642,8 @@ let omoikaneUserActivationState;
       Memory: { value: WasmMemory, writable: true, configurable: true },
       Global: { value: WasmGlobal, writable: true, configurable: true },
       Table: { value: WasmTable, writable: true, configurable: true },
+      Tag: { value: WasmTag, writable: true, configurable: true },
+      Exception: { value: WasmException, writable: true, configurable: true },
       CompileError: { value: CompileError, writable: true, configurable: true },
       LinkError: { value: LinkError, writable: true, configurable: true },
       RuntimeError: { value: RuntimeError, writable: true, configurable: true },
