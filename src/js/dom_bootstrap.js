@@ -189,6 +189,7 @@ let omoikaneUserActivationState;
   const nativeWorkletRegister = globalThis.__omoikane_worklet_register;
   const nativeWorkletRegisteredNames = globalThis.__omoikane_worklet_registered_names;
   const nativeWorkletModuleCount = globalThis.__omoikane_worklet_module_count;
+  const nativeWorkletProcess = globalThis.__omoikane_worklet_process;
   const nativeWorkletTeardown = globalThis.__omoikane_worklet_teardown;
   const nativeCryptoRandom = globalThis.__omoikane_crypto_random;
   const nativeCryptoDigest = globalThis.__omoikane_crypto_digest;
@@ -466,6 +467,7 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_worklet_register;
   delete globalThis.__omoikane_worklet_registered_names;
   delete globalThis.__omoikane_worklet_module_count;
+  delete globalThis.__omoikane_worklet_process;
   delete globalThis.__omoikane_worklet_teardown;
   delete globalThis.__omoikane_crypto_random;
   delete globalThis.__omoikane_crypto_digest;
@@ -25904,6 +25906,127 @@ let omoikaneUserActivationState;
   }
   for (const type of ["start", "stop", "dataavailable", "pause", "resume", "error"]) defineEventHandler(MediaRecorder.prototype, type);
 
+  const webCodecChunkState = new WeakMap();
+  function ownedBufferSource(value, label = "data") {
+    if (value instanceof ArrayBuffer) return new Uint8Array(value).slice();
+    if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+    throw new TypeError(`${label} must be a BufferSource`);
+  }
+  function copyOwnedBytes(bytes, destination) {
+    let target;
+    if (destination instanceof ArrayBuffer) target = new Uint8Array(destination);
+    else if (ArrayBuffer.isView(destination)) target = new Uint8Array(destination.buffer, destination.byteOffset, destination.byteLength);
+    else throw new TypeError("destination must be a BufferSource");
+    if (target.byteLength < bytes.byteLength) throw new TypeError("destination is not large enough");
+    target.set(bytes);
+  }
+  class EncodedVideoChunk {
+    constructor(init) {
+      const value = Object(init); const type = String(value.type);
+      if (type !== "key" && type !== "delta") throw new TypeError("Invalid encoded video chunk type");
+      if (value.timestamp === undefined || value.data === undefined) throw new TypeError("EncodedVideoChunk requires timestamp and data");
+      webCodecChunkState.set(this, { type, timestamp: Number(value.timestamp), duration: value.duration === undefined ? null : Number(value.duration), bytes: ownedBufferSource(value.data) });
+    }
+    __state() { return webCodecChunkState.get(this) || illegalInvocation(); }
+    get type() { return this.__state().type; } get timestamp() { return this.__state().timestamp; }
+    get duration() { return this.__state().duration; } get byteLength() { return this.__state().bytes.byteLength; }
+    copyTo(destination) { copyOwnedBytes(this.__state().bytes, destination); }
+    get [Symbol.toStringTag]() { return "EncodedVideoChunk"; }
+  }
+  class EncodedAudioChunk {
+    constructor(init) {
+      const value = Object(init); const type = String(value.type);
+      if (type !== "key" && type !== "delta") throw new TypeError("Invalid encoded audio chunk type");
+      if (value.timestamp === undefined || value.data === undefined) throw new TypeError("EncodedAudioChunk requires timestamp and data");
+      webCodecChunkState.set(this, { type, timestamp: Number(value.timestamp), duration: value.duration === undefined ? null : Number(value.duration), bytes: ownedBufferSource(value.data) });
+    }
+    __state() { return webCodecChunkState.get(this) || illegalInvocation(); }
+    get type() { return this.__state().type; } get timestamp() { return this.__state().timestamp; }
+    get duration() { return this.__state().duration; } get byteLength() { return this.__state().bytes.byteLength; }
+    copyTo(destination) { copyOwnedBytes(this.__state().bytes, destination); }
+    get [Symbol.toStringTag]() { return "EncodedAudioChunk"; }
+  }
+  class VideoColorSpace {
+    constructor(init = {}) { const value = Object(init); for (const name of ["primaries", "transfer", "matrix", "fullRange"]) Object.defineProperty(this, name, { enumerable: true, value: value[name] === undefined ? null : value[name] }); }
+    toJSON() { return { primaries: this.primaries, transfer: this.transfer, matrix: this.matrix, fullRange: this.fullRange }; }
+    get [Symbol.toStringTag]() { return "VideoColorSpace"; }
+  }
+  const audioDataState = new WeakMap();
+  const audioFormats = Object.freeze({ u8: [Uint8Array, 1], "u8-planar": [Uint8Array, 1], s16: [Int16Array, 2], "s16-planar": [Int16Array, 2], s32: [Int32Array, 4], "s32-planar": [Int32Array, 4], f32: [Float32Array, 4], "f32-planar": [Float32Array, 4] });
+  class AudioData {
+    constructor(init) {
+      const value = Object(init);
+      for (const name of ["format", "sampleRate", "numberOfFrames", "numberOfChannels", "timestamp", "data"]) if (value[name] === undefined) throw new TypeError(`AudioData requires ${name}`);
+      const format = String(value.format), info = audioFormats[format];
+      const sampleRate = Number(value.sampleRate), numberOfFrames = Number(value.numberOfFrames) >>> 0, numberOfChannels = Number(value.numberOfChannels) >>> 0;
+      if (!info || !(sampleRate > 0) || !numberOfFrames || !numberOfChannels) throw new TypeError("Invalid AudioData initialization");
+      const bytes = ownedBufferSource(value.data); const required = numberOfFrames * numberOfChannels * info[1];
+      if (bytes.byteLength < required) throw new TypeError("AudioDataInit.data is too small");
+      audioDataState.set(this, { format, sampleRate, numberOfFrames, numberOfChannels, timestamp: Number(value.timestamp), duration: numberOfFrames / sampleRate * 1000000, bytes: bytes.slice(0, required), closed: false });
+    }
+    __state() { return audioDataState.get(this) || illegalInvocation(); }
+    get format() { const s=this.__state(); return s.closed ? null : s.format; } get sampleRate() { const s=this.__state(); return s.closed ? 0 : s.sampleRate; }
+    get numberOfFrames() { const s=this.__state(); return s.closed ? 0 : s.numberOfFrames; } get numberOfChannels() { const s=this.__state(); return s.closed ? 0 : s.numberOfChannels; }
+    get duration() { return this.__state().duration; } get timestamp() { return this.__state().timestamp; }
+    allocationSize(options) { const s=this.__state(); if (s.closed) throw new DOMException("AudioData is closed", "InvalidStateError"); const o=Object(options), plane=Number(o.planeIndex)>>>0; const planar=s.format.endsWith("-planar"); if ((!planar && plane) || plane>=s.numberOfChannels) throw new RangeError("Invalid planeIndex"); const offset=Number(o.frameOffset||0)>>>0, count=o.frameCount===undefined?s.numberOfFrames-offset:Number(o.frameCount)>>>0; if(offset+count>s.numberOfFrames) throw new RangeError("Invalid frame range"); return count*(planar?1:s.numberOfChannels)*audioFormats[s.format][1]; }
+    copyTo(destination, options) { const s=this.__state(); const size=this.allocationSize(options); const target=ownedDestination(destination, size); const o=Object(options), plane=Number(o.planeIndex)>>>0, offset=Number(o.frameOffset||0)>>>0, bps=audioFormats[s.format][1], planar=s.format.endsWith("-planar"); const start=(planar?plane*s.numberOfFrames+offset:offset*s.numberOfChannels)*bps; target.set(s.bytes.subarray(start,start+size)); }
+    clone() { const s=this.__state(); if(s.closed) throw new DOMException("AudioData is closed", "InvalidStateError"); return new AudioData({ format:s.format, sampleRate:s.sampleRate, numberOfFrames:s.numberOfFrames, numberOfChannels:s.numberOfChannels, timestamp:s.timestamp, data:s.bytes }); }
+    close() { this.__state().closed=true; } get [Symbol.toStringTag]() { return "AudioData"; }
+  }
+  function ownedDestination(value, minimum) { let out; if(value instanceof ArrayBuffer) out=new Uint8Array(value); else if(ArrayBuffer.isView(value)) out=new Uint8Array(value.buffer,value.byteOffset,value.byteLength); else throw new TypeError("destination must be a BufferSource"); if(out.byteLength<minimum) throw new RangeError("destination is too small"); return out; }
+  const videoFrameState = new WeakMap();
+  function videoFormatSize(format, width, height) { if(format==="RGBA"||format==="RGBX"||format==="BGRA"||format==="BGRX") return width*height*4; if(format==="I420") return width*height+2*Math.ceil(width/2)*Math.ceil(height/2); if(format==="NV12") return width*height+2*Math.ceil(width/2)*Math.ceil(height/2); throw new TypeError("Unsupported VideoFrame format"); }
+  class VideoFrame {
+    constructor(source, init = {}) {
+      if (source instanceof VideoFrame) { const s=source.__state(); if(s.closed) throw new DOMException("VideoFrame is closed", "InvalidStateError"); videoFrameState.set(this,{...s,bytes:s.bytes.slice(),closed:false,timestamp:init.timestamp===undefined?s.timestamp:Number(init.timestamp),duration:init.duration===undefined?s.duration:Number(init.duration)}); return; }
+      const value=Object(init); if(value.format===undefined||value.codedWidth===undefined||value.codedHeight===undefined||value.timestamp===undefined) throw new TypeError("Raw VideoFrame requires format, codedWidth, codedHeight and timestamp");
+      const format=String(value.format), codedWidth=Number(value.codedWidth)>>>0, codedHeight=Number(value.codedHeight)>>>0; if(!codedWidth||!codedHeight) throw new TypeError("Invalid VideoFrame dimensions"); const size=videoFormatSize(format,codedWidth,codedHeight), bytes=ownedBufferSource(source); if(bytes.byteLength<size) throw new TypeError("VideoFrame data is too small");
+      videoFrameState.set(this,{format,codedWidth,codedHeight,displayWidth:value.displayWidth===undefined?codedWidth:Number(value.displayWidth)>>>0,displayHeight:value.displayHeight===undefined?codedHeight:Number(value.displayHeight)>>>0,visibleRect:Object.freeze(value.visibleRect?{...value.visibleRect}:{x:0,y:0,width:codedWidth,height:codedHeight}),timestamp:Number(value.timestamp),duration:value.duration===undefined?null:Number(value.duration),colorSpace:new VideoColorSpace(value.colorSpace),bytes:bytes.slice(0,size),closed:false});
+    }
+    __state(){return videoFrameState.get(this)||illegalInvocation();} get format(){const s=this.__state();return s.closed?null:s.format;} get codedWidth(){const s=this.__state();return s.closed?0:s.codedWidth;} get codedHeight(){const s=this.__state();return s.closed?0:s.codedHeight;} get displayWidth(){const s=this.__state();return s.closed?0:s.displayWidth;} get displayHeight(){const s=this.__state();return s.closed?0:s.displayHeight;} get visibleRect(){const s=this.__state();return s.closed?null:s.visibleRect;} get timestamp(){return this.__state().timestamp;} get duration(){return this.__state().duration;} get colorSpace(){return this.__state().colorSpace;}
+    allocationSize(){const s=this.__state();if(s.closed)throw new DOMException("VideoFrame is closed","InvalidStateError");return s.bytes.byteLength;} copyTo(destination){const s=this.__state();const target=ownedDestination(destination,this.allocationSize());target.set(s.bytes);return Promise.resolve([{offset:0,stride:s.codedWidth*(s.format.startsWith("RGB")||s.format.startsWith("BGR")?4:1)}]);} clone(){return new VideoFrame(this);} close(){this.__state().closed=true;} metadata(){if(this.__state().closed)throw new DOMException("VideoFrame is closed","InvalidStateError");return {};} get [Symbol.toStringTag](){return "VideoFrame";}
+  }
+  const codecState = new WeakMap();
+  function codecConfig(kind, value) { const v=Object(value); if(v.codec===undefined||String(v.codec)==="") throw new TypeError("codec is required"); const out={kind,codec:String(v.codec)}; if(kind.startsWith("video")){ if(kind==="video-encoder"&&(v.width===undefined||v.height===undefined))throw new TypeError("VideoEncoder requires width and height"); out.codedWidth=Number(v.codedWidth===undefined?v.width:v.codedWidth)>>>0||undefined; out.codedHeight=Number(v.codedHeight===undefined?v.height:v.codedHeight)>>>0||undefined; } else { out.sampleRate=Number(v.sampleRate)>>>0||undefined; out.numberOfChannels=Number(v.numberOfChannels)>>>0||undefined; if(kind==="audio-encoder"&&(!out.sampleRate||!out.numberOfChannels))throw new TypeError("AudioEncoder requires sampleRate and numberOfChannels"); } return out; }
+  function codecSupport(kind, config) { let normalized; try{normalized=codecConfig(kind,config);}catch(error){return Promise.reject(error);} const supported=!!__omoikane_web_codecs("supports",JSON.stringify(normalized),"",new Uint8Array()); return Promise.resolve({supported,config:{...Object(config)}}); }
+  class CodecBase extends MediaEventTarget {
+    constructor(kind, init){super();const value=Object(init);if(typeof value.output!=="function"||typeof value.error!=="function")throw new TypeError("Codec requires output and error callbacks");codecState.set(this,{kind,state:"unconfigured",config:null,output:value.output,error:value.error,queue:0,generation:0,flushes:[]});}
+    __state(){return codecState.get(this)||illegalInvocation();} get state(){return this.__state().state;} get decodeQueueSize(){const s=this.__state();if(!s.kind.endsWith("decoder"))return undefined;return s.queue;} get encodeQueueSize(){const s=this.__state();if(!s.kind.endsWith("encoder"))return undefined;return s.queue;}
+    configure(config){const s=this.__state();if(s.state==="closed")throw new DOMException("Codec is closed","InvalidStateError");const normalized=codecConfig(s.kind,config);s.state="configured";s.config=normalized;s.generation++;const generation=s.generation;queueMicrotask(()=>{if(s.generation!==generation||s.state!=="configured")return;if(!__omoikane_web_codecs("supports",JSON.stringify(normalized),"",new Uint8Array()))this.__fail(new DOMException("Unsupported codec configuration","NotSupportedError"));});}
+    __submit(value, requestedKeyFrame=false){const s=this.__state();if(s.state!=="configured")throw new DOMException("Codec is not configured","InvalidStateError");let bytes,timestamp,duration,keyFrame=!!requestedKeyFrame;if(value instanceof EncodedVideoChunk||value instanceof EncodedAudioChunk){const c=webCodecChunkState.get(value);bytes=c.bytes;timestamp=c.timestamp;duration=c.duration;keyFrame=c.type==="key";}else if(value instanceof VideoFrame){const f=videoFrameState.get(value);if(f.closed)throw new DOMException("VideoFrame is closed","InvalidStateError");bytes=f.bytes;timestamp=f.timestamp;duration=f.duration;}else if(value instanceof AudioData){const a=audioDataState.get(value);if(a.closed)throw new DOMException("AudioData is closed","InvalidStateError");bytes=a.bytes;timestamp=a.timestamp;duration=a.duration;}else throw new TypeError("Invalid codec input");s.queue++;const generation=s.generation;queueMicrotask(()=>{if(s.generation!==generation||s.state!=="configured")return;try{const result=JSON.parse(String(__omoikane_web_codecs("process",JSON.stringify(s.config),JSON.stringify({kind:s.kind,codec:s.config.codec,timestamp,duration,keyFrame}),bytes)));let output;if(s.kind==="video-decoder")output=new VideoFrame(new Uint8Array(result.data),{format:"RGBA",codedWidth:s.config.codedWidth||1,codedHeight:s.config.codedHeight||Math.max(1,Math.floor(result.data.length/4)),timestamp:result.timestamp,duration:result.duration});else if(s.kind==="audio-decoder")output=new AudioData({format:"f32",sampleRate:s.config.sampleRate||48000,numberOfChannels:s.config.numberOfChannels||1,numberOfFrames:Math.max(1,Math.floor(result.data.length/4/(s.config.numberOfChannels||1))),timestamp:result.timestamp,data:new Uint8Array(result.data)});else if(s.kind==="video-encoder")output=new EncodedVideoChunk({type:keyFrame?"key":"delta",timestamp:result.timestamp,duration:result.duration,data:new Uint8Array(result.data)});else output=new EncodedAudioChunk({type:"key",timestamp:result.timestamp,duration:result.duration,data:new Uint8Array(result.data)});s.output(output,{});}catch(error){this.__fail(new DOMException(String(error),String(error).includes("NotSupportedError")?"NotSupportedError":"EncodingError"));return;}finally{if(s.queue>0){s.queue--;dispatchMediaEvent(this,"dequeue");}}this.__settleFlushes();});}
+    flush(){const s=this.__state();if(s.state!=="configured")return Promise.reject(new DOMException("Codec is not configured","InvalidStateError"));return new Promise((resolve,reject)=>{s.flushes.push({resolve,reject,generation:s.generation});this.__settleFlushes();});}
+    __settleFlushes(){const s=this.__state();if(s.queue)return;const list=s.flushes.splice(0);queueMicrotask(()=>list.forEach(item=>item.generation===s.generation?item.resolve():item.reject(new DOMException("Flush was reset","AbortError"))));}
+    reset(){const s=this.__state();if(s.state==="closed")throw new DOMException("Codec is closed","InvalidStateError");s.state="unconfigured";s.config=null;s.queue=0;s.generation++;this.__settleFlushes();}
+    close(){const s=this.__state();if(s.state==="closed")return;s.state="closed";s.config=null;s.queue=0;s.generation++;this.__settleFlushes();}
+    __fail(error){const s=this.__state();if(s.state==="closed")return;s.state="closed";s.queue=0;s.generation++;queueMicrotask(()=>s.error(error));this.__settleFlushes();}
+  }
+  defineEventHandler(CodecBase.prototype,"dequeue");
+  class VideoDecoder extends CodecBase{constructor(init){super("video-decoder",init);this.__state().keyRequired=true;}configure(config){super.configure(config);this.__state().keyRequired=true;}decode(chunk){if(!(chunk instanceof EncodedVideoChunk))throw new TypeError("decode requires EncodedVideoChunk");const s=this.__state();if(s.keyRequired&&chunk.type!=="key")throw new DOMException("A key chunk is required","DataError");s.keyRequired=false;this.__submit(chunk);}reset(){super.reset();this.__state().keyRequired=true;}static isConfigSupported(config){return codecSupport("video-decoder",config);}}
+  class VideoEncoder extends CodecBase{constructor(init){super("video-encoder",init);}encode(frame,options={}){if(!(frame instanceof VideoFrame))throw new TypeError("encode requires VideoFrame");this.__submit(frame,!!Object(options).keyFrame);}static isConfigSupported(config){return codecSupport("video-encoder",config);}}
+  class AudioDecoder extends CodecBase{constructor(init){super("audio-decoder",init);}decode(chunk){if(!(chunk instanceof EncodedAudioChunk))throw new TypeError("decode requires EncodedAudioChunk");this.__submit(chunk);}static isConfigSupported(config){return codecSupport("audio-decoder",config);}}
+  class AudioEncoder extends CodecBase{constructor(init){super("audio-encoder",init);}encode(data){if(!(data instanceof AudioData))throw new TypeError("encode requires AudioData");this.__submit(data);}static isConfigSupported(config){return codecSupport("audio-encoder",config);}}
+  const imageDecoderState = new WeakMap();
+  class ImageDecoder {
+    constructor(init) {
+      const value=Object(init); if(value.type===undefined||value.data===undefined)throw new TypeError("ImageDecoder requires type and data");
+      const type=String(value.type); if(type==="")throw new TypeError("ImageDecoder type must not be empty");
+      const data=ownedBufferSource(value.data); const config={kind:"image-decoder",codec:type,codedWidth:Number(value.desiredWidth)>>>0||undefined,codedHeight:Number(value.desiredHeight)>>>0||undefined};
+      const supported=!!__omoikane_web_codecs("supports",JSON.stringify(config),"",new Uint8Array());
+      const track=Object.freeze({animated:false,frameCount:supported?1:0,repetitionCount:0,selected:true});
+      const tracks=Object.freeze({ready:Promise.resolve(),selectedTrack:track,length:1,0:track});
+      imageDecoderState.set(this,{type,data,config,supported,closed:false,complete:true,tracks});
+      this.completed=supported?Promise.resolve():Promise.reject(new DOMException("Unsupported image type","NotSupportedError"));
+      this.completed.catch(()=>{});
+    }
+    __state(){return imageDecoderState.get(this)||illegalInvocation();}
+    get type(){return this.__state().type;} get complete(){return this.__state().complete;} get tracks(){return this.__state().tracks;}
+    decode(options={}){const s=this.__state();if(s.closed)return Promise.reject(new DOMException("ImageDecoder is closed","InvalidStateError"));if(!s.supported)return Promise.reject(new DOMException("Unsupported image type","NotSupportedError"));return Promise.resolve().then(()=>{const result=JSON.parse(String(__omoikane_web_codecs("process",JSON.stringify(s.config),JSON.stringify({kind:"image-decoder",codec:s.type,timestamp:0,duration:null,keyFrame:true}),s.data)));const width=s.config.codedWidth||1,height=s.config.codedHeight||Math.max(1,Math.floor(result.data.length/4));return {image:new VideoFrame(new Uint8Array(result.data),{format:"RGBA",codedWidth:width,codedHeight:height,timestamp:0}),complete:true};});}
+    reset(){const s=this.__state();if(s.closed)throw new DOMException("ImageDecoder is closed","InvalidStateError");}
+    close(){this.__state().closed=true;}
+    static isTypeSupported(type){const codec=String(type);if(codec==="")return Promise.reject(new TypeError("Image type must not be empty"));return Promise.resolve(!!__omoikane_web_codecs("supports",JSON.stringify({kind:"image-decoder",codec}),"",new Uint8Array()));}
+    get [Symbol.toStringTag](){return "ImageDecoder";}
+  }
+
   const mediaSourceToken = {};
   const mediaSourceObjectUrls = new Map();
   const mediaSourceState = new WeakMap();
@@ -26166,6 +26289,16 @@ let omoikaneUserActivationState;
   globalThis.MediaSourceHandle = MediaSourceHandle;
   globalThis.SourceBuffer = SourceBuffer;
   globalThis.SourceBufferList = SourceBufferList;
+  globalThis.EncodedVideoChunk = EncodedVideoChunk;
+  globalThis.EncodedAudioChunk = EncodedAudioChunk;
+  globalThis.VideoColorSpace = VideoColorSpace;
+  globalThis.VideoFrame = VideoFrame;
+  globalThis.AudioData = AudioData;
+  globalThis.VideoDecoder = VideoDecoder;
+  globalThis.VideoEncoder = VideoEncoder;
+  globalThis.AudioDecoder = AudioDecoder;
+  globalThis.AudioEncoder = AudioEncoder;
+  globalThis.ImageDecoder = ImageDecoder;
   globalThis.navigator = new Navigator(navigatorConstructionToken);
   Object.defineProperty(globalThis, "isSecureContext", {
     configurable: true,
@@ -29704,6 +29837,279 @@ let omoikaneUserActivationState;
     }
   }
 
+  const speechUtteranceState = new WeakMap();
+  const speechRecognitionState = new WeakMap();
+  const speechRecognitionSessions = new Map();
+  let nextSpeechUtteranceId = 1;
+  let nextSpeechRecognitionId = 1;
+  const speechErrorCodes = new Set([
+    "canceled", "interrupted", "audio-busy", "audio-hardware", "network",
+    "synthesis-unavailable", "synthesis-failed", "language-unavailable",
+    "voice-unavailable", "text-too-long", "invalid-argument", "not-allowed",
+  ]);
+  const recognitionErrorCodes = new Set([
+    "no-speech", "aborted", "audio-capture", "network", "not-allowed",
+    "service-not-allowed", "bad-grammar", "language-not-supported",
+  ]);
+  function speechEventHandler(prototype, type) {
+    const key = `__on_${type}`;
+    Object.defineProperty(prototype, `on${type}`, {
+      enumerable: true, configurable: true,
+      get() { return this[key] || null; },
+      set(value) {
+        if (this[key]) this.removeEventListener(type, this[key]);
+        this[key] = typeof value === "function" ? value : null;
+        if (this[key]) this.addEventListener(type, this[key]);
+      },
+    });
+  }
+  class SpeechSynthesisVoice {
+    constructor(token, init) {
+      if (token !== speechConstructionToken) throw new TypeError("Illegal constructor");
+      Object.defineProperties(this, {
+        voiceURI: { value: String(init.voiceUri), enumerable: true },
+        name: { value: String(init.name), enumerable: true },
+        lang: { value: String(init.lang), enumerable: true },
+        localService: { value: Boolean(init.localService), enumerable: true },
+        default: { value: Boolean(init.default), enumerable: true },
+      });
+    }
+    get [Symbol.toStringTag]() { return "SpeechSynthesisVoice"; }
+  }
+  const speechConstructionToken = {};
+  class SpeechSynthesisUtterance extends EventTarget {
+    constructor(text = "") {
+      super();
+      speechUtteranceState.set(this, {
+        id: nextSpeechUtteranceId++, text: String(text), lang: "", voice: null,
+        volume: 1, rate: 1, pitch: 1, queued: false,
+      });
+    }
+    __state() { return speechUtteranceState.get(this) || illegalInvocation(); }
+    get text() { return this.__state().text; }
+    set text(value) { this.__state().text = String(value); }
+    get lang() { return this.__state().lang; }
+    set lang(value) { this.__state().lang = String(value); }
+    get voice() { return this.__state().voice; }
+    set voice(value) {
+      if (value !== null && !(value instanceof SpeechSynthesisVoice)) throw new TypeError("Invalid voice");
+      this.__state().voice = value;
+    }
+    get volume() { return this.__state().volume; }
+    set volume(value) { const n = Number(value); if (Number.isFinite(n) && n >= 0 && n <= 1) this.__state().volume = n; }
+    get rate() { return this.__state().rate; }
+    set rate(value) { const n = Number(value); if (Number.isFinite(n) && n >= 0.1 && n <= 10) this.__state().rate = n; }
+    get pitch() { return this.__state().pitch; }
+    set pitch(value) { const n = Number(value); if (Number.isFinite(n) && n >= 0 && n <= 2) this.__state().pitch = n; }
+    get [Symbol.toStringTag]() { return "SpeechSynthesisUtterance"; }
+  }
+  class SpeechSynthesisEvent extends Event {
+    constructor(type, init) {
+      if (arguments.length < 2 || init == null || init.utterance === undefined) throw new TypeError("utterance is required");
+      if (!(init.utterance instanceof SpeechSynthesisUtterance)) throw new TypeError("Invalid utterance");
+      super(String(type), init);
+      this.utterance = init.utterance;
+      this.charIndex = init.charIndex === undefined ? 0 : Number(init.charIndex) >>> 0;
+      this.charLength = init.charLength === undefined ? 0 : Number(init.charLength) >>> 0;
+      this.elapsedTime = init.elapsedTime === undefined ? 0 : Number(init.elapsedTime);
+      this.name = init.name === undefined ? "" : String(init.name);
+    }
+    get [Symbol.toStringTag]() { return "SpeechSynthesisEvent"; }
+  }
+  class SpeechSynthesisErrorEvent extends SpeechSynthesisEvent {
+    constructor(type, init) {
+      if (init == null || init.error === undefined) throw new TypeError("error is required");
+      const error = String(init.error);
+      if (!speechErrorCodes.has(error)) throw new TypeError("Invalid speech synthesis error");
+      super(type, init);
+      this.error = error;
+    }
+    get [Symbol.toStringTag]() { return "SpeechSynthesisErrorEvent"; }
+  }
+  class SpeechGrammar {
+    constructor(token, src, weight) {
+      if (token !== speechConstructionToken) throw new TypeError("Illegal constructor");
+      this.src = src; this.weight = weight;
+    }
+    get [Symbol.toStringTag]() { return "SpeechGrammar"; }
+  }
+  class SpeechGrammarList {
+    constructor() { this.__items = []; }
+    get length() { return this.__items.length; }
+    item(index) { return this.__items[Number(index) >>> 0] || null; }
+    addFromURI(src, weight = 1) { this.__add(String(src), weight); }
+    addFromString(src, weight = 1) { this.__add(String(src), weight); }
+    __add(src, weight) {
+      const n = Number(weight);
+      if (!Number.isFinite(n) || n < 0 || n > 1) throw new TypeError("Invalid grammar weight");
+      const grammar = new SpeechGrammar(speechConstructionToken, src, n);
+      const index = this.__items.length;
+      this.__items.push(grammar);
+      Object.defineProperty(this, index, { value: grammar, enumerable: true, configurable: true });
+    }
+    get [Symbol.toStringTag]() { return "SpeechGrammarList"; }
+  }
+  class SpeechRecognitionPhrase {
+    constructor(phrase, boost = 1) {
+      if (arguments.length < 1) throw new TypeError("phrase is required");
+      this.phrase = String(phrase);
+      this.boost = Number(boost);
+      if (!Number.isFinite(this.boost) || this.boost <= 0) throw new TypeError("Invalid phrase boost");
+    }
+    get [Symbol.toStringTag]() { return "SpeechRecognitionPhrase"; }
+  }
+  class SpeechRecognitionAlternative {
+    constructor(token, transcript, confidence) {
+      if (token !== speechConstructionToken) throw new TypeError("Illegal constructor");
+      this.transcript = transcript; this.confidence = confidence;
+    }
+  }
+  class SpeechRecognitionResult {
+    constructor(token, alternatives, isFinal) {
+      if (token !== speechConstructionToken) throw new TypeError("Illegal constructor");
+      alternatives.forEach((value, index) => Object.defineProperty(this, index, { value, enumerable: true }));
+      this.length = alternatives.length; this.isFinal = isFinal;
+    }
+    item(index) { return this[Number(index) >>> 0] || null; }
+  }
+  class SpeechRecognitionResultList {
+    constructor(token, results) {
+      if (token !== speechConstructionToken) throw new TypeError("Illegal constructor");
+      results.forEach((value, index) => Object.defineProperty(this, index, { value, enumerable: true }));
+      this.length = results.length;
+    }
+    item(index) { return this[Number(index) >>> 0] || null; }
+  }
+  class SpeechRecognitionEvent extends Event {
+    constructor(type, init = {}) {
+      super(String(type), init);
+      this.resultIndex = init.resultIndex === undefined ? 0 : Number(init.resultIndex) >>> 0;
+      this.results = init.results || new SpeechRecognitionResultList(speechConstructionToken, []);
+      this.interpretation = init.interpretation === undefined ? null : init.interpretation;
+      this.emma = init.emma === undefined ? null : init.emma;
+    }
+  }
+  class SpeechRecognitionErrorEvent extends Event {
+    constructor(type, init = {}) {
+      super(String(type), init);
+      const error = init.error === undefined ? "network" : String(init.error);
+      if (!recognitionErrorCodes.has(error)) throw new TypeError("Invalid recognition error");
+      this.error = error; this.message = init.message === undefined ? "" : String(init.message);
+    }
+  }
+  class SpeechRecognition extends EventTarget {
+    constructor() {
+      super();
+      speechRecognitionState.set(this, {
+        id: nextSpeechRecognitionId++, grammars: new SpeechGrammarList(), lang: "",
+        continuous: false, interimResults: false, maxAlternatives: 1,
+        processLocally: false, phrases: [], active: false,
+      });
+    }
+    __state() { return speechRecognitionState.get(this) || illegalInvocation(); }
+    get grammars() { return this.__state().grammars; }
+    set grammars(value) { if (!(value instanceof SpeechGrammarList)) throw new TypeError("Invalid grammars"); this.__state().grammars = value; }
+    get lang() { return this.__state().lang; } set lang(v) { this.__state().lang = String(v); }
+    get continuous() { return this.__state().continuous; } set continuous(v) { this.__state().continuous = Boolean(v); }
+    get interimResults() { return this.__state().interimResults; } set interimResults(v) { this.__state().interimResults = Boolean(v); }
+    get maxAlternatives() { return this.__state().maxAlternatives; }
+    set maxAlternatives(v) { this.__state().maxAlternatives = Number(v) >>> 0; }
+    get processLocally() { return this.__state().processLocally; } set processLocally(v) { this.__state().processLocally = Boolean(v); }
+    get phrases() { return this.__state().phrases; }
+    set phrases(v) { this.__state().phrases = Array.from(v, p => p instanceof SpeechRecognitionPhrase ? p : new SpeechRecognitionPhrase(p.phrase, p.boost)); }
+    start() {
+      const state = this.__state();
+      if (state.active) throw new DOMException("Recognition is already active", "InvalidStateError");
+      state.active = true; speechRecognitionSessions.set(state.id, this);
+      const error = __omoikane_web_speech("command", JSON.stringify({
+        kind: "start-recognition", id: state.id, lang: state.lang, continuous: state.continuous,
+        interimResults: state.interimResults, maxAlternatives: state.maxAlternatives,
+        processLocally: state.processLocally,
+        phrases: state.phrases.map(p => ({ phrase: p.phrase, boost: p.boost })),
+      }));
+      if (error) __omoikane_queue_dom_manipulation_task(() => {
+        if (!state.active) return;
+        this.dispatchEvent(new SpeechRecognitionErrorEvent("error", { error }));
+        this.__finish();
+      });
+    }
+    stop() { const s = this.__state(); if (s.active) __omoikane_web_speech("command", JSON.stringify({kind:"stop-recognition", id:s.id})); }
+    abort() { const s = this.__state(); if (s.active) { __omoikane_web_speech("command", JSON.stringify({kind:"abort-recognition", id:s.id})); this.__finish(); } }
+    __finish(emitEnd = true) { const s = this.__state(); if (!s.active) return; s.active = false; speechRecognitionSessions.delete(s.id); if (emitEnd) this.dispatchEvent(new Event("end")); }
+  }
+  for (const type of ["audiostart", "audioend", "end", "error", "nomatch", "result", "soundstart", "soundend", "speechstart", "speechend", "start"]) speechEventHandler(SpeechRecognition.prototype, type);
+  for (const type of ["boundary", "end", "error", "mark", "pause", "resume", "start"]) speechEventHandler(SpeechSynthesisUtterance.prototype, type);
+
+  const speechSynthesisQueue = [];
+  let speechSynthesisCurrent = null;
+  let speechSynthesisPaused = false;
+  function speechCommand(command) { return __omoikane_web_speech("command", JSON.stringify(command)); }
+  function startNextUtterance() {
+    if (speechSynthesisCurrent || speechSynthesisPaused || !speechSynthesisQueue.length) return;
+    speechSynthesisCurrent = speechSynthesisQueue[0];
+    const state = speechUtteranceState.get(speechSynthesisCurrent);
+    speechCommand({ kind:"speak", id:state.id, text:state.text, lang:state.lang,
+      voiceUri:state.voice ? state.voice.voiceURI : null, volume:state.volume, rate:state.rate, pitch:state.pitch });
+  }
+  const speechSynthesis = new class SpeechSynthesis extends EventTarget {
+    get pending() { return speechSynthesisQueue.length > (speechSynthesisCurrent ? 1 : 0); }
+    get speaking() { return speechSynthesisCurrent !== null; }
+    get paused() { return speechSynthesisPaused; }
+    getVoices() { return JSON.parse(__omoikane_web_speech("voices", "")).map(v => new SpeechSynthesisVoice(speechConstructionToken, v)); }
+    speak(utterance) {
+      const state = speechUtteranceState.get(utterance);
+      if (!state) throw new TypeError("speak requires SpeechSynthesisUtterance");
+      if (state.queued) throw new DOMException("Utterance is already queued", "InvalidStateError");
+      state.queued = true; speechSynthesisQueue.push(utterance); startNextUtterance();
+    }
+    cancel() {
+      speechCommand({kind:"cancel-synthesis"});
+      for (const utterance of speechSynthesisQueue.splice(0)) {
+        speechUtteranceState.get(utterance).queued = false;
+        utterance.dispatchEvent(new SpeechSynthesisErrorEvent("error", {utterance, error:"canceled"}));
+      }
+      speechSynthesisCurrent = null; speechSynthesisPaused = false;
+    }
+    pause() { if (!speechSynthesisPaused) { speechSynthesisPaused = true; speechCommand({kind:"pause-synthesis"}); } }
+    resume() { if (speechSynthesisPaused) { speechSynthesisPaused = false; speechCommand({kind:"resume-synthesis"}); startNextUtterance(); } }
+  }();
+  speechEventHandler(Object.getPrototypeOf(speechSynthesis), "voiceschanged");
+  globalThis.__omoikane_dispatch_speech_synthesis_event = function(type, details = {}) {
+    const utterance = speechSynthesisCurrent;
+    if (!utterance) return false;
+    const event = type === "error"
+      ? new SpeechSynthesisErrorEvent(type, {...details, utterance, error:details.error || "synthesis-failed"})
+      : new SpeechSynthesisEvent(type, {...details, utterance});
+    utterance.dispatchEvent(event);
+    if (type === "pause") speechSynthesisPaused = true;
+    if (type === "resume") speechSynthesisPaused = false;
+    if (type === "end" || type === "error") {
+      speechUtteranceState.get(utterance).queued = false;
+      if (speechSynthesisQueue[0] === utterance) speechSynthesisQueue.shift();
+      speechSynthesisCurrent = null; startNextUtterance();
+    }
+    return true;
+  };
+  globalThis.__omoikane_dispatch_speech_recognition_event = function(id, type, details = {}) {
+    const recognition = speechRecognitionSessions.get(Number(id));
+    if (!recognition) return false;
+    let event;
+    if (type === "error") event = new SpeechRecognitionErrorEvent(type, details);
+    else if (type === "result") {
+      const results = (details.results || []).map(result => new SpeechRecognitionResult(speechConstructionToken,
+        (result.alternatives || []).map(a => new SpeechRecognitionAlternative(speechConstructionToken, String(a.transcript || ""), Number(a.confidence || 0))), Boolean(result.isFinal)));
+      event = new SpeechRecognitionEvent(type, {...details, results:new SpeechRecognitionResultList(speechConstructionToken, results)});
+    } else event = new Event(type);
+    recognition.dispatchEvent(event);
+    if (type === "end") recognition.__finish(false);
+    else if (type === "error") recognition.__finish();
+    return true;
+  };
+  Object.assign(globalThis, { SpeechSynthesisUtterance, SpeechSynthesisEvent, SpeechSynthesisErrorEvent,
+    SpeechSynthesisVoice, SpeechGrammar, SpeechGrammarList, SpeechRecognition, SpeechRecognitionPhrase,
+    SpeechRecognitionEvent, SpeechRecognitionErrorEvent, SpeechRecognitionAlternative,
+    SpeechRecognitionResult, SpeechRecognitionResultList, speechSynthesis });
+
   const textTrackElementObjects = new WeakMap();
   const textTrackListObjects = new WeakMap();
   const cueConstructionToken = {};
@@ -30968,6 +31374,7 @@ let omoikaneUserActivationState;
       this.__destination = new AudioDestinationNode(audioConstructionToken, this);
       this.listener = Object.create(null);
       this.onstatechange = null;
+      this.audioWorklet = new AudioWorklet(workletConstructionToken);
     }
     get state() { return this.__state; }
     get currentTime() { return audioNow(this); }
@@ -31027,7 +31434,303 @@ let omoikaneUserActivationState;
     }
     createGain() { if (this.__state === "closed") throw new DOMException("The AudioContext is closed.", "InvalidStateError"); return new GainNode(this); }
     createOscillator() { if (this.__state === "closed") throw new DOMException("The AudioContext is closed.", "InvalidStateError"); return new OscillatorNode(this); }
+    createBuffer(numberOfChannels, length, sampleRate) {
+      return new AudioBuffer({numberOfChannels, length, sampleRate});
+    }
+    decodeAudioData(audioData, successCallback = undefined, errorCallback = undefined) {
+      let result;
+      try {
+        if (!(audioData instanceof ArrayBuffer)) throw new TypeError("decodeAudioData requires an ArrayBuffer");
+        const bytes = new Uint8Array(audioData.slice(0));
+        const view = new DataView(bytes.buffer);
+        const tag = offset => String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
+        if (bytes.length < 44 || tag(0) !== "RIFF" || tag(8) !== "WAVE") throw new DOMException("Unsupported audio data.", "EncodingError");
+        let format = null;
+        let dataOffset = 0;
+        let dataLength = 0;
+        for (let offset = 12; offset + 8 <= bytes.length;) {
+          const name = tag(offset);
+          const size = view.getUint32(offset + 4, true);
+          const payload = offset + 8;
+          if (payload + size > bytes.length) throw new DOMException("Truncated audio data.", "EncodingError");
+          if (name === "fmt " && size >= 16) {
+            format = {
+              encoding:view.getUint16(payload, true), channels:view.getUint16(payload + 2, true),
+              sampleRate:view.getUint32(payload + 4, true), blockAlign:view.getUint16(payload + 12, true),
+              bits:view.getUint16(payload + 14, true),
+            };
+          } else if (name === "data") {
+            dataOffset = payload;
+            dataLength = size;
+          }
+          offset = payload + size + (size & 1);
+        }
+        if (!format || !dataOffset || !format.channels || !format.sampleRate || !format.blockAlign ||
+            !((format.encoding === 1 && [8, 16, 24, 32].includes(format.bits)) || (format.encoding === 3 && format.bits === 32))) {
+          throw new DOMException("Unsupported audio encoding.", "EncodingError");
+        }
+        const sourceFrames = Math.floor(dataLength / format.blockAlign);
+        if (!sourceFrames) throw new DOMException("Audio data contains no frames.", "EncodingError");
+        const frames = Math.max(1, Math.ceil(sourceFrames * this.sampleRate / format.sampleRate));
+        const buffer = new AudioBuffer({numberOfChannels:format.channels, length:frames, sampleRate:this.sampleRate});
+        const width = format.bits / 8;
+        const readSample = (frame, channel) => {
+          const offset = dataOffset + frame * format.blockAlign + channel * width;
+          let sample;
+          if (format.encoding === 3) sample = view.getFloat32(offset, true);
+          else if (format.bits === 8) sample = (view.getUint8(offset) - 128) / 128;
+          else if (format.bits === 16) sample = view.getInt16(offset, true) / 32768;
+          else if (format.bits === 24) {
+            let value = view.getUint8(offset) | (view.getUint8(offset + 1) << 8) | (view.getUint8(offset + 2) << 16);
+            if (value & 0x800000) value |= 0xff000000;
+            sample = value / 8388608;
+          } else sample = view.getInt32(offset, true) / 2147483648;
+          return Math.max(-1, Math.min(1, sample));
+        };
+        for (let frame = 0; frame < frames; frame++) for (let channel = 0; channel < format.channels; channel++) {
+          const position = frame * format.sampleRate / this.sampleRate;
+          const before = Math.min(sourceFrames - 1, Math.floor(position));
+          const after = Math.min(sourceFrames - 1, before + 1);
+          const mix = position - before;
+          buffer.__channels[channel][frame] = readSample(before, channel) * (1 - mix) + readSample(after, channel) * mix;
+        }
+        result = Promise.resolve(buffer);
+      } catch (error) { result = Promise.reject(error); }
+      if (typeof successCallback === "function") result.then(successCallback);
+      if (typeof errorCallback === "function") result.catch(errorCallback);
+      return result;
+    }
     get [Symbol.toStringTag]() { return "AudioContext"; }
+  }
+  class AudioBuffer {
+    constructor(options) {
+      const init = Object(options);
+      const numberOfChannels = Number(init.numberOfChannels) >>> 0;
+      const length = Number(init.length) >>> 0;
+      const sampleRate = audioNumber(init.sampleRate, "AudioBuffer sampleRate");
+      if (!numberOfChannels || numberOfChannels > 32 || !length || sampleRate <= 0) {
+        throw new DOMException("Invalid AudioBuffer dimensions.", "NotSupportedError");
+      }
+      Object.defineProperties(this, {
+        numberOfChannels: { enumerable: true, value: numberOfChannels },
+        length: { enumerable: true, value: length },
+        sampleRate: { enumerable: true, value: sampleRate },
+        duration: { enumerable: true, value: length / sampleRate },
+      });
+      this.__channels = Array.from({length:numberOfChannels}, () => new Float32Array(length));
+    }
+    getChannelData(channel) {
+      const index = Number(channel) >>> 0;
+      if (index >= this.numberOfChannels) throw new DOMException("Invalid channel.", "IndexSizeError");
+      return this.__channels[index];
+    }
+    copyFromChannel(destination, channelNumber, startInChannel = 0) {
+      const source = this.getChannelData(channelNumber);
+      const start = Number(startInChannel) >>> 0;
+      destination.set(source.subarray(start, start + destination.length));
+    }
+    copyToChannel(source, channelNumber, startInChannel = 0) {
+      const destination = this.getChannelData(channelNumber);
+      const start = Number(startInChannel) >>> 0;
+      destination.set(source.subarray(0, destination.length - start), start);
+    }
+    get [Symbol.toStringTag]() { return "AudioBuffer"; }
+  }
+
+  function audioNodeReaches(node, target, seen = new Set()) {
+    if (node === target) return true;
+    if (seen.has(node)) return false;
+    seen.add(node);
+    return node.__connections.some(connection =>
+      connection.destination instanceof AudioNode && audioNodeReaches(connection.destination, target, seen));
+  }
+
+  class OfflineAudioCompletionEvent extends Event {
+    constructor(type, init) {
+      super(type, init);
+      if (!init || !(init.renderedBuffer instanceof AudioBuffer)) {
+        throw new TypeError("OfflineAudioCompletionEvent requires renderedBuffer");
+      }
+      Object.defineProperty(this, "renderedBuffer", { enumerable:true, value:init.renderedBuffer });
+    }
+  }
+
+  class OfflineAudioContext extends AudioContext {
+    constructor(numberOfChannelsOrOptions, length, sampleRate) {
+      const dictionaryConstructor = arguments.length === 1 && numberOfChannelsOrOptions !== null &&
+        typeof numberOfChannelsOrOptions === "object";
+      if (!dictionaryConstructor && arguments.length !== 3) throw new TypeError("OfflineAudioContext requires one options dictionary or three arguments");
+      const init = dictionaryConstructor ? Object(numberOfChannelsOrOptions) :
+        {numberOfChannels:numberOfChannelsOrOptions, length, sampleRate};
+      if (init.sampleRate === undefined) throw new TypeError("OfflineAudioContext sampleRate is required");
+      const channelValue = init.numberOfChannels === undefined ? 1 : Number(init.numberOfChannels);
+      const lengthValue = init.length === undefined || init.length === null ? null : Number(init.length);
+      const channels = Math.trunc(channelValue);
+      const frames = lengthValue === null ? null : Math.trunc(lengthValue);
+      const rate = audioNumber(init.sampleRate, "OfflineAudioContext sampleRate");
+      if (!Number.isFinite(channelValue) || channels !== channelValue || channels < 1 || channels > 32 ||
+          (lengthValue !== null && (!Number.isFinite(lengthValue) || frames !== lengthValue || frames < 1)) ||
+          rate < 8000 || rate > 192000) {
+        throw new DOMException("Invalid offline rendering dimensions.", "NotSupportedError");
+      }
+      const renderSizeHint = init.renderSizeHint === undefined || init.renderSizeHint === "default" ? 128 : Number(init.renderSizeHint);
+      if (!Number.isInteger(renderSizeHint) || renderSizeHint < 1) throw new DOMException("Invalid renderSizeHint.", "NotSupportedError");
+      super({sampleRate:rate});
+      this.destination.channelCount = channels;
+      this.destination.channelCountMode = "explicit";
+      Object.defineProperties(this, {
+        length: { enumerable:true, value:frames },
+        __offlineChannels: { value:channels, writable:false },
+      });
+      this.oncomplete = null;
+      this.__renderStarted = false;
+      this.__renderQuantumSize = renderSizeHint;
+      this.__committedFrames = 0;
+      this.__renderQueue = Promise.resolve();
+      this.__suspensions = [];
+      this.__resumeRendering = null;
+    }
+    get currentTime() { return this.__currentTime; }
+    suspend(suspendTime) {
+      if (this.__renderStarted || this.__state === "closed") return Promise.reject(new DOMException("Rendering has started.", "InvalidStateError"));
+      const time = audioTime(suspendTime, "OfflineAudioContext suspend time");
+      if ((this.length !== null && time >= this.length / this.sampleRate) || this.__suspensions.some(entry => entry.time === time)) {
+        return Promise.reject(new DOMException("Invalid suspend time.", "InvalidStateError"));
+      }
+      return new Promise(resolve => this.__suspensions.push({time, resolve}));
+    }
+    resume() {
+      if (this.__state !== "suspended" || !this.__renderStarted) {
+        return Promise.reject(new DOMException("Offline rendering is not suspended.", "InvalidStateError"));
+      }
+      this.__state = "running";
+      const resumeRendering = this.__resumeRendering;
+      this.__resumeRendering = null;
+      if (resumeRendering) resumeRendering();
+      return Promise.resolve();
+    }
+    startRendering(chunkSize = null) {
+      if (this.__state === "closed") return Promise.reject(new DOMException("Rendering already completed.", "InvalidStateError"));
+      const requested = chunkSize === null || chunkSize === undefined ? null : Number(chunkSize);
+      if (requested !== null && (!Number.isInteger(requested) || requested < 1)) {
+        return Promise.reject(new DOMException("Invalid render chunk size.", "NotSupportedError"));
+      }
+      const quantum = this.__renderQuantumSize;
+      const rounded = requested === null ? quantum : Math.ceil(requested / quantum) * quantum;
+      const remaining = this.length === null ? rounded : this.length - this.__committedFrames;
+      if (remaining <= 0) return Promise.reject(new DOMException("Rendering already committed.", "InvalidStateError"));
+      const frameCount = this.length !== null && requested === null ? remaining : Math.min(remaining, rounded);
+      const firstFrame = this.__committedFrames;
+      this.__committedFrames += frameCount;
+      this.__renderStarted = true;
+      const renderChunk = () => {
+        if (this.__state !== "suspended") this.__state = "running";
+        const output = new AudioBuffer({numberOfChannels:this.__offlineChannels, length:frameCount, sampleRate:this.sampleRate});
+        const lastFrame = firstFrame + frameCount;
+        const suspensions = this.__suspensions.filter(entry => entry.time * this.sampleRate < lastFrame)
+          .sort((left, right) => left.time - right.time);
+        this.__suspensions = this.__suspensions.filter(entry => !suspensions.includes(entry));
+        let frame = firstFrame;
+        const renderUntil = endFrame => {
+          for (; frame < endFrame; frame++) {
+            const time = frame / this.sampleRate;
+            let sample = 0;
+            for (const node of this.__nodes) {
+              if (node instanceof AudioWorkletNode && audioNodeReaches(node, this.destination)) {
+                sample += node.__sample(frame);
+                continue;
+              }
+              if (!(node instanceof OscillatorNode) || !node.__started || !audioNodeReaches(node, this.destination)) continue;
+              if (time < node.__startRequested || (node.__stopRequested !== undefined && time >= node.__stopRequested)) continue;
+              const frequency = node.frequency.__valueAt(time) * Math.pow(2, node.detune.__valueAt(time) / 1200);
+              let value = Math.sin(2 * Math.PI * frequency * (time - node.__startRequested));
+              const gainConnection = node.__connections.find(connection => connection.destination instanceof GainNode);
+              if (gainConnection) value *= gainConnection.destination.gain.__valueAt(time);
+              sample += value;
+            }
+            for (const channel of output.__channels) channel[frame - firstFrame] = Math.max(-1, Math.min(1, sample));
+          }
+          this.__currentTime = frame / this.sampleRate;
+        };
+        const continueRendering = () => Promise.resolve().then(() => {
+          const suspension = suspensions.shift();
+          if (suspension) {
+            // Web Audio schedules offline suspensions at the start of the render
+            // quantum containing the requested time.
+            const suspendFrame = Math.min(lastFrame, Math.floor(suspension.time * this.sampleRate / quantum) * quantum);
+            renderUntil(suspendFrame);
+            this.__state = "suspended";
+            suspension.resolve();
+            return new Promise(resolve => { this.__resumeRendering = resolve; }).then(continueRendering);
+          }
+          renderUntil(lastFrame);
+          this.__currentTime = Math.ceil(lastFrame / quantum) * quantum / this.sampleRate;
+          this.__state = this.length !== null && lastFrame >= this.length ? "closed" : "running";
+          const event = new OfflineAudioCompletionEvent("complete", {renderedBuffer:output});
+          if (typeof this.oncomplete === "function") __omoikane_call_event_listener(this.oncomplete, this, event);
+          this.dispatchEvent(event);
+          return output;
+        });
+        return continueRendering();
+      };
+      const result = this.__renderQueue.then(renderChunk);
+      this.__renderQueue = result.then(() => undefined, () => undefined);
+      return result;
+    }
+    get [Symbol.toStringTag]() { return "OfflineAudioContext"; }
+  }
+
+  class AudioWorkletNode extends AudioNode {
+    constructor(context, name, options = {}) {
+      const owner = audioContextValue(context);
+      const processorName = String(name);
+      if (!owner.audioWorklet || !owner.audioWorklet.registeredNames.includes(processorName)) {
+        throw new DOMException("AudioWorklet processor is not registered.", "InvalidStateError");
+      }
+      const init = Object(options);
+      super(audioConstructionToken, owner, Number(init.numberOfInputs ?? 1) >>> 0, Number(init.numberOfOutputs ?? 1) >>> 0);
+      const channel = new MessageChannel();
+      Object.defineProperty(this, "port", { enumerable:true, value:channel.port1 });
+      this.__processorPort = channel.port2;
+      this.onprocessorerror = null;
+      this.parameters = new Map();
+      this.__processorName = processorName;
+      this.__processorOptions = init.processorOptions === undefined ? {} : init.processorOptions;
+      const outputChannelCount = init.outputChannelCount === undefined
+        ? Array.from({length:this.numberOfOutputs}, () => 1)
+        : Array.from(init.outputChannelCount, value => Number(value) >>> 0);
+      if (outputChannelCount.length !== this.numberOfOutputs || outputChannelCount.some(value => value < 1 || value > 32)) {
+        throw new DOMException("Invalid outputChannelCount.", "NotSupportedError");
+      }
+      this.__outputChannelCount = outputChannelCount;
+      this.__renderQuantum = -1;
+      this.__renderedOutputs = [];
+    }
+    __sample(frame, output = 0, channel = 0) {
+      const quantum = Math.floor(frame / 128);
+      if (quantum !== this.__renderQuantum) {
+        const request = JSON.stringify({
+          name:this.__processorName,
+          frames:128,
+          currentFrame:quantum * 128,
+          sampleRate:this.context.sampleRate,
+          outputChannelCount:this.__outputChannelCount,
+          processorOptions:this.__processorOptions,
+        });
+        try {
+          const response = JSON.parse(nativeWorkletProcess(this.context.audioWorklet.__id, request));
+          this.__renderedOutputs = response && response.ok ? response.outputs : [];
+        } catch (error) {
+          this.__renderedOutputs = [];
+          const event = new Event("processorerror");
+          if (typeof this.onprocessorerror === "function") __omoikane_call_event_listener(this.onprocessorerror, this, event);
+          this.dispatchEvent(event);
+        }
+        this.__renderQuantum = quantum;
+      }
+      return Number(this.__renderedOutputs[output]?.[channel]?.[frame % 128] ?? 0);
+    }
+    get [Symbol.toStringTag]() { return "AudioWorkletNode"; }
   }
   globalThis.AudioParam = AudioParam;
   globalThis.AudioNode = AudioNode;
@@ -31035,6 +31738,10 @@ let omoikaneUserActivationState;
   globalThis.GainNode = GainNode;
   globalThis.OscillatorNode = OscillatorNode;
   globalThis.AudioContext = AudioContext;
+  globalThis.AudioBuffer = AudioBuffer;
+  globalThis.OfflineAudioCompletionEvent = OfflineAudioCompletionEvent;
+  globalThis.OfflineAudioContext = OfflineAudioContext;
+  globalThis.AudioWorkletNode = AudioWorkletNode;
   function notificationOptionString(options, name, fallback = "") {
     const value = options && options[name];
     return value === undefined ? fallback : String(value);
@@ -33050,9 +33757,13 @@ let omoikaneUserActivationState;
       const transferable = list[index];
       if (safeWeakMapHas(customStateSetObjects, transferable)) throw dataCloneError();
       const port = transferable instanceof MessagePort;
-      if ((nativeArrayBufferInfo(transferable) === null && !port) ||
+      const media = transferable instanceof VideoFrame || transferable instanceof AudioData;
+      if ((nativeArrayBufferInfo(transferable) === null && !port && !media) ||
           (port && transferable._closed) || hasSetValue(seen, transferable)) {
         throw dataCloneError("The transfer list contains an invalid or duplicate object.");
+      }
+      if (media && transferable.__state().closed) {
+        throw dataCloneError("A closed media resource cannot be transferred.");
       }
       addSetValue(seen, transferable);
     }
@@ -33086,6 +33797,15 @@ let omoikaneUserActivationState;
         throw dataCloneError("A MessagePort must be transferred to be cloned.");
       }
       state.nodes[id] = ["P", value];
+    } else if (value instanceof EncodedVideoChunk || value instanceof EncodedAudioChunk) {
+      const chunk = webCodecChunkState.get(value);
+      state.nodes[id] = ["C", value instanceof EncodedVideoChunk, chunk.type,
+        chunk.timestamp, chunk.duration, chunk.bytes.slice()];
+    } else if (value instanceof VideoFrame || value instanceof AudioData) {
+      const media = value.__state();
+      if (media.closed) throw dataCloneError("A closed media resource cannot be cloned.");
+      state.nodes[id] = [value instanceof VideoFrame ? "F" : "A", value,
+        safeMapHas(state.transferSet, value)];
     } else if (value instanceof IntrinsicDate) {
       state.nodes[id] = ["d", intrinsicDateGetTime(value)];
     } else if (value instanceof IntrinsicRegExp) {
@@ -33164,6 +33884,15 @@ let omoikaneUserActivationState;
         case "x": objects[index] = new IntrinsicRegExp(node[1], node[2]); break;
         case "b": objects[index] = node[2] ? safeMapGet(transferred, node[1]) : node[1]; break;
         case "P": objects[index] = safeMapGet(transferred, node[1]); break;
+        case "C": {
+          const Constructor = node[1] ? EncodedVideoChunk : EncodedAudioChunk;
+          objects[index] = new Constructor({
+            type: node[2], timestamp: node[3], duration: node[4], data: node[5],
+          });
+          break;
+        }
+        case "F": objects[index] = node[2] ? safeMapGet(transferred, node[1]) : node[1].clone(); break;
+        case "A": objects[index] = node[2] ? safeMapGet(transferred, node[1]) : node[1].clone(); break;
         case "m": objects[index] = new IntrinsicMap(); break;
         case "t": objects[index] = new IntrinsicSet(); break;
         case "a": objects[index] = new IntrinsicArray(node[1]); break;
@@ -33234,6 +33963,12 @@ let omoikaneUserActivationState;
         if (transferList[index]._closed) throw dataCloneError("A closed MessagePort cannot be transferred.");
         continue;
       }
+      if (transferList[index] instanceof VideoFrame || transferList[index] instanceof AudioData) {
+        if (transferList[index].__state().closed) {
+          throw dataCloneError("A closed media resource cannot be transferred.");
+        }
+        continue;
+      }
       const info = nativeArrayBufferInfo(transferList[index]);
       if (info === null || info[0]) throw dataCloneError("A detached ArrayBuffer cannot be transferred.");
     }
@@ -33261,6 +33996,9 @@ let omoikaneUserActivationState;
         source._pendingMessages = [];
         source._closed = true;
         if (transferredPorts) transferredPorts.push(target);
+      } else if (source instanceof VideoFrame || source instanceof AudioData) {
+        target = source.clone();
+        source.close();
       } else {
         try { target = nativeTransferArrayBuffer(source); }
         catch (_) { throw dataCloneError("The ArrayBuffer could not be transferred."); }
@@ -35929,7 +36667,17 @@ let omoikaneUserActivationState;
     terminate() { return this.teardown(); }
     get [Symbol.toStringTag]() { return "Worklet"; }
   }
+  class AudioWorklet extends Worklet {
+    constructor(token) {
+      super(token);
+      const channel = new MessageChannel();
+      Object.defineProperty(this, "port", { enumerable:true, value:channel.port1 });
+      this.__globalPort = channel.port2;
+    }
+    get [Symbol.toStringTag]() { return "AudioWorklet"; }
+  }
   globalThis.Worklet = Worklet;
+  globalThis.AudioWorklet = AudioWorklet;
   globalThis.WorkletGlobalScope = WorkletGlobalScope;
 
   // CSS.paintWorklet is a stable Worklet instance.  Keep this assignment near
@@ -35992,6 +36740,42 @@ let omoikaneUserActivationState;
         throw new DOMException("WorkletGlobalScope has been torn down.", "InvalidStateError");
       }
       registrations.set(key, Object.freeze({ name: key, value }));
+    };
+    globalThis.AudioWorkletProcessor = class AudioWorkletProcessor {
+      constructor() {
+        const channel = new MessageChannel();
+        Object.defineProperty(this, "port", { enumerable:true, value:channel.port1 });
+      }
+    };
+    globalThis.registerProcessor = function(name, processorCtor) {
+      const key = String(name);
+      if (!key) throw new DOMException("A processor name is required.", "NotSupportedError");
+      if (typeof processorCtor !== "function") throw new TypeError("Processor constructor must be callable");
+      if (registrations.has(key)) throw new DOMException("Processor name already registered.", "NotSupportedError");
+      if (typeof nativeRegister !== "function" || !nativeRegister(workletId, key)) {
+        throw new DOMException("AudioWorkletGlobalScope has been torn down.", "InvalidStateError");
+      }
+      registrations.set(key, Object.freeze({ name:key, constructor:processorCtor }));
+    };
+    const audioProcessorInstances = new Map();
+    globalThis.__omoikane_audio_process = function(encodedRequest) {
+      const request = JSON.parse(String(encodedRequest));
+      const registration = registrations.get(String(request.name));
+      if (!registration || typeof registration.constructor !== "function") return JSON.stringify({ok:false});
+      let processor = audioProcessorInstances.get(request.name);
+      if (!processor) {
+        processor = new registration.constructor({processorOptions:request.processorOptions ?? {}});
+        audioProcessorInstances.set(request.name, processor);
+      }
+      const frames = Number(request.frames) >>> 0;
+      globalThis.currentFrame = Number(request.currentFrame) || 0;
+      globalThis.currentTime = globalThis.currentFrame / Number(request.sampleRate);
+      globalThis.sampleRate = Number(request.sampleRate);
+      const outputs = Array.from(request.outputChannelCount ?? [], count =>
+        Array.from({length:Number(count) >>> 0}, () => new Float32Array(frames)));
+      const keepAlive = processor.process([], outputs, Object.create(null)) !== false;
+      if (!keepAlive) audioProcessorInstances.delete(request.name);
+      return JSON.stringify({ok:true, outputs:outputs.map(output => output.map(channel => Array.from(channel))), keepAlive});
     };
   };
 
