@@ -210,6 +210,40 @@ fn font_attribute_parses_and_serializes_like_the_css_shorthand() {
 }
 
 #[test]
+fn rem_in_fonts_and_spacing_follows_the_document_root_font_size() {
+    check(
+        1,
+        1,
+        r#"
+        const root = document.documentElement;
+        if (!root) return 'no root element';
+        root.style.fontSize = '20px';
+        // Detached and connected canvas elements both use their document's root.
+        ctx.font = '2rem serif';
+        if (ctx.font !== '40px serif') return 'detached ' + ctx.font;
+        const connected = document.createElement('canvas');
+        (document.body || root).appendChild(connected);
+        const other = connected.getContext('2d');
+        other.font = '1rem serif';
+        if (other.font !== '20px serif') return 'connected ' + other.font;
+        // An OffscreenCanvas has no document, so rem keeps the initial 16px.
+        const offscreen = new OffscreenCanvas(1, 1).getContext('2d');
+        offscreen.font = '1rem serif';
+        if (offscreen.font !== '16px serif') return 'offscreen ' + offscreen.font;
+        ctx.font = '10px serif';
+        const plain = ctx.measureText('ab').width, spaced = ctx.measureText('a b').width;
+        ctx.letterSpacing = '1rem';
+        const letters = ctx.measureText('ab').width - plain;
+        if (Math.abs(letters - 40) > 1e-6) return 'letterSpacing ' + letters;
+        ctx.letterSpacing = '0px';
+        ctx.wordSpacing = '1rem';
+        const words = ctx.measureText('a b').width - spaced;
+        return Math.abs(words - 20) < 1e-6 || 'wordSpacing ' + words;
+        "#,
+    );
+}
+
+#[test]
 fn text_is_drawn_as_glyph_outlines_and_measured_from_the_font() {
     check(
         60,

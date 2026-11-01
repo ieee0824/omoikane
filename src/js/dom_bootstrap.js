@@ -18958,15 +18958,29 @@ let omoikaneUserActivationState;
     }
     return [context.__s.path.subpaths, args];
   }
-  /// Parses a `font` value relative to the canvas's computed font size.
+  /// The computed font size of the root element of a canvas element's
+  /// document (connected or not), which `rem` refers to; 16 without one.
+  function canvasRootFontSize(canvas) {
+    try {
+      const root = canvas && canvas.nodeType === 1 && canvas.ownerDocument && canvas.ownerDocument.documentElement;
+      if (root && root.isConnected) return parseFloat(getComputedStyle(root).fontSize) || 16;
+    } catch (_) {}
+    return 16;
+  }
+  /// Parses a `font` value relative to the canvas's computed font size. The
+  /// result records the root font size so spacing resolves `rem` alike.
   function canvasParseFont(value, canvas) {
     let parentSize = 10;
     try {
       if (canvas && canvas.isConnected) parentSize = parseFloat(getComputedStyle(canvas).fontSize) || 10;
     } catch (_) {}
-    const context = { parentSize, rootSize: 16, viewport: [globalThis.innerWidth || 0, globalThis.innerHeight || 0] };
+    const rootSize = canvasRootFontSize(canvas);
+    const context = { parentSize, rootSize, viewport: [globalThis.innerWidth || 0, globalThis.innerHeight || 0] };
     const json = nativeCanvasParseFont(String(value), JSON.stringify(context));
-    return json ? JSON.parse(json) : null;
+    if (!json) return null;
+    const font = JSON.parse(json);
+    font.rootSize = rootSize;
+    return font;
   }
   function canvasFont(context) {
     const style = context.__s.style;
@@ -18980,11 +18994,12 @@ let omoikaneUserActivationState;
       return !!(context.canvas && context.canvas.isConnected && getComputedStyle(context.canvas).direction === "rtl");
     } catch (_) { return false; }
   }
-  /// A letterSpacing/wordSpacing value in pixels for a font of `size`.
-  function canvasSpacing(value, size) {
+  /// A letterSpacing/wordSpacing value in pixels for a font of `size` and a
+  /// root font size of `rootSize`.
+  function canvasSpacing(value, size, rootSize) {
     const match = /^(-?[\d.]+)([a-z]*)$/.exec(value);
     if (!match) return 0;
-    const units = { px: 1, "": 1, em: size, rem: 16, ex: size / 2, ch: size / 2, pt: 96 / 72, pc: 16, in: 96,
+    const units = { px: 1, "": 1, em: size, rem: rootSize, ex: size / 2, ch: size / 2, pt: 96 / 72, pc: 16, in: 96,
       cm: 96 / 2.54, mm: 96 / 25.4, q: 96 / 101.6, vw: (globalThis.innerWidth || 0) / 100,
       vh: (globalThis.innerHeight || 0) / 100 };
     units.vmin = Math.min(units.vw, units.vh); units.vmax = Math.max(units.vw, units.vh);
@@ -18996,8 +19011,8 @@ let omoikaneUserActivationState;
     const style = context.__s.style, font = canvasFont(context);
     text = String(text);
     const request = { text, size: font.size, family: font.family, style: font.style, weight: font.weight,
-      stretch: font.stretch, letterSpacing: canvasSpacing(style.letterSpacing, font.size),
-      wordSpacing: canvasSpacing(style.wordSpacing, font.size), rtl: canvasIsRtl(context),
+      stretch: font.stretch, letterSpacing: canvasSpacing(style.letterSpacing, font.size, font.rootSize),
+      wordSpacing: canvasSpacing(style.wordSpacing, font.size, font.rootSize), rtl: canvasIsRtl(context),
       caps: style.fontVariantCaps !== "normal" ? style.fontVariantCaps : font.variant,
       kerning: style.fontKerning !== "none" };
     const canvas = context.canvas, id = canvas && canvas.nodeType === 1 ? internalNodeId(canvas) : null;
