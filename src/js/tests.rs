@@ -3390,6 +3390,53 @@ fn webgl_canvas_context_state_resources_and_loss_boundary() {
 }
 
 #[test]
+fn webgl2_extends_the_software_context_with_owned_objects_and_state() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let result = eval_str(
+        &mut runtime,
+        r#"(() => {
+          const canvas = document.createElement('canvas');
+          canvas.width = 2; canvas.height = 1;
+          const gl = canvas.getContext('webgl2', {alpha:false, stencil:true, powerPreference:'low-power'});
+          const shape = gl instanceof WebGL2RenderingContext && gl instanceof WebGLRenderingContext &&
+            gl.getContextAttributes().alpha === false && gl.getContextAttributes().stencil === true &&
+            gl.getContextAttributes().powerPreference === 'low-power' && canvas.getContext('webgl') === null;
+          const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+          const feedback = gl.createTransformFeedback(); gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, feedback);
+          gl.beginTransformFeedback(gl.POINTS); gl.pauseTransformFeedback(); gl.resumeTransformFeedback(); gl.endTransformFeedback();
+          const query = gl.createQuery(); gl.beginQuery(gl.ANY_SAMPLES_PASSED, query);
+          const queryBound = gl.getQuery(gl.ANY_SAMPLES_PASSED, gl.CURRENT_QUERY) === query;
+          gl.endQuery(gl.ANY_SAMPLES_PASSED);
+          const sampler = gl.createSampler(); gl.samplerParameteri(sampler, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE); gl.bindSampler(0, sampler);
+          const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+          const objects = vao instanceof WebGLVertexArrayObject && vao instanceof WebGLObject &&
+            feedback instanceof WebGLTransformFeedback && query instanceof WebGLQuery && sampler instanceof WebGLSampler && sync instanceof WebGLSync;
+          gl.bindTransformFeedback(0xdead, feedback);
+          const invalidEnum = gl.getError() === gl.INVALID_ENUM;
+          const state = gl.getParameter(gl.VERTEX_ARRAY_BINDING) === vao &&
+            gl.getParameter(gl.TRANSFORM_FEEDBACK_BINDING) === feedback && queryBound &&
+            gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE) === true &&
+            gl.getSamplerParameter(sampler, gl.TEXTURE_WRAP_R) === gl.CLAMP_TO_EDGE &&
+            gl.getParameter(gl.SAMPLER_BINDING) === sampler &&
+            gl.getSyncParameter(sync, gl.SYNC_STATUS) === gl.SIGNALED &&
+            gl.clientWaitSync(sync, 0, 0) === gl.ALREADY_SIGNALED;
+          gl.clearBufferfv(gl.COLOR, 0, new Float32Array([0.25, 0.5, 1, 1]));
+          const pixels = new Uint8Array(4); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+          const clear = Array.from(pixels).join(',') === '64,128,255,255';
+          const other = document.createElement('canvas').getContext('webgl2');
+          other.bindVertexArray(vao);
+          const ownership = other.getError() === other.INVALID_OPERATION;
+          gl.deleteVertexArray(vao); gl.deleteTransformFeedback(feedback); gl.deleteQuery(query); gl.deleteSampler(sampler); gl.deleteSync(sync);
+          const deleted = !gl.isVertexArray(vao) && !gl.isTransformFeedback(feedback) && !gl.isQuery(query) && !gl.isSampler(sampler) && !gl.isSync(sync);
+          const offscreen = new OffscreenCanvas(1, 1).getContext('webgl2') instanceof WebGL2RenderingContext;
+          const strings = String(gl) === '[object WebGL2RenderingContext]' && gl.getParameter(gl.VERSION).startsWith('WebGL 2.0');
+          return [shape, objects, invalidEnum, state, clear, ownership, deleted, offscreen, strings].join('|');
+        })()"#,
+    );
+    assert_eq!(result, "true|true|true|true|true|true|true|true|true");
+}
+
+#[test]
 fn websocket_handshake_sends_first_party_document_cookie() {
     let listener = bind_loopback().unwrap();
     let address = listener.local_addr().unwrap();

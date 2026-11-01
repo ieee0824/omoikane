@@ -1601,6 +1601,7 @@
     {"path": "mediacapture-fromelement/HTMLCanvasElement-captureStream-settings.tentative.html"},
     {"path": "mediacapture-fromelement/HTMLCanvasElement-getImageData-noframe.html"},
     {"path": "mediacapture-fromelement/historical.html"},
+    {"path": "webgl/webgl2-drawing-buffer-bits.html"},
     {"path": "mediacapture-record/BlobEvent-constructor.html"},
     {"path": "mediacapture-record/MediaRecorder-creation.https.html"},
     {"path": "mediacapture-streams/MediaStream-clone.https.html"},

@@ -55,6 +55,8 @@ collect_pattern "/webvtt/" "/html/semantics/embedded-content/media-elements/trac
 collect_pattern "/mediacapture-streams/" "/mediacapture-record/"
 # Canvas capture streams (#1292).
 collect_pattern "/mediacapture-fromelement/"
+# WebGL 2 IDL and deterministic software-context contracts (#1644).
+collect_pattern "/webgl/"
 # Media Source Extensions state, object URL, and SourceBuffer contracts (#1613).
 collect_pattern "/media-source/"
 # Media Session metadata, playback, position, and action-handler contracts (#1618).
