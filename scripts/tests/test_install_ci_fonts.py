@@ -1,13 +1,16 @@
 """Exercise font preparation without sudo privileges or external mirrors."""
 
 import json
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
+import shlex
 import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).parents[1] / "install-ci-fonts.py"
@@ -87,6 +90,30 @@ if ((mode == 'transient' and phase == 'update' and attempt == 1)
         self.assertEqual([attempt["exit_code"] for attempt in result["attempts"]], [100, 0, 0])
         self.assertIn("mirror failure", (self.output / "update-1.log").read_text())
         self.assertIn("attempt 2", (self.output / "update-2.log").read_text())
+
+    def test_workflow_font_output_does_not_reserve_the_exclusive_suite_directory(self):
+        workflow = SCRIPT.parents[1] / ".github/workflows/jit-release-gate.yml"
+        line = next(line for line in workflow.read_text().splitlines()
+                    if "run: python3 scripts/install-ci-fonts.py " in line)
+        output = shlex.split(line.split("run: ", 1)[1])[-1]
+        target = "aarch64-unknown-linux-gnu"
+        self.output = self.root / output.replace("$GATE_TARGET", target)
+        run, result = self.run_installer("success")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(result["status"], "success")
+        spec = importlib.util.spec_from_file_location("font_setup_gate5", SCRIPT.parent / "jit-gate5.py")
+        gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gate)
+        gate_root = self.root / ".artifacts/jit-gate5"
+        # Reaching identity proves run_target created its exclusive output
+        # directory. Stop there so this integration test never invokes Cargo.
+        with patch.object(gate, "identity", side_effect=RuntimeError("identity reached")):
+            with self.assertRaisesRegex(RuntimeError, "identity reached"):
+                gate.run_target("suite", target, gate_root)
+        self.assertTrue((self.output / "update-1.log").is_file())
+        # Keep the guard that rejects stale suite output on a second run.
+        with self.assertRaises(FileExistsError):
+            gate.run_target("suite", target, gate_root)
 
     def test_permanent_update_failure_never_starts_install_or_reports_success(self):
         run, result = self.run_installer("update-failure")

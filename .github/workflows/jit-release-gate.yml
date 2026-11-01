@@ -144,7 +144,7 @@ jobs:
         timeout-minutes: 10
         env:
           GATE_TARGET: ${{ matrix.target }}
-        run: python3 scripts/install-ci-fonts.py ".artifacts/jit-gate5/$GATE_TARGET/suite/font-preparation"
+        run: python3 scripts/install-ci-fonts.py ".artifacts/jit-gate5/$GATE_TARGET/font-preparation"
       - name: Run full suite or build and smoke-test the release archive
         env:
           GATE_KIND: ${{ matrix.kind }}
