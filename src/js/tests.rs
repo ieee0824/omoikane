@@ -50,6 +50,48 @@ fn sample_document() -> NodeHandle {
 }
 
 #[test]
+fn webassembly_validates_modules_and_exposes_owned_metadata() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let value = runtime
+        .eval(
+            r#"
+            (() => {
+              const empty = Uint8Array.of(0,97,115,109,1,0,0,0);
+              const described = Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,4,1,96,0,0,
+                2,9,1,3,101,110,118,1,102,0,0,
+                7,7,1,3,114,117,110,0,0,
+                0,4,1,120,1,2
+              );
+              const module = new WebAssembly.Module(described);
+              const custom = WebAssembly.Module.customSections(module, "x");
+              const detached = custom[0];
+              new Uint8Array(detached)[0] = 9;
+              return JSON.stringify({
+                namespace: Object.prototype.toString.call(WebAssembly),
+                moduleBrand: Object.prototype.toString.call(module),
+                valid: WebAssembly.validate(empty),
+                invalid: WebAssembly.validate(Uint8Array.of(0,1,2)),
+                imports: WebAssembly.Module.imports(module),
+                exports: WebAssembly.Module.exports(module),
+                custom: Array.from(new Uint8Array(WebAssembly.Module.customSections(module, "x")[0])),
+                owned: Array.from(new Uint8Array(detached)),
+                compileError: (() => { try { new WebAssembly.Module(Uint8Array.of(0)); } catch (e) { return e instanceof WebAssembly.CompileError && e.name; } })(),
+                sourceTypeError: (() => { try { WebAssembly.validate({}); } catch (e) { return e instanceof TypeError; } })(),
+                brandTypeError: (() => { try { WebAssembly.Module.exports({}); } catch (e) { return e instanceof TypeError; } })(),
+              });
+            })()
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        r#"{"namespace":"[object WebAssembly]","moduleBrand":"[object WebAssembly.Module]","valid":true,"invalid":false,"imports":[{"module":"env","name":"f","kind":"function"}],"exports":[{"name":"run","kind":"function"}],"custom":[1,2],"owned":[9,2],"compileError":"CompileError","sourceTypeError":true,"brandTypeError":true}"#
+    );
+}
+
+#[test]
 fn native_host_call_identifies_the_immediate_javascript_caller_realm() {
     let mut context = Context::default();
     context

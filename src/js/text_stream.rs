@@ -45,9 +45,14 @@ pub(super) fn create_native(
 // Web IDL's copy of an AllowSharedBufferSource reads internal slots, including
 // view offsets, without consulting page-defined buffer/byteLength getters.
 // Detached buffers contribute an empty byte sequence (Encoding Standard).
-fn input_bytes(value: &JsValue, context: &mut Context) -> JsResult<Vec<u8>> {
+pub(super) fn buffer_source_bytes(
+    value: &JsValue,
+    context: &mut Context,
+    label: &str,
+    allow_shared: bool,
+) -> JsResult<Vec<u8>> {
     let object = value.as_object().ok_or_else(|| {
-        JsNativeError::typ().with_message("TextDecoderStream chunk must be a BufferSource")
+        JsNativeError::typ().with_message(format!("{label} must be a BufferSource"))
     })?;
     let (buffer, range) = if let Ok(view) = JsTypedArray::from_object(object.clone()) {
         (
@@ -99,6 +104,11 @@ fn input_bytes(value: &JsValue, context: &mut Context) -> JsResult<Vec<u8>> {
             });
     }
     if let Ok(buffer) = JsSharedArrayBuffer::from_object(object.clone()) {
+        if !allow_shared {
+            return Err(JsNativeError::typ()
+                .with_message(format!("{label} must not use SharedArrayBuffer"))
+                .into());
+        }
         if !buffer.is_fixed_length() {
             return Err(JsNativeError::typ()
                 .with_message("Growable buffers are not allowed")
@@ -112,7 +122,7 @@ fn input_bytes(value: &JsValue, context: &mut Context) -> JsResult<Vec<u8>> {
         });
     }
     Err(JsNativeError::typ()
-        .with_message("TextDecoderStream chunk must be a BufferSource")
+        .with_message(format!("{label} must be a BufferSource"))
         .into())
 }
 
@@ -125,7 +135,7 @@ pub(super) fn decode_native(
     let input = if last {
         Vec::new()
     } else {
-        input_bytes(&args[1], context)?
+        buffer_source_bytes(&args[1], context, "TextDecoderStream chunk", true)?
     };
     let handle = args[0]
         .as_object()
