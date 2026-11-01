@@ -120,6 +120,10 @@ pub struct CodeBlock {
     #[cfg(feature = "baseline-jit")]
     #[unsafe_ignore_trace]
     pub(crate) jit_code_id: u64,
+    // Pure instruction metadata: no GC handles or nested CodeBlock references.
+    #[cfg(feature = "baseline-jit")]
+    #[unsafe_ignore_trace]
+    pub(crate) jit_verified_code: super::bytecode_contract::VerifiedCodeBlockCache,
     #[unsafe_ignore_trace]
     pub(crate) flags: Cell<CodeBlockFlags>,
 
@@ -172,6 +176,8 @@ impl CodeBlock {
         Self {
             #[cfg(feature = "baseline-jit")]
             jit_code_id: next_jit_code_id(),
+            #[cfg(feature = "baseline-jit")]
+            jit_verified_code: super::bytecode_contract::VerifiedCodeBlockCache::default(),
             bytecode: ByteCode::default(),
             constants: ThinVec::default(),
             bindings: Box::default(),

@@ -16,8 +16,11 @@ use std::{
 use crate::{
     JsObject, JsValue,
     object::shape::slot::SlotAttributes,
-    vm::{BYTECODE_CONTRACT_VERSION, BytecodeContractSnapshot, InlineCache, Vm},
+    vm::{BYTECODE_CONTRACT_VERSION, InlineCache, Vm},
 };
+
+#[cfg(test)]
+use crate::vm::BytecodeContractSnapshot;
 
 use super::{
     BytecodeCodeMap, DeoptEnvironment, DeoptFrameLayout, DeoptMaterialization, DeoptPendingCall,
@@ -164,8 +167,39 @@ impl ArithmeticCode {
         self.memory.requested_len()
     }
 
+    #[cfg(test)]
     pub(crate) fn compile(
         snapshot: &BytecodeContractSnapshot,
+        inline_caches: &[InlineCache],
+        bytecode_resume: u32,
+    ) -> Result<Option<Self>, JitError> {
+        Self::compile_body(
+            &snapshot.instructions,
+            snapshot.register_count,
+            &snapshot.handlers,
+            inline_caches,
+            bytecode_resume,
+        )
+    }
+
+    fn compile_verified(
+        snapshot: &crate::vm::bytecode_contract::VerifiedCodeBlock,
+        inline_caches: &[InlineCache],
+        bytecode_resume: u32,
+    ) -> Result<Option<Self>, JitError> {
+        Self::compile_body(
+            &snapshot.instructions,
+            snapshot.register_count,
+            &snapshot.handlers,
+            inline_caches,
+            bytecode_resume,
+        )
+    }
+
+    fn compile_body(
+        instructions: &[crate::vm::BytecodeInstruction],
+        register_count: u32,
+        handlers: &[crate::vm::bytecode_contract::BytecodeHandler],
         inline_caches: &[InlineCache],
         bytecode_resume: u32,
     ) -> Result<Option<Self>, JitError> {
@@ -174,7 +208,13 @@ impl ArithmeticCode {
             any(target_os = "linux", target_os = "macos")
         )))]
         {
-            let _ = (snapshot, inline_caches, bytecode_resume);
+            let _ = (
+                instructions,
+                register_count,
+                handlers,
+                inline_caches,
+                bytecode_resume,
+            );
             return Ok(None);
         }
         #[cfg(all(
@@ -182,12 +222,17 @@ impl ArithmeticCode {
             any(target_os = "linux", target_os = "macos")
         ))]
         {
-            let Some(mut region) = LoopRegion::find(snapshot, bytecode_resume) else {
+            let Some(mut region) =
+                LoopRegion::find_instructions(instructions, register_count, bytecode_resume)
+            else {
                 return Ok(None);
             };
-            let Some((properties, object_move_offsets)) =
-                property_bindings(snapshot, inline_caches, &region)
-            else {
+            let Some((properties, object_move_offsets)) = property_bindings_for_instructions(
+                instructions,
+                register_count,
+                inline_caches,
+                &region,
+            ) else {
                 return Ok(None);
             };
             let object_roots: HashSet<_> = properties.iter().map(|p| p.object_register).collect();
@@ -196,12 +241,12 @@ impl ArithmeticCode {
                 .retain(|register| !object_roots.contains(register));
             let mut assembler = Assembler::default();
             let resumed_entry_offset = assembler.position();
-            assembler.entry(snapshot.instructions[region.increment].next_offset);
+            assembler.entry(instructions[region.increment].next_offset);
             let mut code_map = BytecodeCodeMap::default();
             let mut bailouts = BTreeSet::new();
             let mut safepoints = Vec::new();
 
-            for instruction in &snapshot.instructions[region.first..region.end] {
+            for instruction in &instructions[region.first..region.end] {
                 code_map
                     .push(instruction.offset, assembler.position())
                     .expect("verified instructions and monotonic emission");
@@ -238,24 +283,19 @@ impl ArithmeticCode {
             }
             assembler.resolve()?;
             safepoints.sort_unstable_by_key(|point| point.machine_offset);
-            let valid_program_counters = snapshot
-                .instructions
+            let valid_program_counters = instructions
                 .iter()
                 .map(|instruction| instruction.offset)
                 .collect::<Vec<_>>();
             let exception_metadata = super::JitExceptionMetadata::new(
                 valid_program_counters.iter().copied(),
-                snapshot
-                    .handlers
-                    .iter()
-                    .map(|handler| super::JitExceptionHandler {
-                        start: handler.start,
-                        end: handler.end,
-                        handler: handler.end,
-                        environment_count: handler.environment_count,
-                    }),
-                snapshot
-                    .instructions
+                handlers.iter().map(|handler| super::JitExceptionHandler {
+                    start: handler.start,
+                    end: handler.end,
+                    handler: handler.end,
+                    environment_count: handler.environment_count,
+                }),
+                instructions
                     .iter()
                     .map(|instruction| super::JitSourceLocation {
                         bytecode_offset: instruction.offset,
@@ -267,19 +307,19 @@ impl ArithmeticCode {
                 JitFrameDescriptorId(NEXT_FRAME_DESCRIPTOR_ID.fetch_add(1, Ordering::Relaxed)),
                 u32::try_from(assembler.code.len()).map_err(|_| JitError::InvalidCodeSize)?,
                 u32::try_from(size_of::<NativeFrame>()).map_err(|_| JitError::InvalidCodeSize)?,
-                snapshot.register_count,
+                register_count,
                 safepoints,
             )?
             .with_exception_metadata(exception_metadata);
             let deopt_layout = DeoptFrameLayout::new(
                 &valid_program_counters,
-                snapshot.register_count,
-                snapshot.register_count,
+                register_count,
+                register_count,
                 0,
                 u32::try_from(size_of::<NativeFrame>()).map_err(|_| JitError::InvalidCodeSize)?,
                 0,
             );
-            let materializations = (0..snapshot.register_count)
+            let materializations = (0..register_count)
                 .map(|register| DeoptMaterialization {
                     destination: register,
                     source: ValueLocation::FrameRegister(register),
@@ -289,9 +329,7 @@ impl ArithmeticCode {
             let recipe_pcs = bailouts
                 .iter()
                 .map(|&(pc, _)| pc)
-                .chain(std::iter::once(
-                    snapshot.instructions[region.increment].next_offset,
-                ))
+                .chain(std::iter::once(instructions[region.increment].next_offset))
                 .collect::<BTreeSet<_>>();
             let deopt_recipes = recipe_pcs
                 .into_iter()
@@ -313,7 +351,7 @@ impl ArithmeticCode {
             let memory = writable.publish()?;
             // A conservative instruction-budget bound between loop polls,
             // including paths skipped by conditional branches.
-            let iteration_cost = snapshot.instructions[region.first..region.end]
+            let iteration_cost = instructions[region.first..region.end]
                 .iter()
                 .fold(0_u32, |cost, instruction| {
                     cost.saturating_add(u32::from(
@@ -324,7 +362,7 @@ impl ArithmeticCode {
             Ok(Some(Self {
                 memory,
                 resumed_entry_offset,
-                bytecode_resume: snapshot.instructions[region.increment].next_offset,
+                bytecode_resume: instructions[region.increment].next_offset,
                 required: region.required.into_boxed_slice(),
                 properties: properties.into_boxed_slice(),
                 code_map,
@@ -637,7 +675,7 @@ impl ArithmeticRuntime {
                 self.diagnostics.compile_requests =
                     self.diagnostics.compile_requests.saturating_add(1);
                 let compile_started = Instant::now();
-                let snapshot = vm.frame.code_block.bytecode_contract().verify().ok();
+                let snapshot = vm.frame.code_block.verified_jit_code().ok();
                 let single_loop = snapshot.as_ref().is_some_and(|snapshot| {
                     snapshot
                         .instructions
@@ -647,7 +685,7 @@ impl ArithmeticRuntime {
                         == 1
                 });
                 let compiled = snapshot.as_ref().and_then(|snapshot| {
-                    ArithmeticCode::compile(snapshot, &vm.frame.code_block.ic, pc)
+                    ArithmeticCode::compile_verified(snapshot, &vm.frame.code_block.ic, pc)
                         .unwrap_or_default()
                 });
                 self.diagnostics.total_compile_time_ns =
@@ -1052,8 +1090,23 @@ impl PropertyObjectOrigins {
     }
 }
 
+#[cfg(test)]
 fn property_bindings(
     snapshot: &BytecodeContractSnapshot,
+    inline_caches: &[InlineCache],
+    region: &LoopRegion,
+) -> Option<(Vec<PropertyBinding>, BTreeMap<u32, u32>)> {
+    property_bindings_for_instructions(
+        &snapshot.instructions,
+        snapshot.register_count,
+        inline_caches,
+        region,
+    )
+}
+
+fn property_bindings_for_instructions(
+    all_instructions: &[crate::vm::BytecodeInstruction],
+    register_count: u32,
     inline_caches: &[InlineCache],
     region: &LoopRegion,
 ) -> Option<(Vec<PropertyBinding>, BTreeMap<u32, u32>)> {
@@ -1063,7 +1116,7 @@ fn property_bindings(
     let mut unique_slots = 0u32;
     let mut object_move_offsets = BTreeMap::new();
     let mut origins = PropertyObjectOrigins::default();
-    let instructions = &snapshot.instructions[region.first..region.end];
+    let instructions = &all_instructions[region.first..region.end];
     let mut has_properties = false;
     for instruction in instructions {
         #[cfg(test)]
@@ -1129,7 +1182,7 @@ fn property_bindings(
                 binding.writable |= is_write;
                 binding.scratch_register
             } else {
-                let scratch_register = snapshot.register_count.checked_add(unique_slots)?;
+                let scratch_register = register_count.checked_add(unique_slots)?;
                 unique_slots = unique_slots.checked_add(1)?;
                 by_slot.insert(key, bindings.len());
                 bindings.push(PropertyBinding {
@@ -1191,31 +1244,44 @@ fn property_bindings(
 }
 
 impl LoopRegion {
+    #[cfg(test)]
     fn find(snapshot: &BytecodeContractSnapshot, bytecode_resume: u32) -> Option<Self> {
-        let increment = snapshot.instructions.iter().position(|instruction| {
+        Self::find_instructions(
+            &snapshot.instructions,
+            snapshot.register_count,
+            bytecode_resume,
+        )
+    }
+
+    fn find_instructions(
+        instructions: &[crate::vm::BytecodeInstruction],
+        register_count: u32,
+        bytecode_resume: u32,
+    ) -> Option<Self> {
+        let increment = instructions.iter().position(|instruction| {
             instruction.name == "IncrementLoopIteration"
                 && instruction.next_offset == bytecode_resume
         })?;
-        let increment_offset = snapshot.instructions[increment].offset;
-        let by_offset = snapshot
-            .instructions
+        let increment_offset = instructions[increment].offset;
+        let by_offset = instructions
             .iter()
             .enumerate()
             .map(|(index, instruction)| (instruction.offset, index))
             .collect::<BTreeMap<_, _>>();
-        let (backedge, first) = snapshot.instructions[increment..]
-            .iter()
-            .enumerate()
-            .find_map(|(relative, instruction)| {
-                if instruction.name != "Jump" {
-                    return None;
-                }
-                let target = u32::try_from(unsigned(instruction, "address")?).ok()?;
-                let &first = by_offset.get(&target)?;
-                (target <= increment_offset).then_some((increment + relative, first))
-            })?;
-        let exit = snapshot.instructions[backedge].next_offset;
-        if !snapshot.instructions[first..=backedge].iter().any(|i| {
+        let (backedge, first) =
+            instructions[increment..]
+                .iter()
+                .enumerate()
+                .find_map(|(relative, instruction)| {
+                    if instruction.name != "Jump" {
+                        return None;
+                    }
+                    let target = u32::try_from(unsigned(instruction, "address")?).ok()?;
+                    let &first = by_offset.get(&target)?;
+                    (target <= increment_offset).then_some((increment + relative, first))
+                })?;
+        let exit = instructions[backedge].next_offset;
+        if !instructions[first..=backedge].iter().any(|i| {
             matches!(i.name, "JumpIfTrue" | "JumpIfFalse")
                 && unsigned(i, "address") == Some(u64::from(exit))
         }) {
@@ -1247,23 +1313,23 @@ impl LoopRegion {
             "JumpIfTrue",
             "JumpIfFalse",
         ];
-        if snapshot.instructions[first..=backedge]
+        if instructions[first..=backedge]
             .iter()
             .any(|i| !supported.contains(&i.name))
         {
             return None;
         }
         let mut written = BTreeSet::new();
-        for i in &snapshot.instructions[first..=backedge] {
+        for i in &instructions[first..=backedge] {
             if let Some(dst) = unsigned(i, "dst").map(|v| v as u32) {
                 written.insert(dst);
             }
         }
-        let required = required_registers(&snapshot.instructions[first..=backedge])?;
+        let required = required_registers(&instructions[first..=backedge])?;
         if required
             .iter()
             .chain(written.iter())
-            .any(|&r| r >= snapshot.register_count)
+            .any(|&r| r >= register_count)
         {
             return None;
         }
@@ -2482,3 +2548,10 @@ mod tests {
         assert!(plan.popped_frame_ids().is_empty());
     }
 }
+
+#[cfg(all(
+    test,
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
+mod preflight_tests;
