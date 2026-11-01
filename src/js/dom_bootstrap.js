@@ -56,6 +56,8 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_canvas2d_contains;
   const nativeCanvasParseColor = globalThis.__omoikane_canvas_parse_color;
   delete globalThis.__omoikane_canvas_parse_color;
+  const nativeCanvasParseFilter = globalThis.__omoikane_canvas_parse_filter;
+  delete globalThis.__omoikane_canvas_parse_filter;
   const nativeCanvasParseFont = globalThis.__omoikane_canvas_parse_font;
   delete globalThis.__omoikane_canvas_parse_font;
   const nativeCanvasText = globalThis.__omoikane_canvas2d_text;
@@ -18601,17 +18603,36 @@ let omoikaneUserActivationState;
     set width(value) { this.setAttribute("width", String(Math.max(0, Number(value) || 0))); }
   }
 
+  /// An `[EnforceRange] unsigned long` argument.
+  function enforceUnsignedLong(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || Math.trunc(number) < 0 || Math.trunc(number) > 0xffffffff)
+      throw new TypeError("Value is outside the 'unsigned long' range");
+    return Math.trunc(number);
+  }
   class ImageData {
-    constructor(dataOrWidth, widthOrHeight, height) {
-      if (typeof dataOrWidth === "number") {
-        this.width = Math.max(0, Math.trunc(dataOrWidth));
-        this.height = Math.max(0, Math.trunc(widthOrHeight));
-        this.data = new Uint8ClampedArray(this.width * this.height * 4);
+    /// `new ImageData(sw, sh)` allocates transparent black pixels;
+    /// `new ImageData(data, sw, sh?)` wraps `data` itself (HTML §4.12.5.1.15).
+    constructor(dataOrWidth, widthOrHeight, height = undefined) {
+      if (arguments.length < 2) throw new TypeError("ImageData requires at least 2 arguments");
+      const size = () => new DOMException("The source width or height is zero or inconsistent", "IndexSizeError");
+      if (dataOrWidth instanceof Uint8ClampedArray) {
+        const data = dataOrWidth, width = enforceUnsignedLong(widthOrHeight);
+        if (data.length === 0 || data.length % 4 !== 0)
+          throw new DOMException("The data length is not a nonzero multiple of 4", "InvalidStateError");
+        const pixels = data.length / 4;
+        if (width === 0 || pixels % width !== 0) throw size();
+        const rows = pixels / width;
+        if (height !== undefined && enforceUnsignedLong(height) !== rows) throw size();
+        this.width = width;
+        this.height = rows;
+        this.data = data;
       } else {
-        this.data = new Uint8ClampedArray(dataOrWidth);
-        this.width = Math.max(0, Math.trunc(widthOrHeight));
-        this.height = height === undefined ? this.data.length / 4 / this.width : Math.max(0, Math.trunc(height));
-        if (this.data.length !== this.width * this.height * 4) throw new DOMException("Invalid ImageData dimensions", "IndexSizeError");
+        const width = enforceUnsignedLong(dataOrWidth), rows = enforceUnsignedLong(widthOrHeight);
+        if (width === 0 || rows === 0) throw size();
+        this.width = width;
+        this.height = rows;
+        this.data = new Uint8ClampedArray(width * rows * 4);
       }
     }
   }
@@ -18640,13 +18661,36 @@ let omoikaneUserActivationState;
         state.contextMode = previous.contextMode;
         state.context = previous.context;
         state.webgl = previous.webgl;
+        state.offscreen = previous.offscreen;
       }
       canvasStates.set(canvas,state); commitCanvas(canvas,state);
     }
     return state;
   }
+  /// Shows a canvas's pixels: an OffscreenCanvas from
+  /// `transferControlToOffscreen()` paints into its placeholder element.
   function commitCanvas(canvas,state){
-    if (canvas.__id != null) __omoikane_canvas_commit(canvas.__id,state.width,state.height,new Uint8Array(state.pixels.buffer));
+    const target = canvas.__placeholder || canvas;
+    if (target.__id != null) __omoikane_canvas_commit(target.__id,state.width,state.height,new Uint8Array(state.pixels.buffer));
+  }
+  /// CanvasRenderingContext2DSettings, converted in dictionary member order.
+  function canvas2dSettings(options) {
+    if (options !== undefined && options !== null && typeof options !== "object" && typeof options !== "function")
+      throw new TypeError("The context options are not an object");
+    const read = name => options == null ? undefined : options[name];
+    const enumeration = (value, allowed, fallback, name) => {
+      if (value === undefined) return fallback;
+      const text = String(value);
+      if (!allowed.includes(text)) throw new TypeError("Invalid " + name + " '" + text + "'");
+      return text;
+    };
+    const alpha = read("alpha");
+    const colorSpace = enumeration(read("colorSpace"), ["srgb", "display-p3"], "srgb", "colorSpace");
+    const colorType = enumeration(read("colorType"), ["unorm8", "float16"], "unorm8", "colorType");
+    const desynchronized = read("desynchronized");
+    const willReadFrequently = read("willReadFrequently");
+    return { alpha: alpha === undefined ? true : !!alpha, colorSpace, colorType,
+      desynchronized: !!desynchronized, willReadFrequently: !!willReadFrequently };
   }
 
   // Canvas 2D (HTML §4.12.5.1). Script keeps the drawing state and builds
@@ -19009,7 +19053,7 @@ let omoikaneUserActivationState;
   function canvasImagePixels(source) {
     const isHtmlCanvas = typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement;
     if (isHtmlCanvas || source instanceof OffscreenCanvas) {
-      const state = canvasState(source);
+      const own = canvasState(source), state = own.offscreen ? canvasState(own.offscreen) : own;
       if (!state.width || !state.height) throw new DOMException("The source canvas is empty.", "InvalidStateError");
       return state;
     }
@@ -19046,6 +19090,7 @@ let omoikaneUserActivationState;
     const command = { kind, paths, rule: options.rule || "nonzero", transform: style.transform,
       alpha: style.globalAlpha, composite: style.globalCompositeOperation, clip: style.clip,
       smoothing: style.imageSmoothingEnabled };
+    if (style.filter !== "none") command.filter = style.filter;
     let texture = options.texture;
     if (kind !== "clear") {
       if (options.paint) command.paint = options.paint;
@@ -19175,15 +19220,18 @@ let omoikaneUserActivationState;
   }
 
   class CanvasRenderingContext2D {
-    constructor(canvas, options = undefined) {
+    constructor(token, canvas, settings) {
+      if (token !== canvasConstructionToken) throw new TypeError("Illegal constructor");
       Object.defineProperty(this, "__canvas", { value: canvas });
+      Object.defineProperty(this, "__settings", { value: settings });
     }
     get canvas() { return this.__canvas; }
     get __s() { return canvasState(this.__canvas); }
     get __path() { return this.__s.path; }
     get __matrix() { return this.__s.style.transform; }
     getContextAttributes() {
-      return { alpha: true, colorSpace: "srgb", desynchronized: false, willReadFrequently: false, colorType: "unorm8" };
+      const { alpha, colorSpace, colorType, desynchronized, willReadFrequently } = this.__settings;
+      return { alpha, colorSpace, colorType, desynchronized, willReadFrequently };
     }
     isContextLost() { return false; }
     save() { const s = this.__s; s.stack.push(copyCanvasStyle(s.style)); }
@@ -19422,7 +19470,11 @@ let omoikaneUserActivationState;
     context.__s.style.fontData = font;
     return font.serialized;
   });
-  defineCanvasAttribute("filter", value => value, value => String(value).trim() || undefined);
+  // Valid values are kept as written; CSS-wide keywords and invalid lists are ignored.
+  defineCanvasAttribute("filter", value => value, value => {
+    const text = String(value);
+    return nativeCanvasParseFilter(text) ? text : undefined;
+  });
   for (const name of ["letterSpacing", "wordSpacing"]) {
     defineCanvasAttribute(name, value => value, value => {
       const text = String(value).trim().toLowerCase();
@@ -20107,14 +20159,19 @@ let omoikaneUserActivationState;
         args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLCanvasElement);
     }
 
-    get width(){return canvasDimensions(this)[0];} set width(value){this.setAttribute("width",String(Math.max(0,Math.trunc(Number(value))||0)));resetHtmlCanvasState(this);}
-    get height(){return canvasDimensions(this)[1];} set height(value){this.setAttribute("height",String(Math.max(0,Math.trunc(Number(value))||0)));resetHtmlCanvasState(this);}
-    getContext(type){
-      const requested=String(type).toLowerCase(),s=canvasState(this);
+    get width(){return canvasDimensions(this)[0];} set width(value){canvasRejectPlaceholder(this);this.setAttribute("width",String(Math.max(0,Math.trunc(Number(value))||0)));resetHtmlCanvasState(this);}
+    get height(){return canvasDimensions(this)[1];} set height(value){canvasRejectPlaceholder(this);this.setAttribute("height",String(Math.max(0,Math.trunc(Number(value))||0)));resetHtmlCanvasState(this);}
+    /// Context IDs match case-sensitively (HTML §4.12.5).
+    getContext(contextId, options = undefined){
+      if(arguments.length===0)throw new TypeError("getContext requires a context ID");
+      const requested=String(contextId);
+      const settings=requested==="2d"?canvas2dSettings(options):null;
+      const s=canvasState(this);
+      if(s.contextMode==="placeholder")throw new DOMException("The canvas has transferred control to an OffscreenCanvas","InvalidStateError");
       if(requested==="2d"){
         if(s.contextMode&&s.contextMode!=="2d")return null;
         s.contextMode="2d";
-        return s.context||(s.context=new CanvasRenderingContext2D(this));
+        return s.context||(s.context=new CanvasRenderingContext2D(canvasConstructionToken,this,settings));
       }
       if(requested==="webgl"||requested==="experimental-webgl"){
         if(s.contextMode&&s.contextMode!=="webgl")return null;
@@ -20123,7 +20180,39 @@ let omoikaneUserActivationState;
       }
       return null;
     }
-    toDataURL(type="image/png"){canvasState(this);return String(type).toLowerCase()==="image/png"?__omoikane_canvas_data_url(this.__id):__omoikane_canvas_data_url(this.__id);}
+    /// A PNG data URL of the bitmap, or `data:,` for an empty bitmap. Other
+    /// image types fall back to PNG.
+    toDataURL(type = "image/png", quality = undefined){
+      canvasRejectPlaceholder(this);
+      const s=canvasState(this);
+      if(s.width===0||s.height===0)return "data:,";
+      return __omoikane_canvas_data_url(this.__id);
+    }
+    /// Calls `callback` in a later task with a PNG Blob of the bitmap as it is
+    /// now, or with null for an empty bitmap or a failed encoding.
+    toBlob(callback, type = "image/png", quality = undefined){
+      if(arguments.length===0)throw new TypeError("toBlob requires a callback");
+      if(typeof callback!=="function")throw new TypeError("The toBlob callback is not a function");
+      canvasRejectPlaceholder(this);
+      const s=canvasState(this);
+      const snapshot=s.width&&s.height?canvasSnapshot(this):null;
+      setTimeout(()=>callback(snapshot?canvasPngBlob(snapshot):null),0);
+    }
+    /// Hands drawing to an OffscreenCanvas whose frames show in this element.
+    transferControlToOffscreen(){
+      const s=canvasState(this);
+      if(s.contextMode)throw new DOMException("The canvas already has a rendering context or was transferred","InvalidStateError");
+      s.contextMode="placeholder";
+      const offscreen=new OffscreenCanvas(s.width,s.height);
+      Object.defineProperty(offscreen,"__placeholder",{value:this});
+      s.offscreen=offscreen;
+      commitCanvas(offscreen,canvasState(offscreen));
+      return offscreen;
+    }
+  }
+  function canvasRejectPlaceholder(canvas){
+    const s=canvasStates.get(canvas);
+    if(s&&s.contextMode==="placeholder")throw new DOMException("The canvas has transferred control to an OffscreenCanvas","InvalidStateError");
   }
 
   const nativeCanvasPng = globalThis.__omoikane_canvas_png;
@@ -20147,6 +20236,9 @@ let omoikaneUserActivationState;
     }
   }
   function canvasSnapshot(canvas) {
+    // A placeholder canvas shows (and so supplies) its OffscreenCanvas's bitmap.
+    const offscreen = canvasStates.get(canvas)?.offscreen;
+    if (offscreen) return canvasSnapshot(offscreen);
     try {
       const state = canvasStateChecked(canvas);
       return { width: state.width, height: state.height, pixels: state.pixels.slice() };
@@ -20155,6 +20247,17 @@ let omoikaneUserActivationState;
         throw new DOMException("Canvas dimensions are too large", "IndexSizeError");
       }
       throw error;
+    }
+  }
+  /// Encodes a nonempty bitmap snapshot as a PNG Blob, or null on failure.
+  function canvasPngBlob(snapshot) {
+    if (typeof nativeCanvasPng !== "function") return null;
+    try {
+      const encoded = nativeCanvasPng(snapshot.width, snapshot.height, new Uint8Array(snapshot.pixels.buffer));
+      const comma = typeof encoded === "string" ? encoded.indexOf(",") : -1;
+      return comma < 0 ? null : new Blob([bytesFromBase64(encoded.slice(comma + 1))], { type: "image/png" });
+    } catch (_) {
+      return null;
     }
   }
   function imageBitmapSource(source) {
@@ -20221,7 +20324,8 @@ let omoikaneUserActivationState;
       if (this.__contextMode !== null && this.__contextMode !== requested) return null;
       this.__contextMode = requested;
       const state = canvasStateChecked(this);
-      if (!this.__context) this.__context = new OffscreenCanvasRenderingContext2D(this, options);
+      const settings = canvas2dSettings(options);
+      if (!this.__context) this.__context = new OffscreenCanvasRenderingContext2D(canvasConstructionToken, this, settings);
       state.context = this.__context;
       return this.__context;
     }
@@ -20236,22 +20340,8 @@ let omoikaneUserActivationState;
       const type = requested === "image/png" ? requested : "image/png";
       const snapshot = canvasSnapshot(this);
       if (snapshot.width === 0 || snapshot.height === 0) return Promise.resolve(new Blob([], { type }));
-      const encodingError = () => Promise.reject(new DOMException("Unable to encode canvas", "EncodingError"));
-      if (typeof nativeCanvasPng !== "function") return encodingError();
-      let encoded;
-      try {
-        encoded = nativeCanvasPng(snapshot.width, snapshot.height, new Uint8Array(snapshot.pixels.buffer));
-      } catch (_) {
-        return encodingError();
-      }
-      if (typeof encoded !== "string") return encodingError();
-      const comma = encoded.indexOf(",");
-      if (comma < 0) return encodingError();
-      try {
-        return Promise.resolve(new Blob([bytesFromBase64(encoded.slice(comma + 1))], { type }));
-      } catch (_) {
-        return encodingError();
-      }
+      const blob = canvasPngBlob(snapshot);
+      return blob ? Promise.resolve(blob) : Promise.reject(new DOMException("Unable to encode canvas", "EncodingError"));
     }
     get [Symbol.toStringTag]() { return "OffscreenCanvas"; }
   }
