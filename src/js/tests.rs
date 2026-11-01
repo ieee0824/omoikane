@@ -171,6 +171,49 @@ fn webassembly_instances_call_exported_and_imported_functions() {
 }
 
 #[test]
+fn webassembly_memory_and_global_objects_preserve_state() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let value = runtime
+        .eval(
+            r#"
+            (() => {
+              const memory = new WebAssembly.Memory({ initial: 1, maximum: 2 });
+              const old = memory.buffer;
+              new Uint8Array(old)[3] = 42;
+              const same = memory.buffer === old && new Uint8Array(memory.buffer)[3] === 42;
+              const previous = memory.grow(1);
+              const current = memory.buffer;
+              const global = new WebAssembly.Global({ value: "i32", mutable: true }, 7);
+              global.value = 9;
+              const immutable = new WebAssembly.Global({ value: "f64" }, 1.5);
+              let immutableError = false;
+              try { immutable.value = 2; } catch (error) { immutableError = error instanceof TypeError; }
+              const first = { id: 1 };
+              const second = { id: 2 };
+              const table = new WebAssembly.Table({ element: "externref", initial: 2, maximum: 3 }, first);
+              table.set(1, second);
+              const tablePrevious = table.grow(1, first);
+              return JSON.stringify({
+                same, previous, detached: old.byteLength === 0,
+                size: current.byteLength, copied: new Uint8Array(current)[3],
+                global: global.value, valueOf: +global, immutable: immutable.value,
+                immutableError,
+                table: [table.length, tablePrevious, table.get(0) === first, table.get(1) === second, table.get(2) === first],
+                memoryBrand: Object.prototype.toString.call(memory),
+                globalBrand: Object.prototype.toString.call(global),
+                tableBrand: Object.prototype.toString.call(table),
+              });
+            })()
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        r#"{"same":true,"previous":1,"detached":true,"size":131072,"copied":42,"global":9,"valueOf":9,"immutable":1.5,"immutableError":true,"table":[3,2,true,true,true],"memoryBrand":"[object WebAssembly.Memory]","globalBrand":"[object WebAssembly.Global]","tableBrand":"[object WebAssembly.Table]"}"#
+    );
+}
+
+#[test]
 fn native_host_call_identifies_the_immediate_javascript_caller_realm() {
     let mut context = Context::default();
     context
