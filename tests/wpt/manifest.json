@@ -1571,6 +1571,8 @@
     {"path": "speech-api/SpeechSynthesisUtterance-basics.https.html"},
     {"path": "webcodecs/encoded-audio-chunk.any.js"},
     {"path": "webcodecs/encoded-video-chunk.any.js"},
-    {"path": "webcodecs/videoColorSpace.any.js"}
+    {"path": "webcodecs/videoColorSpace.any.js"},
+    {"path": "webaudio/the-audio-api/the-offlineaudiocontext-interface/current-time-block-size.html"},
+    {"path": "webaudio/the-audio-api/the-audioworklet-interface/baseaudiocontext-audioworklet.https.html"}
   ]
 }
