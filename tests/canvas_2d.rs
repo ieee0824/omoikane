@@ -187,3 +187,77 @@ fn composite_operations_shadows_and_draw_image() {
         "#,
     );
 }
+
+#[test]
+fn font_attribute_parses_and_serializes_like_the_css_shorthand() {
+    check(
+        1,
+        1,
+        r#"
+        if (ctx.font !== '10px sans-serif') return 'default ' + ctx.font;
+        ctx.font = 'small-caps italic 400 12px/2 "Unknown Font #2", sans-serif';
+        if (ctx.font !== 'italic small-caps 12px "Unknown Font #2", sans-serif') return 'complex ' + ctx.font;
+        ctx.font = '20PX   SERIF';
+        if (ctx.font !== '20px serif') return 'case ' + ctx.font;
+        for (const bogus of ['', 'bogus', 'inherit', '10px {bogus}', '10px initial', '10px serif; color: red'])
+          { ctx.font = bogus; if (ctx.font !== '20px serif') return 'invalid ' + bogus + ' ' + ctx.font; }
+        ctx.font = '2em serif';
+        if (ctx.font !== '20px serif') return 'em ' + ctx.font;
+        ctx.font = 'bold 300% serif';
+        return ctx.font === 'bold 30px serif' || 'percentage ' + ctx.font;
+        "#,
+    );
+}
+
+#[test]
+fn text_is_drawn_as_glyph_outlines_and_measured_from_the_font() {
+    check(
+        60,
+        30,
+        r#"
+        ctx.font = '20px sans-serif';
+        const metrics = ctx.measureText('Hi');
+        if (!(metrics instanceof TextMetrics) || !(metrics.width > 5 && metrics.width < 40)) return 'width ' + metrics.width;
+        if (!(metrics.actualBoundingBoxAscent > 8 && metrics.actualBoundingBoxAscent <= 20)) return 'ascent ' + metrics.actualBoundingBoxAscent;
+        if (!(metrics.fontBoundingBoxAscent > 0 && metrics.fontBoundingBoxDescent > 0)) return 'font box';
+        if (Math.abs(metrics.emHeightAscent + metrics.emHeightDescent - 20) > 1e-9) return 'em ' + metrics.emHeightAscent;
+        if (metrics.alphabeticBaseline !== 0) return 'alphabetic ' + metrics.alphabeticBaseline;
+        if (ctx.measureText('Hi Hi').width <= ctx.measureText('HiHi').width) return 'space advance';
+        // Proportional glyph advances show the text uses font outlines, not boxes.
+        if (!(ctx.measureText('i').width < ctx.measureText('W').width)) return 'proportional advances';
+        const plainWidth = ctx.measureText('hello').width;
+        ctx.fontVariantCaps = 'small-caps';
+        const capsWidth = ctx.measureText('hello').width;
+        ctx.fontVariantCaps = 'normal';
+        // Small caps are synthesized from capitals when the font lacks smcp.
+        if (!(capsWidth > plainWidth)) return 'small caps ' + capsWidth + ' ' + plainWidth;
+        ctx.textBaseline = 'top';
+        const top = ctx.measureText('Hi');
+        if (Math.abs(top.emHeightAscent) > 1e-9 || Math.abs(top.alphabeticBaseline + metrics.emHeightAscent) > 1e-9)
+          return 'top baseline ' + top.emHeightAscent + ' ' + top.alphabeticBaseline;
+        ctx.textBaseline = 'alphabetic';
+        ctx.fillStyle = 'black';
+        ctx.fillText('Hi', 5, 25);
+        // The ink of "H" covers its left stem, but nothing lies below the
+        // descender-free glyphs or above the em box.
+        let inked = 0;
+        for (let x = 0; x < 60; x++) for (let y = 0; y < 30; y++)
+          if (ctx.getImageData(x, y, 1, 1).data[3] > 128) inked++;
+        if (inked < 20) return 'ink ' + inked;
+        for (let x = 0; x < 60; x++) if (ctx.getImageData(x, 28, 1, 1).data[3]) return 'below baseline at ' + x;
+        const left = Math.floor(5 - metrics.actualBoundingBoxLeft), right = Math.ceil(5 + metrics.actualBoundingBoxRight);
+        for (let y = 0; y < 30; y++) {
+          if (left > 0 && ctx.getImageData(left - 1, y, 1, 1).data[3]) return 'left of ink';
+          if (right < 60 && ctx.getImageData(right, y, 1, 1).data[3]) return 'right of ink';
+        }
+        ctx.clearRect(0, 0, 60, 30);
+        ctx.textAlign = 'right';
+        ctx.fillText('Hi', 55, 25, 0);
+        if (ctx.getImageData(50, 20, 10, 10).data.some(value => value)) return 'zero maxWidth draws';
+        ctx.fillText('Hi', 55, 25, 10);
+        const squeezed = Array.from({ length: 60 }, (_, x) => ctx.getImageData(x, 0, 1, 30).data.some(value => value));
+        return squeezed.indexOf(true) >= 44 && squeezed.lastIndexOf(true) <= 55 ||
+          'maxWidth ' + squeezed.indexOf(true) + ' ' + squeezed.lastIndexOf(true);
+        "#,
+    );
+}

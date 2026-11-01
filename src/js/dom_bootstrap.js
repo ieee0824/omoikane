@@ -56,6 +56,10 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_canvas2d_contains;
   const nativeCanvasParseColor = globalThis.__omoikane_canvas_parse_color;
   delete globalThis.__omoikane_canvas_parse_color;
+  const nativeCanvasParseFont = globalThis.__omoikane_canvas_parse_font;
+  delete globalThis.__omoikane_canvas_parse_font;
+  const nativeCanvasText = globalThis.__omoikane_canvas2d_text;
+  delete globalThis.__omoikane_canvas2d_text;
   const nativeCanvasSvgPath = globalThis.__omoikane_canvas_svg_path;
   delete globalThis.__omoikane_canvas_svg_path;
   const nativeBeginFetch = globalThis.__omoikane_begin_fetch;
@@ -18954,6 +18958,80 @@ let omoikaneUserActivationState;
     }
     return [context.__s.path.subpaths, args];
   }
+  /// Parses a `font` value relative to the canvas's computed font size.
+  function canvasParseFont(value, canvas) {
+    let parentSize = 10;
+    try {
+      if (canvas && canvas.isConnected) parentSize = parseFloat(getComputedStyle(canvas).fontSize) || 10;
+    } catch (_) {}
+    const context = { parentSize, rootSize: 16, viewport: [globalThis.innerWidth || 0, globalThis.innerHeight || 0] };
+    const json = nativeCanvasParseFont(String(value), JSON.stringify(context));
+    return json ? JSON.parse(json) : null;
+  }
+  function canvasFont(context) {
+    const style = context.__s.style;
+    if (!style.fontData) style.fontData = canvasParseFont(style.font, context.canvas) || canvasParseFont("10px sans-serif", null);
+    return style.fontData;
+  }
+  function canvasIsRtl(context) {
+    const direction = context.__s.style.direction;
+    if (direction !== "inherit") return direction === "rtl";
+    try {
+      return !!(context.canvas && context.canvas.isConnected && getComputedStyle(context.canvas).direction === "rtl");
+    } catch (_) { return false; }
+  }
+  /// A letterSpacing/wordSpacing value in pixels for a font of `size`.
+  function canvasSpacing(value, size) {
+    const match = /^(-?[\d.]+)([a-z]*)$/.exec(value);
+    if (!match) return 0;
+    const units = { px: 1, "": 1, em: size, rem: 16, ex: size / 2, ch: size / 2, pt: 96 / 72, pc: 16, in: 96,
+      cm: 96 / 2.54, mm: 96 / 25.4, q: 96 / 101.6, vw: (globalThis.innerWidth || 0) / 100,
+      vh: (globalThis.innerHeight || 0) / 100 };
+    units.vmin = Math.min(units.vw, units.vh); units.vmax = Math.max(units.vw, units.vh);
+    return parseFloat(match[1]) * (units[match[2]] ?? 0);
+  }
+  /// Lays out `text` from the start of its alphabetic baseline, y down.
+  /// Without any usable font, a box of 0.6em advances stands in for glyphs.
+  function canvasTextLayout(context, text) {
+    const style = context.__s.style, font = canvasFont(context);
+    text = String(text);
+    const request = { text, size: font.size, family: font.family, style: font.style, weight: font.weight,
+      stretch: font.stretch, letterSpacing: canvasSpacing(style.letterSpacing, font.size),
+      wordSpacing: canvasSpacing(style.wordSpacing, font.size), rtl: canvasIsRtl(context),
+      caps: style.fontVariantCaps !== "normal" ? style.fontVariantCaps : font.variant,
+      kerning: style.fontKerning !== "none" };
+    const canvas = context.canvas, id = canvas && canvas.nodeType === 1 ? internalNodeId(canvas) : null;
+    const json = nativeCanvasText(id ?? null, JSON.stringify(request));
+    if (json) return JSON.parse(json);
+    const size = font.size, width = [...text].length * size * .6;
+    return { width, contours: width ? [[[0, -size * .8], [width, -size * .8], [width, size * .2], [0, size * .2]]] : [],
+      ink: width ? [0, -size * .8, width, size * .2] : null, fontAscent: size * .8, fontDescent: size * .2,
+      emAscent: size * .8, emDescent: size * .2, hanging: size * .64, ideographic: -size * .2 };
+  }
+  /// The x offset of the text start from the anchor for textAlign, and how
+  /// far the textBaseline line sits above the alphabetic baseline.
+  function canvasTextPlacement(context, layout) {
+    const style = context.__s.style, rtl = canvasIsRtl(context);
+    const align = style.textAlign === "start" ? (rtl ? "right" : "left")
+      : style.textAlign === "end" ? (rtl ? "left" : "right") : style.textAlign;
+    const offset = align === "right" ? -layout.width : align === "center" ? -layout.width / 2 : 0;
+    const baseline = { top: layout.emAscent, hanging: layout.hanging, middle: (layout.emAscent - layout.emDescent) / 2,
+      alphabetic: 0, ideographic: layout.ideographic, bottom: -layout.emDescent }[style.textBaseline];
+    return [offset, baseline];
+  }
+  function canvasDrawText(context, kind, text, x, y, maxWidth) {
+    if (!canvasFinite(x, y) || (maxWidth !== undefined && !(maxWidth > 0))) return;
+    const layout = canvasTextLayout(context, text);
+    if (!layout.contours.length) return;
+    const [offset, baseline] = canvasTextPlacement(context, layout);
+    const scale = maxWidth !== undefined && layout.width > maxWidth ? maxWidth / layout.width : 1;
+    const m = context.__s.style.transform;
+    const paths = layout.contours.map(contour => ({
+      points: contour.map(([px, py]) => applyCanvasMatrix(m, x + (offset + px) * scale, y + baseline + py)),
+      closed: true,
+    }));
+    canvasDraw(context, kind, paths);
+  }
   function canvasRectPath(context, x, y, w, h) {
     const path = newCanvasPath();
     canvasPathRect(path, context.__s.style.transform, x, y, w, h);
@@ -19149,24 +19227,24 @@ let omoikaneUserActivationState;
       });
     }
     measureText(text) {
-      const size = parseFloat(this.__s.style.font) || 10;
-      const width = String(text).length * size * .6;
-      return domInterfaces.makeTextMetrics({ width, actualBoundingBoxLeft: 0, actualBoundingBoxRight: width,
-        actualBoundingBoxAscent: size * .8, actualBoundingBoxDescent: size * .2 });
+      const layout = canvasTextLayout(this, text);
+      const [offset, baseline] = canvasTextPlacement(this, layout);
+      const ink = layout.ink || [0, 0, 0, 0];
+      return domInterfaces.makeTextMetrics({
+        width: layout.width,
+        actualBoundingBoxLeft: -(offset + ink[0]), actualBoundingBoxRight: offset + ink[2],
+        actualBoundingBoxAscent: -(ink[1] + baseline), actualBoundingBoxDescent: ink[3] + baseline,
+        fontBoundingBoxAscent: layout.fontAscent - baseline, fontBoundingBoxDescent: layout.fontDescent + baseline,
+        emHeightAscent: layout.emAscent - baseline, emHeightDescent: layout.emDescent + baseline,
+        hangingBaseline: layout.hanging - baseline, alphabeticBaseline: -baseline,
+        ideographicBaseline: layout.ideographic - baseline,
+      });
     }
-    __textBox(text, x, y) {
-      const style = this.__s.style, size = parseFloat(style.font) || 10, width = this.measureText(text).width;
-      const rtl = style.direction === "rtl";
-      const align = style.textAlign === "start" ? (rtl ? "right" : "left") : style.textAlign === "end" ? (rtl ? "left" : "right") : style.textAlign;
-      const left = align === "right" ? x - width : align === "center" ? x - width / 2 : x;
-      const baseline = { top: 0, hanging: size * .2, middle: size * .5, alphabetic: size * .8, ideographic: size, bottom: size }[style.textBaseline];
-      return [left, y - baseline, width, size];
+    fillText(text, x, y, maxWidth = undefined) {
+      canvasDrawText(this, "fill", text, +x, +y, arguments.length > 3 ? +maxWidth : undefined);
     }
-    fillText(text, x, y) {
-      if (canvasFinite(+x, +y)) canvasDraw(this, "fill", canvasRectPath(this, ...this.__textBox(text, +x, +y)));
-    }
-    strokeText(text, x, y) {
-      if (canvasFinite(+x, +y)) canvasDraw(this, "stroke", canvasRectPath(this, ...this.__textBox(text, +x, +y)));
+    strokeText(text, x, y, maxWidth = undefined) {
+      canvasDrawText(this, "stroke", text, +x, +y, arguments.length > 3 ? +maxWidth : undefined);
     }
     get [Symbol.toStringTag]() { return "CanvasRenderingContext2D"; }
   }
@@ -19202,7 +19280,12 @@ let omoikaneUserActivationState;
   defineCanvasAttribute("globalCompositeOperation", value => value,
     value => canvasCompositeOperations.has(String(value)) ? String(value) : undefined);
   defineCanvasAttribute("imageSmoothingEnabled", value => value, value => !!value);
-  defineCanvasAttribute("font", value => value, value => String(value).trim() || undefined);
+  defineCanvasAttribute("font", value => value, (value, context) => {
+    const font = canvasParseFont(value, context.canvas);
+    if (!font) return undefined;
+    context.__s.style.fontData = font;
+    return font.serialized;
+  });
   defineCanvasAttribute("filter", value => value, value => String(value).trim() || undefined);
   for (const name of ["letterSpacing", "wordSpacing"]) {
     defineCanvasAttribute(name, value => value, value => {

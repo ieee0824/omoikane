@@ -684,7 +684,7 @@ collect_pattern \
   "/navigation-api/navigate-event/event-constructor.html" \
   "/navigation-api/navigation-methods/navigate-info-and-state.html"
 # Canvas 2D drawing (#1292).
-collect_pattern "/html/canvas/element/" "/html/canvas/resources/" "/images/"
+collect_pattern "/html/canvas/element/" "/html/canvas/resources/" "/images/" "/fonts/CanvasTest*.ttf" "/fonts/Lato-Medium.ttf" "/fonts/pass.woff" "/fonts/fail.woff"
 # A pinned revision alone does not prove that newly requested WPT paths exist.
 if [[ "$current_revision" == "$revision" ]] &&
   diff -q <(printf '%s\n' "${patterns[@]}" | LC_ALL=C sort -u) \

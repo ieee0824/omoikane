@@ -19,6 +19,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 mod diagnostics;
 pub use diagnostics::{FontSelectionRecord, with_font_selection_diagnostics};
+mod outline;
 mod system;
 #[cfg(test)]
 pub(crate) use system::with_test_database as with_test_font_database;

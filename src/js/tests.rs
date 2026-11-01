@@ -3233,14 +3233,22 @@ fn canvas_2d_pixels_transform_clip_image_data_draw_image_and_png() {
           const copy=document.createElement('canvas'); copy.width=2; copy.height=2; copy.getContext('2d').drawImage(canvas,0,0,2,2,0,0,2,2);
           const p=ctx.getImageData(0,0,6,4).data;
           globalThis.canvasUrl=canvas.toDataURL('image/png');
-          globalThis.canvasWidth=ctx.measureText('abcd').width;
+          globalThis.canvasWidths=[ctx.measureText('abcd').width, ctx.measureText('abcdabcd').width];
           globalThis.copyPixel=Array.from(copy.getContext('2d').getImageData(0,0,1,1).data).join(',');
           return [p.slice(0,4),p.slice(8,12),p.slice(48,52),p.slice(92,96)].map(x=>Array.from(x).join(',')).join('|');
         })()"#,
     );
     assert_eq!(result, "255,0,0,255|0,0,255,255|0,255,0,255|9,8,7,255");
     assert_eq!(eval_str(&mut runtime, "copyPixel"), "255,0,0,255");
-    assert_eq!(eval_str(&mut runtime, "String(canvasWidth)"), "24");
+    // Widths come from the default 10px sans-serif glyph advances: lowercase
+    // glyphs are narrower than an em, and a longer run is wider.
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "String(canvasWidths[0] > 0 && canvasWidths[0] < 40 && canvasWidths[1] > canvasWidths[0])"
+        ),
+        "true"
+    );
     let data_url = eval_str(&mut runtime, "canvasUrl");
     let png = base64::engine::general_purpose::STANDARD
         .decode(data_url.split_once(',').unwrap().1)
