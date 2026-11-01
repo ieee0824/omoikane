@@ -532,6 +532,39 @@ impl Regex {
         .match_at(start)
     }
 
+    /// Searches borrowed Latin1 code units from `start`, retaining the full prefix.
+    ///
+    /// Offsets are code-unit indices, and Unicode case folding remains available.
+    #[cfg(feature = "utf16")]
+    pub fn find_from_latin1<'r, 't>(
+        &'r self,
+        text: &'t [u8],
+        start: usize,
+    ) -> exec::Matches<super::classicalbacktrack::BacktrackExecutor<'r, indexing::Latin1Input<'t>>>
+    {
+        let input = indexing::Latin1Input::new(text, self.cr.flags.unicode_aware());
+        exec::Matches::new(
+            super::classicalbacktrack::BacktrackExecutor::new(
+                input,
+                MatchAttempter::new(&self.cr, input.left_end()),
+            ),
+            start,
+        )
+    }
+
+    /// Attempts a borrowed Latin1 match exactly at `start`, retaining assertion context.
+    ///
+    /// Failure does not search later positions. No UTF-16 copy is allocated.
+    #[cfg(feature = "utf16")]
+    pub fn match_at_latin1(&self, text: &[u8], start: usize) -> Option<Match> {
+        let input = indexing::Latin1Input::new(text, self.cr.flags.unicode_aware());
+        super::classicalbacktrack::BacktrackExecutor::new(
+            input,
+            MatchAttempter::new(&self.cr, input.left_end()),
+        )
+        .match_at(start)
+    }
+
     /// Replaces the first match of the regex in `text` with the replacement string.
     ///
     /// The replacement string may contain capture group references in the form `$1`, `$2`, etc.,
@@ -1102,6 +1135,64 @@ mod canonicalization_tests {
         assert!(!regex.cr.flags.unicode);
         for pattern in [r"\a", r"\1", r"\01"] {
             assert!(Regex::with_flags(pattern, flags).is_err(), "{pattern}/v");
+        }
+    }
+}
+
+#[cfg(all(test, feature = "utf16"))]
+mod latin1_input_tests {
+    use super::{Match, Regex};
+
+    fn signature(found: Match) -> (super::Range, Vec<Option<super::Range>>, Box<[Box<str>]>) {
+        (found.range, found.captures, found.group_names)
+    }
+
+    #[test]
+    fn borrowed_latin1_matches_ucs2_with_full_context_in_all_modes() {
+        let texts = [
+            (0..=255).collect::<Vec<u8>>(),
+            b"prefix\nss kk Aaa _ word".to_vec(),
+            vec![0xe9, 0xc9, 0xe9, 0xe9, 0xb5, 0xff, 0, b'x'],
+            Vec::new(),
+        ];
+        let patterns = [
+            r"(?<unit>[\s\S])",
+            r"(?<=é)(?<first>É)(é)\k<first>",
+            r"(?<!x)é",
+            r"^.$",
+            r"\b\w+\b",
+            r"(s)\1",
+            r"[ſKΜ]",
+            r"[^s]",
+            r"[A-ÿ]+",
+            r"(?<tail>é|x)?$",
+            r"(?=é)",
+        ];
+        for bytes in texts {
+            let units: Vec<u16> = bytes.iter().copied().map(u16::from).collect();
+            for flags in ["", "i", "u", "iu", "v", "iv", "im"] {
+                for pattern in patterns {
+                    let regex = Regex::with_flags(pattern, flags).unwrap();
+                    for start in 0..=bytes.len() {
+                        assert_eq!(
+                            regex.match_at_latin1(&bytes, start).map(signature),
+                            regex.match_at_ucs2(&units, start).map(signature),
+                            "sticky {pattern}/{flags} at {start} in {bytes:?}",
+                        );
+                        assert_eq!(
+                            regex
+                                .find_from_latin1(&bytes, start)
+                                .map(signature)
+                                .collect::<Vec<_>>(),
+                            regex
+                                .find_from_ucs2(&units, start)
+                                .map(signature)
+                                .collect::<Vec<_>>(),
+                            "search {pattern}/{flags} at {start} in {bytes:?}",
+                        );
+                    }
+                }
+            }
         }
     }
 }

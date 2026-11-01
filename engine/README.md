@@ -119,8 +119,16 @@ Either `u` or `v` selects Unicode-aware parsing, folding, optimization and input
 handling, while the public flags record keeps those two flags distinct. The
 browser regressions in `tests/regexp_latin1.rs` and the standalone regress tests
 cover long-s, Kelvin sign, dotless-i, Latin1 code units, captures and flag syntax.
-This correction is separate from the planned Latin1 input-copy optimization;
-neither the Boa nor regress origin manifest is rewritten.
+This correctness correction is independent of the Latin1 input-copy optimization
+described below; neither the Boa nor regress origin manifest is rewritten.
+
+Latin1 RegExp input is borrowed as code units by the Boa bridge instead of
+allocating a full UTF-16 copy for each execution. The shared code-unit indexer
+uses Unicode character properties for both byte and UCS-2 inputs, preserving
+non-ASCII folding and the entire prefix for lookbehind and boundary assertions.
+Standalone parity tests compare exact/search execution, captures and names at
+every offset across all 256 byte values and legacy, `u`, and `v` modes. The
+browser semantic tests remain independent absolute expectations.
 
 The bundled script-extension tables also merge overlapping intervals in Arabic,
 Bengali, Cyrillic, Devanagari, Grantha, Gujarati, Gurmukhi and Tamil. This preserves
