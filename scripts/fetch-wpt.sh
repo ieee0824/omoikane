@@ -47,6 +47,8 @@ collect_pattern "/css/css-highlight-api/"
 collect_pattern "/requestidlecallback/" "/scheduler/" "/dom/abort/resources/"
 # Keepalive Fetch APIs (#1294).
 collect_pattern "/beacon/" "/fetch/fetch-later/"
+# Picture-in-Picture IDL conformance (#1615).
+collect_pattern "/picture-in-picture/" "/common/media.js" "/media/movie_5.mp4" "/media/movie_5.webm"
 collect_pattern "/common/performance-timeline-utils.js" "/common/performance-timeline-utils.js.headers"
 collect_pattern "/paint-timing/" "/largest-contentful-paint/" "/server-timing/" "/longtask-timing/" "/event-timing/" "/layout-instability/" "/images/"
 collect_pattern \

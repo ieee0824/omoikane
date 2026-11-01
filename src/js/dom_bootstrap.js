@@ -7150,10 +7150,21 @@ let omoikaneUserActivationState;
   }
 
   function pictureInPictureElementForDocument(doc) {
-    if (!isDocumentNode(doc)) return null;
+    if (!isDocumentNode(doc)) throw new TypeError("Illegal invocation");
     const id = safeWeakMapGet(pictureInPictureElementIds, doc);
     const element = id === undefined ? null : wrapNode(id);
     return element && internalOwnerDocument(element) === doc ? element : null;
+  }
+
+  function pictureInPictureElementForRoot(root) {
+    requireNodeReceiver(root);
+    const doc = internalNodeType(root) === 9 ? root : internalOwnerDocument(root);
+    const element = pictureInPictureElementForDocument(doc);
+    if (!element) return null;
+    const candidate = retargetNode(element, root);
+    let tree = candidate;
+    while (tree && internalParentNode(tree)) tree = internalParentNode(tree);
+    return tree === root ? candidate : null;
   }
 
   function pictureInPictureEvent(type, window) {
@@ -9816,7 +9827,11 @@ let omoikaneUserActivationState;
     }
 
     exitPictureInPicture() {
-      return leavePictureInPicture(this);
+      try {
+        return leavePictureInPicture(this);
+      } catch (error) {
+        return Promise.reject(error);
+      }
     }
 
     get adoptedStyleSheets() {
@@ -10237,6 +10252,7 @@ let omoikaneUserActivationState;
       return hitTestForRoot(this, x, y, true);
     }
     get pointerLockElement() { return pointerLockElementForRoot(this); }
+    get pictureInPictureElement() { return pictureInPictureElementForRoot(this); }
     get fullscreenElement() {
       const candidate = rawFullscreenElementForDocument(internalOwnerDocument(this.host));
       return candidate ? retargetNode(candidate, this) : null;
@@ -14191,14 +14207,23 @@ let omoikaneUserActivationState;
     set width(value) { this.setAttribute("width", String(Math.max(0, Math.trunc(Number(value) || 0)))); }
     get height() { return Math.max(0, Math.trunc(Number(this.getAttribute("height")) || 0)); }
     set height(value) { this.setAttribute("height", String(Math.max(0, Math.trunc(Number(value) || 0)))); }
-    get disablePictureInPicture() { return this.hasAttribute("disablepictureinpicture"); }
+    get disablePictureInPicture() {
+      requireNodeReceiver(this);
+      return this.hasAttribute("disablepictureinpicture");
+    }
     set disablePictureInPicture(value) {
+      requireNodeReceiver(this);
       if (value) this.setAttribute("disablepictureinpicture", "");
       else this.removeAttribute("disablepictureinpicture");
     }
     requestPictureInPicture() {
+      try {
+        requireNodeReceiver(this);
+      } catch (error) {
+        return Promise.reject(error);
+      }
       const doc = internalOwnerDocument(this);
-      if (!doc || !internalIsConnected(this) || this.disablePictureInPicture ||
+      if (!doc || this.disablePictureInPicture ||
           this.__mediaReadyState === MEDIA_HAVE_NOTHING) {
         return Promise.reject(new DOMException("Picture-in-Picture is not available", "InvalidStateError"));
       }
@@ -29370,30 +29395,115 @@ let omoikaneUserActivationState;
   }
 
   const pictureInPictureWindowConstructionToken = {};
+  const pictureInPictureWindowStates = new WeakMap();
   class PictureInPictureWindow extends EventTarget {
-    constructor(token, width = 0, height = 0) {
+    constructor(...args) {
       super();
+      const [token, width = 0, height = 0] = args;
       if (token !== pictureInPictureWindowConstructionToken) throw new TypeError("Illegal constructor");
-      this.__width = Math.max(0, Math.trunc(Number(width) || 0));
-      this.__height = Math.max(0, Math.trunc(Number(height) || 0));
+      pictureInPictureWindowStates.set(this, {
+        width: Math.max(0, Math.trunc(Number(width) || 0)),
+        height: Math.max(0, Math.trunc(Number(height) || 0)),
+        onresize: null,
+      });
     }
-    get width() { return this.__width; }
-    get height() { return this.__height; }
+    get width() {
+      const state = pictureInPictureWindowStates.get(this);
+      if (!state) throw new TypeError("Illegal invocation");
+      return state.width;
+    }
+    get height() {
+      const state = pictureInPictureWindowStates.get(this);
+      if (!state) throw new TypeError("Illegal invocation");
+      return state.height;
+    }
+    get onresize() {
+      const state = pictureInPictureWindowStates.get(this);
+      if (!state) throw new TypeError("Illegal invocation");
+      return state.onresize;
+    }
+    set onresize(callback) {
+      const state = pictureInPictureWindowStates.get(this);
+      if (!state) throw new TypeError("Illegal invocation");
+      if (state.onresize) this.removeEventListener("resize", state.onresize);
+      state.onresize = typeof callback === "function" ? callback : null;
+      if (state.onresize) this.addEventListener("resize", state.onresize);
+    }
+    get [Symbol.toStringTag]() { return "PictureInPictureWindow"; }
   }
 
+  const pictureInPictureEventWindows = new WeakMap();
   class PictureInPictureEvent extends Event {
-    constructor(type, init = {}) {
+    constructor(type, init) {
       super(type, init);
       const window = init && init.pictureInPictureWindow;
       if (!(window instanceof PictureInPictureWindow)) {
         throw new TypeError("pictureInPictureWindow is required");
       }
-      Object.defineProperty(this, "pictureInPictureWindow", {
-        value: window,
-        enumerable: true,
-      });
+      pictureInPictureEventWindows.set(this, window);
     }
+    get pictureInPictureWindow() {
+      const window = pictureInPictureEventWindows.get(this);
+      if (!window) throw new TypeError("Illegal invocation");
+      return window;
+    }
+    get [Symbol.toStringTag]() { return "PictureInPictureEvent"; }
   }
+
+  for (const name of ["width", "height", "onresize"]) {
+    Object.defineProperty(PictureInPictureWindow.prototype, name, {
+      ...Object.getOwnPropertyDescriptor(PictureInPictureWindow.prototype, name),
+      enumerable: true,
+    });
+  }
+  Object.defineProperty(PictureInPictureEvent.prototype, "pictureInPictureWindow", {
+    ...Object.getOwnPropertyDescriptor(PictureInPictureEvent.prototype, "pictureInPictureWindow"),
+    enumerable: true,
+  });
+
+  for (const type of ["enterpictureinpicture", "leavepictureinpicture"]) {
+    const key = "__on_" + type;
+    Object.defineProperty(HTMLVideoElement.prototype, "on" + type, {
+      configurable: true,
+      enumerable: true,
+      get() {
+        requireNodeReceiver(this);
+        return safeWeakMapGet(nodeEventStates, this).handlers.get(key) || null;
+      },
+      set(handler) {
+        requireNodeReceiver(this);
+        const handlers = safeWeakMapGet(nodeEventStates, this).handlers;
+        const previous = handlers.get(key);
+        if (previous) this.removeEventListener(type, previous);
+        const next = typeof handler === "function" ? handler : null;
+        handlers.set(key, next);
+        if (next) this.addEventListener(type, next);
+      },
+    });
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLVideoElement.prototype, "on" + type);
+    Object.defineProperty(descriptor.get, "name", {
+      value: "get on" + type, configurable: true,
+    });
+    Object.defineProperty(descriptor.set, "name", {
+      value: "set on" + type, configurable: true,
+    });
+  }
+  for (const name of ["requestPictureInPicture", "disablePictureInPicture"]) {
+    Object.defineProperty(HTMLVideoElement.prototype, name, {
+      ...Object.getOwnPropertyDescriptor(HTMLVideoElement.prototype, name),
+      enumerable: true,
+    });
+  }
+  for (const name of ["pictureInPictureEnabled", "pictureInPictureElement", "exitPictureInPicture"]) {
+    Object.defineProperty(Document.prototype, name, {
+      ...Object.getOwnPropertyDescriptor(Document.prototype, name),
+      enumerable: true,
+    });
+  }
+  Object.defineProperty(ShadowRoot.prototype, "pictureInPictureElement", {
+    ...Object.getOwnPropertyDescriptor(ShadowRoot.prototype, "pictureInPictureElement"),
+    enumerable: true,
+  });
 
   const dispatchWorkerErrorEvent = EventTarget.prototype.dispatchEvent;
   dispatchReportedWorkerError = (owner, event) => {
@@ -31588,8 +31698,12 @@ let omoikaneUserActivationState;
     });
   }
   globalThis.CloseWatcher = CloseWatcher;
-  globalThis.PictureInPictureWindow = PictureInPictureWindow;
-  globalThis.PictureInPictureEvent = PictureInPictureEvent;
+  Object.defineProperty(globalThis, "PictureInPictureWindow", {
+    value: PictureInPictureWindow, writable: true, configurable: true,
+  });
+  Object.defineProperty(globalThis, "PictureInPictureEvent", {
+    value: PictureInPictureEvent, writable: true, configurable: true,
+  });
   const dispatchCspGlobalEvent = EventTarget.prototype.dispatchEvent;
   // DOM nodes and the Window inherit the EventTarget interface. Their own
   // listener operations retain the document-backed event dispatch state.

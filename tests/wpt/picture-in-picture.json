@@ -1,0 +1,5 @@
+{
+  "tests": [
+    { "path": "picture-in-picture/idlharness.window.js" }
+  ]
+}
