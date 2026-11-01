@@ -26784,6 +26784,175 @@ let omoikaneUserActivationState;
     });
   };
 
+  const gamepadToken = {};
+  const gamepadState = new WeakMap();
+  const gamepadButtonState = new WeakMap();
+  const gamepadActuatorState = new WeakMap();
+  const gamepadEventState = new WeakMap();
+  const gamepadSlots = [];
+  function gamepadStateOf(value) { return gamepadState.get(value) || illegalInvocation(); }
+  class GamepadButton {
+    constructor(token, value) {
+      if (token !== gamepadToken) throw new TypeError("Illegal constructor");
+      gamepadButtonState.set(this, value);
+    }
+    __state() { return gamepadButtonState.get(this) || illegalInvocation(); }
+    get pressed() { return this.__state().pressed; }
+    get touched() { return this.__state().touched; }
+    get value() { return this.__state().value; }
+    get [Symbol.toStringTag]() { return "GamepadButton"; }
+  }
+  class GamepadHapticActuator {
+    constructor(token, gamepad) {
+      if (token !== gamepadToken) throw new TypeError("Illegal constructor");
+      gamepadActuatorState.set(this, gamepad);
+    }
+    __gamepad() { return gamepadActuatorState.get(this) || illegalInvocation(); }
+    get effects() { return gamepadStateOf(this.__gamepad()).hapticEffects; }
+    playEffect(type, params = {}) {
+      return Promise.resolve().then(() => {
+        const gamepad = this.__gamepad();
+        const state = gamepadStateOf(gamepad);
+        const effect = String(type);
+        if (!state.connected || !state.hapticEffects.includes(effect)) {
+          throw new DOMException("The haptic effect is unavailable.", "NotSupportedError");
+        }
+        const init = Object(params);
+        const request = {
+          effect,
+          duration: Number(init.duration ?? 0),
+          startDelay: Number(init.startDelay ?? 0),
+          strongMagnitude: Number(init.strongMagnitude ?? 0),
+          weakMagnitude: Number(init.weakMagnitude ?? 0),
+          leftTrigger: Number(init.leftTrigger ?? 0),
+          rightTrigger: Number(init.rightTrigger ?? 0),
+        };
+        try { return String(__omoikane_gamepad("play", __omoikane_document_id, state.index, JSON.stringify(request))); }
+        catch (error) { throw new DOMException(String(error), "NotSupportedError"); }
+      });
+    }
+    reset() {
+      return Promise.resolve().then(() => {
+        const state = gamepadStateOf(this.__gamepad());
+        if (!state.connected) return "complete";
+        try { return String(__omoikane_gamepad("reset", __omoikane_document_id, state.index, "")); }
+        catch (error) { throw new DOMException(String(error), "NotSupportedError"); }
+      });
+    }
+    get [Symbol.toStringTag]() { return "GamepadHapticActuator"; }
+  }
+  class Gamepad {
+    constructor(token, snapshot) {
+      if (token !== gamepadToken) throw new TypeError("Illegal constructor");
+      const state = { index: snapshot.index, actuator: null };
+      gamepadState.set(this, state);
+      updateGamepad(this, snapshot);
+      state.actuator = new GamepadHapticActuator(gamepadToken, this);
+    }
+    __state() { return gamepadStateOf(this); }
+    get id() { return this.__state().id; }
+    get index() { return this.__state().index; }
+    get connected() { return this.__state().connected; }
+    get timestamp() { return this.__state().timestamp; }
+    get mapping() { return this.__state().mapping; }
+    get axes() { return this.__state().axes; }
+    get buttons() { return this.__state().buttons; }
+    get touches() { return this.__state().touches; }
+    get vibrationActuator() { return this.__state().actuator; }
+    get hapticActuators() { return Object.freeze([this.__state().actuator]); }
+    get [Symbol.toStringTag]() { return "Gamepad"; }
+  }
+  function updateGamepad(gamepad, snapshot) {
+    const state = gamepadStateOf(gamepad);
+    state.id = String(snapshot.id);
+    state.connected = !!snapshot.connected;
+    state.timestamp = Number(snapshot.timestamp);
+    state.mapping = String(snapshot.mapping || "");
+    state.axes = Object.freeze(Array.from(snapshot.axes || [], Number));
+    state.buttons = Object.freeze(Array.from(snapshot.buttons || [], value => new GamepadButton(gamepadToken, Object.freeze({
+      pressed: !!value.pressed,
+      touched: !!value.touched,
+      value: Number(value.value),
+    }))));
+    state.touches = Object.freeze([]);
+    state.hapticEffects = Object.freeze(Array.from(snapshot.hapticEffects || [], String));
+  }
+  class GamepadEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      const value = Object(init).gamepad;
+      if (value !== undefined && value !== null && !(value instanceof Gamepad)) throw new TypeError("gamepad must be a Gamepad or null");
+      gamepadEventState.set(this, value ?? null);
+    }
+    get gamepad() { return gamepadEventState.has(this) ? gamepadEventState.get(this) : illegalInvocation(); }
+    get [Symbol.toStringTag]() { return "GamepadEvent"; }
+  }
+  function dispatchGamepadTransition(type, gamepad) {
+    queueMicrotask(() => {
+      const event = new GamepadEvent(type, { gamepad });
+      const handler = globalThis["on" + type];
+      if (typeof handler === "function") __omoikane_call_event_listener(handler, globalThis, event);
+      globalThis.dispatchEvent(event);
+    });
+  }
+  function pollGamepads(dispatchTransitions = false) {
+    let snapshots;
+    try { snapshots = JSON.parse(String(__omoikane_gamepad("snapshot", __omoikane_document_id, 0, ""))); }
+    catch (error) {
+      if (String(error).includes("SecurityError")) throw new DOMException("Gamepad access is disallowed by Permissions Policy.", "SecurityError");
+      throw error;
+    }
+    const seen = new Set();
+    for (const snapshot of snapshots) {
+      const index = Number(snapshot.index) >>> 0;
+      if (seen.has(index)) continue;
+      seen.add(index);
+      const previous = gamepadSlots[index] || null;
+      if (!snapshot.connected) {
+        if (previous && gamepadStateOf(previous).connected) {
+          gamepadStateOf(previous).connected = false;
+          if (dispatchTransitions) dispatchGamepadTransition("gamepaddisconnected", previous);
+        }
+        gamepadSlots[index] = null;
+        continue;
+      }
+      const gamepad = previous || new Gamepad(gamepadToken, { ...snapshot, index });
+      const wasConnected = previous ? gamepadStateOf(previous).connected : false;
+      updateGamepad(gamepad, { ...snapshot, index });
+      gamepadSlots[index] = gamepad;
+      if (!wasConnected && dispatchTransitions) dispatchGamepadTransition("gamepadconnected", gamepad);
+    }
+    for (let index = 0; index < gamepadSlots.length; index++) {
+      const gamepad = gamepadSlots[index];
+      if (!gamepad || seen.has(index)) continue;
+      if (gamepadStateOf(gamepad).connected) {
+        gamepadStateOf(gamepad).connected = false;
+        if (dispatchTransitions) dispatchGamepadTransition("gamepaddisconnected", gamepad);
+      }
+      gamepadSlots[index] = null;
+    }
+    while (gamepadSlots.length && gamepadSlots[gamepadSlots.length - 1] == null) gamepadSlots.pop();
+    return Array.from(gamepadSlots, value => value || null);
+  }
+  globalThis.__omoikane_poll_gamepads = pollGamepads;
+  for (const constructor of [Gamepad, GamepadButton, GamepadHapticActuator]) {
+    Object.defineProperty(constructor, "length", { value: 0 });
+  }
+  for (const [constructor, members] of [
+    [Gamepad, ["id", "index", "connected", "timestamp", "mapping", "axes", "buttons", "touches", "vibrationActuator"]],
+    [GamepadButton, ["pressed", "touched", "value"]],
+    [GamepadHapticActuator, ["effects", "playEffect", "reset"]],
+    [GamepadEvent, ["gamepad"]],
+  ]) {
+    for (const member of members) {
+      const descriptor = Object.getOwnPropertyDescriptor(constructor.prototype, member);
+      Object.defineProperty(constructor.prototype, member, { ...descriptor, enumerable: true });
+    }
+  }
+  for (const [name, constructor] of Object.entries({ Gamepad, GamepadButton, GamepadEvent, GamepadHapticActuator })) {
+    Object.defineProperty(globalThis, name, { configurable: true, enumerable: false, writable: true, value: constructor });
+  }
+
   class Navigator {
     constructor(token) {
       if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
@@ -26813,8 +26982,16 @@ let omoikaneUserActivationState;
         });
       }
     }
+    getGamepads() {
+      if (!(this instanceof Navigator)) throw new TypeError("Illegal invocation");
+      return pollGamepads(false);
+    }
     get [Symbol.toStringTag]() { return "Navigator"; }
   }
+  Object.defineProperty(Navigator.prototype, "getGamepads", {
+    ...Object.getOwnPropertyDescriptor(Navigator.prototype, "getGamepads"),
+    enumerable: true,
+  });
   globalThis.PluginArray = PluginArray;
   globalThis.MimeTypeArray = MimeTypeArray;
   globalThis.Navigator = Navigator;
