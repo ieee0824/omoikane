@@ -51,6 +51,8 @@ collect_pattern "/beacon/" "/fetch/fetch-later/"
 collect_pattern "/picture-in-picture/" "/common/media.js" "/media/movie_5.mp4" "/media/movie_5.webm"
 # TextTrack and WebVTT parsing/IDL conformance (#1614).
 collect_pattern "/webvtt/" "/html/semantics/embedded-content/media-elements/track/"
+# Media capture streams and deterministic MediaRecorder behavior (#1612).
+collect_pattern "/mediacapture-streams/" "/mediacapture-record/"
 collect_pattern "/common/performance-timeline-utils.js" "/common/performance-timeline-utils.js.headers"
 collect_pattern "/paint-timing/" "/largest-contentful-paint/" "/server-timing/" "/longtask-timing/" "/event-timing/" "/layout-instability/" "/images/"
 collect_pattern \

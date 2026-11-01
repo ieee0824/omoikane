@@ -161,6 +161,8 @@ let omoikaneUserActivationState;
   const nativeClipboardEventWrite = globalThis.__omoikane_clipboard_event_write;
   const nativeClipboardPermission = globalThis.__omoikane_clipboard_permission;
   const nativeGeolocationPermission = globalThis.__omoikane_geolocation_permission;
+  const nativeMediaCaptureSnapshot = globalThis.__omoikane_media_capture_snapshot;
+  try { delete globalThis.__omoikane_media_capture_snapshot; } catch (_) {}
   const nativeIsSecureContext = globalThis.__omoikane_is_secure_context;
   const nativeCrossOriginIsolated = globalThis.__omoikane_cross_origin_isolated;
   const nativeStorageManager = globalThis.__omoikane_storage_manager;
@@ -25509,6 +25511,204 @@ let omoikaneUserActivationState;
     globalThis.StorageManager = StorageManager;
   }
 
+  const mediaTrackState = new WeakMap();
+  const mediaStreamState = new WeakMap();
+  let nextMediaStreamId = 1;
+  let nextMediaTrackId = 1;
+  function mediaIdentifier(sequence) {
+    const suffix = Number(sequence).toString(16).padStart(12, "0").slice(-12);
+    return `00000000-0000-4000-8000-${suffix}`;
+  }
+  function illegalInvocation() { throw new TypeError("Illegal invocation"); }
+  // EventTarget/Event are installed later in this bootstrap. Capture objects
+  // are constructed only after that point, while this bridge keeps Navigator
+  // construction free of temporal-dead-zone dependencies.
+  class MediaEventTarget {
+    constructor() { this._listeners = new Map(); }
+    addEventListener(...args) { return globalThis.EventTarget.prototype.addEventListener.call(this, ...args); }
+    removeEventListener(...args) { return globalThis.EventTarget.prototype.removeEventListener.call(this, ...args); }
+    dispatchEvent(...args) { return globalThis.EventTarget.prototype.dispatchEvent.call(this, ...args); }
+  }
+  function defineEventHandler(target, name) {
+    Object.defineProperty(target, "on" + name, {
+      configurable: true, enumerable: true,
+      get() { return this["__on" + name] || null; },
+      set(value) { this["__on" + name] = typeof value === "function" ? value : null; },
+    });
+  }
+  function dispatchMediaEvent(target, type, event = new Event(type)) {
+    const handler = target["on" + type];
+    if (typeof handler === "function") __omoikane_call_event_listener(handler, target, event);
+    target.dispatchEvent(event);
+  }
+  class MediaDeviceInfo {
+    constructor(token, data) {
+      if (token !== mediaCaptureToken) throw new TypeError("Illegal constructor");
+      for (const name of ["deviceId", "kind", "label", "groupId"]) {
+        Object.defineProperty(this, name, { enumerable: true, value: String(data[name] || "") });
+      }
+    }
+    toJSON() { return { deviceId: this.deviceId, kind: this.kind, label: this.label, groupId: this.groupId }; }
+    get [Symbol.toStringTag]() { return "MediaDeviceInfo"; }
+  }
+  class MediaStreamTrackEvent {
+    constructor(type, init = {}) {
+      if (!(init.track instanceof MediaStreamTrack)) throw new TypeError("track must be a MediaStreamTrack");
+      const event = new globalThis.Event(type, init);
+      Object.setPrototypeOf(event, MediaStreamTrackEvent.prototype);
+      Object.defineProperty(event, "track", { enumerable: true, value: init.track });
+      return event;
+    }
+    get [Symbol.toStringTag]() { return "MediaStreamTrackEvent"; }
+  }
+  class MediaStreamTrack extends MediaEventTarget {
+    constructor(token, data) {
+      super();
+      if (token !== mediaCaptureToken) throw new TypeError("Illegal constructor");
+      mediaTrackState.set(this, {
+        id: data.id || mediaIdentifier(nextMediaTrackId++),
+        kind: data.kind,
+        label: data.label || "",
+        deviceId: data.deviceId || "",
+        enabled: data.enabled === undefined ? true : !!data.enabled,
+        muted: !!data.muted,
+        readyState: data.readyState === "ended" ? "ended" : "live",
+      });
+    }
+    get kind() { return mediaTrackState.get(this)?.kind ?? illegalInvocation(); }
+    get id() { return mediaTrackState.get(this)?.id ?? illegalInvocation(); }
+    get label() { return mediaTrackState.get(this)?.label ?? illegalInvocation(); }
+    get enabled() { return mediaTrackState.get(this)?.enabled ?? illegalInvocation(); }
+    set enabled(value) { const state = mediaTrackState.get(this); if (!state) illegalInvocation(); state.enabled = !!value; }
+    get muted() { return mediaTrackState.get(this)?.muted ?? illegalInvocation(); }
+    get readyState() { return mediaTrackState.get(this)?.readyState ?? illegalInvocation(); }
+    get contentHint() { return ""; }
+    set contentHint(_value) {}
+    clone() {
+      const state = mediaTrackState.get(this); if (!state) illegalInvocation();
+      return new MediaStreamTrack(mediaCaptureToken, { ...state, id: mediaIdentifier(nextMediaTrackId++) });
+    }
+    stop() {
+      const state = mediaTrackState.get(this); if (!state) illegalInvocation();
+      if (state.readyState === "ended") return;
+      state.readyState = "ended";
+    }
+    getCapabilities() { const state = mediaTrackState.get(this); if (!state) illegalInvocation(); return { deviceId: state.deviceId }; }
+    getConstraints() { if (!mediaTrackState.has(this)) illegalInvocation(); return {}; }
+    getSettings() { const state = mediaTrackState.get(this); if (!state) illegalInvocation(); return { deviceId: state.deviceId }; }
+    applyConstraints(constraints = {}) {
+      const state = mediaTrackState.get(this);
+      if (!state) return Promise.reject(new TypeError("Illegal invocation"));
+      return Promise.resolve().then(() => {
+        const exact = requestedDeviceId(constraints);
+        if (exact && exact !== state.deviceId) {
+          const error = new DOMException("No device satisfies the constraints.", "OverconstrainedError");
+          Object.defineProperty(error, "constraint", { enumerable: true, value: "deviceId" });
+          throw error;
+        }
+      });
+    }
+    get [Symbol.toStringTag]() { return "MediaStreamTrack"; }
+  }
+  for (const type of ["ended", "mute", "unmute"]) defineEventHandler(MediaStreamTrack.prototype, type);
+  class MediaStream extends MediaEventTarget {
+    constructor(value = undefined) {
+      super();
+      let tracks = [];
+      if (value instanceof MediaStream) tracks = value.getTracks();
+      else if (value !== undefined) tracks = Array.from(value);
+      if (tracks.some(track => !(track instanceof MediaStreamTrack))) throw new TypeError("tracks must contain MediaStreamTrack values");
+      mediaStreamState.set(this, { id: mediaIdentifier(nextMediaStreamId++), tracks: tracks.slice() });
+    }
+    get id() { return mediaStreamState.get(this)?.id ?? illegalInvocation(); }
+    get active() { const state = mediaStreamState.get(this); if (!state) illegalInvocation(); return state.tracks.some(track => track.readyState === "live"); }
+    getTracks() { const state = mediaStreamState.get(this); if (!state) illegalInvocation(); return state.tracks.slice(); }
+    getAudioTracks() { return this.getTracks().filter(track => track.kind === "audio"); }
+    getVideoTracks() { return this.getTracks().filter(track => track.kind === "video"); }
+    getTrackById(id) { const key = String(id); return this.getTracks().find(track => track.id === key) || null; }
+    addTrack(track) {
+      const state = mediaStreamState.get(this); if (!state) illegalInvocation();
+      if (!(track instanceof MediaStreamTrack)) throw new TypeError("track must be a MediaStreamTrack");
+      if (state.tracks.includes(track)) return;
+      state.tracks.push(track); dispatchMediaEvent(this, "addtrack", new MediaStreamTrackEvent("addtrack", { track }));
+    }
+    removeTrack(track) {
+      const state = mediaStreamState.get(this); if (!state) illegalInvocation();
+      const index = state.tracks.indexOf(track); if (index < 0) return;
+      state.tracks.splice(index, 1); dispatchMediaEvent(this, "removetrack", new MediaStreamTrackEvent("removetrack", { track }));
+    }
+    clone() { return new MediaStream(this.getTracks().map(track => track.clone())); }
+    get [Symbol.toStringTag]() { return "MediaStream"; }
+  }
+  for (const type of ["addtrack", "removetrack"]) defineEventHandler(MediaStream.prototype, type);
+  const mediaCaptureToken = {};
+  function mediaSnapshot() { return JSON.parse(String(nativeMediaCaptureSnapshot(__omoikane_document_id))); }
+  function requestedDeviceId(value) {
+    if (value == null || value === true) return null;
+    if (value === false) return false;
+    const object = Object(value);
+    const deviceId = object.deviceId;
+    if (deviceId == null) return null;
+    if (typeof deviceId === "object" && deviceId.exact !== undefined) return String(deviceId.exact);
+    return typeof deviceId === "string" ? deviceId : null;
+  }
+  function captureTracks(constraints, display) {
+    if (!nativeIsSecureContext()) throw new DOMException("Media capture requires a secure context.", "NotAllowedError");
+    const snapshot = mediaSnapshot();
+    if (!snapshot.permission) throw new DOMException("Media capture permission was denied.", "NotAllowedError");
+    const value = constraints == null ? {} : Object(constraints);
+    const requested = display ? [["video", value.video === undefined ? true : value.video]] : [["audio", value.audio], ["video", value.video]];
+    if (!requested.some(([, constraint]) => constraint !== undefined && constraint !== false)) throw new TypeError("At least one media kind must be requested");
+    return requested.flatMap(([kind, constraint]) => {
+      if (constraint === undefined || constraint === false) return [];
+      const deviceKind = kind === "audio" ? "audioinput" : "videoinput";
+      const exact = requestedDeviceId(constraint);
+      const device = snapshot.devices.find(item => item.kind === deviceKind && (exact == null || item.deviceId === exact));
+      if (!device) throw new DOMException(exact == null ? "No capture device is available." : "No device satisfies the constraints.", exact == null ? "NotFoundError" : "OverconstrainedError");
+      return [new MediaStreamTrack(mediaCaptureToken, { kind, label: device.label, deviceId: device.deviceId })];
+    });
+  }
+  class MediaDevices extends MediaEventTarget {
+    constructor(token) { super(); if (token !== mediaCaptureToken) throw new TypeError("Illegal constructor"); }
+    enumerateDevices() { return Promise.resolve().then(() => mediaSnapshot().devices.map(device => new MediaDeviceInfo(mediaCaptureToken, device))); }
+    getUserMedia(constraints) { return Promise.resolve().then(() => new MediaStream(captureTracks(constraints, false))); }
+    getDisplayMedia(constraints = { video: true }) { return Promise.resolve().then(() => new MediaStream(captureTracks(constraints, true))); }
+    getSupportedConstraints() { return { deviceId: true, groupId: true, width: true, height: true, frameRate: true, sampleRate: true, channelCount: true }; }
+    get [Symbol.toStringTag]() { return "MediaDevices"; }
+  }
+  defineEventHandler(MediaDevices.prototype, "devicechange");
+  class BlobEvent {
+    constructor(type, init) { if (!init || !(init.data instanceof Blob)) throw new TypeError("BlobEvent requires data"); const event = new globalThis.Event(type, init); Object.setPrototypeOf(event, BlobEvent.prototype); Object.defineProperties(event, { data: { enumerable: true, value: init.data }, timecode: { enumerable: true, value: init.timecode === undefined ? NaN : Number(init.timecode) } }); return event; }
+    get [Symbol.toStringTag]() { return "BlobEvent"; }
+  }
+  const recorderState = new WeakMap();
+  class MediaRecorder extends MediaEventTarget {
+    constructor(stream, options = {}) {
+      super(); if (!(stream instanceof MediaStream)) throw new TypeError("MediaRecorder requires a MediaStream");
+      const init = options == null ? {} : Object(options); const mimeType = init.mimeType === undefined ? "" : String(init.mimeType);
+      if (mimeType && !MediaRecorder.isTypeSupported(mimeType)) throw new DOMException("Unsupported recording MIME type.", "NotSupportedError");
+      const audioBitsPerSecond = init.audioBitsPerSecond === undefined ? 128000 : Number(init.audioBitsPerSecond) >>> 0;
+      const videoBitsPerSecond = init.videoBitsPerSecond === undefined ? 2500000 : Number(init.videoBitsPerSecond) >>> 0;
+      recorderState.set(this, { stream, state: "inactive", mimeType, sequence: 0, timer: 0, audioBitsPerSecond, videoBitsPerSecond });
+    }
+    get stream() { return recorderState.get(this)?.stream ?? illegalInvocation(); }
+    get state() { return recorderState.get(this)?.state ?? illegalInvocation(); }
+    get mimeType() { return recorderState.get(this)?.mimeType ?? illegalInvocation(); }
+    get audioBitsPerSecond() { return recorderState.get(this)?.audioBitsPerSecond ?? illegalInvocation(); }
+    get videoBitsPerSecond() { return recorderState.get(this)?.videoBitsPerSecond ?? illegalInvocation(); }
+    get audioBitrateMode() { if (!recorderState.has(this)) illegalInvocation(); return "variable"; }
+    start(timeslice = undefined) { const state = recorderState.get(this); if (!state) illegalInvocation(); if (state.state !== "inactive") throw new DOMException("Recorder is not inactive.", "InvalidStateError"); if (!state.stream.active) throw new DOMException("The stream has no live tracks.", "NotSupportedError"); state.state = "recording"; const interval = timeslice === undefined ? 0 : Math.max(0, Number(timeslice) || 0); if (interval > 0) this.__scheduleSlice(interval); queueMicrotask(() => dispatchMediaEvent(this, "start")); }
+    stop() { const state = recorderState.get(this); if (!state) illegalInvocation(); if (state.state === "inactive") return; state.state = "inactive"; if (state.timer) { clearTimeout(state.timer); state.timer = 0; } queueMicrotask(() => { this.__emitData(); dispatchMediaEvent(this, "stop"); }); }
+    pause() { const state = recorderState.get(this); if (!state) illegalInvocation(); if (state.state !== "recording") throw new DOMException("Recorder is not recording.", "InvalidStateError"); state.state = "paused"; queueMicrotask(() => dispatchMediaEvent(this, "pause")); }
+    resume() { const state = recorderState.get(this); if (!state) illegalInvocation(); if (state.state !== "paused") throw new DOMException("Recorder is not paused.", "InvalidStateError"); state.state = "recording"; queueMicrotask(() => dispatchMediaEvent(this, "resume")); }
+    requestData() { const state = recorderState.get(this); if (!state) illegalInvocation(); if (state.state === "inactive") throw new DOMException("Recorder is inactive.", "InvalidStateError"); queueMicrotask(() => this.__emitData()); }
+    __scheduleSlice(interval) { const state = recorderState.get(this); state.timer = setTimeout(() => { state.timer = 0; if (state.state !== "inactive") { if (state.state === "recording") this.__emitData(); this.__scheduleSlice(interval); } }, interval); }
+    __emitData() { const state = recorderState.get(this); const bytes = new TextEncoder().encode(`OMOIKANE-MEDIA-${state.sequence++}`); const type = state.mimeType || (state.stream.getVideoTracks().length ? "video/webm" : "audio/webm"); dispatchMediaEvent(this, "dataavailable", new BlobEvent("dataavailable", { data: new Blob([bytes], { type }), timecode: state.sequence })); }
+    static isTypeSupported(type) { const value = String(type).toLowerCase().replace(/\s+/g, ""); return value === "" || value === "video/webm" || value === "audio/webm" || value === "video/webm;codecs=vp8" || value === "audio/webm;codecs=opus"; }
+    get [Symbol.toStringTag]() { return "MediaRecorder"; }
+  }
+  for (const type of ["start", "stop", "dataavailable", "pause", "resume", "error"]) defineEventHandler(MediaRecorder.prototype, type);
+
   class Navigator {
     constructor(token) {
       if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
@@ -25521,6 +25721,7 @@ let omoikaneUserActivationState;
       this.plugins = new PluginArray(navigatorConstructionToken);
       this.mimeTypes = new MimeTypeArray(navigatorConstructionToken);
       this.geolocation = new Geolocation(geolocationConstructionToken);
+      this.mediaDevices = new MediaDevices(mediaCaptureToken);
       this.serviceWorker = new ServiceWorkerContainer(serviceWorkerContainerConstructionToken);
       // The Permissions object is installed after EventTarget is defined
       // below.  Keep the property present while Navigator is constructed so
@@ -25545,6 +25746,13 @@ let omoikaneUserActivationState;
   globalThis.GeolocationCoordinates = GeolocationCoordinates;
   globalThis.GeolocationPosition = GeolocationPosition;
   globalThis.GeolocationPositionError = GeolocationPositionError;
+  globalThis.MediaDeviceInfo = MediaDeviceInfo;
+  globalThis.MediaDevices = MediaDevices;
+  globalThis.MediaStream = MediaStream;
+  globalThis.MediaStreamTrack = MediaStreamTrack;
+  globalThis.MediaStreamTrackEvent = MediaStreamTrackEvent;
+  globalThis.MediaRecorder = MediaRecorder;
+  globalThis.BlobEvent = BlobEvent;
   globalThis.navigator = new Navigator(navigatorConstructionToken);
   Object.defineProperty(globalThis, "isSecureContext", {
     configurable: true,
@@ -30525,7 +30733,7 @@ let omoikaneUserActivationState;
   let permissionLifecycleActive = true;
   const supportedPermissionNames = Object.freeze([
     "notifications", "geolocation", "clipboard-read", "clipboard-write", "persistent-storage",
-    "accelerometer", "gyroscope", "magnetometer", "storage-access",
+    "accelerometer", "gyroscope", "magnetometer", "storage-access", "camera", "microphone",
   ]);
 
   function permissionDescriptorName(descriptor) {
@@ -30565,6 +30773,9 @@ let omoikaneUserActivationState;
       } catch (_) {
         return "denied";
       }
+    }
+    if (name === "camera" || name === "microphone") {
+      try { return mediaSnapshot().permission ? "granted" : "denied"; } catch (_) { return "denied"; }
     }
     try {
       return nativeIsSecureContext() && nativeClipboardPermission() ? "granted" : "denied";
@@ -32058,6 +32269,12 @@ let omoikaneUserActivationState;
     if (visualScroll) visualViewport.dispatchEvent(new Event("scroll"));
   };
   globalThis.EventTarget = EventTarget;
+  Object.setPrototypeOf(MediaEventTarget.prototype, EventTarget.prototype);
+  Object.setPrototypeOf(MediaEventTarget, EventTarget);
+  Object.setPrototypeOf(MediaStreamTrackEvent.prototype, Event.prototype);
+  Object.setPrototypeOf(MediaStreamTrackEvent, Event);
+  Object.setPrototypeOf(BlobEvent.prototype, Event.prototype);
+  Object.setPrototypeOf(BlobEvent, Event);
   for (const constructor of [TextTrack, TextTrackList, TextTrackCue, TextTrackCueList, VTTCue, VTTRegion]) {
     globalThis[constructor.name] = constructor;
   }

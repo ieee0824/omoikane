@@ -17836,7 +17836,7 @@ fn permissions_query_maps_existing_states_and_notifies_lifecycle_changes() {
     runtime
         .eval(
             r#"globalThis.invalidPermission = 'pending';
-                   navigator.permissions.query({ name: 'camera' }).catch(error => invalidPermission = error.name);
+                   navigator.permissions.query({ name: 'midi' }).catch(error => invalidPermission = error.name);
                    globalThis.invalidDescriptor = 'pending';
                    navigator.permissions.query(null).catch(error => invalidDescriptor = error.name);"#,
         )
@@ -18057,6 +18057,101 @@ fn dedicated_worker_does_not_expose_geolocation() {
     assert_eq!(
         eval_str(&mut runtime, "JSON.stringify(workerValues[0])"),
         "[\"undefined\",\"undefined\",\"undefined\"]"
+    );
+}
+
+#[test]
+fn media_capture_provider_tracks_constraints_and_recorder_lifecycle() {
+    let mut runtime = JsRuntime::new().unwrap_or_else(|error| panic!("{error}"));
+    runtime.set_media_capture_devices(vec![
+        MediaCaptureDevice::new(MediaDeviceKind::AudioInput, "mic-1", "Synthetic microphone"),
+        MediaCaptureDevice::new(MediaDeviceKind::VideoInput, "cam-1", "Synthetic camera"),
+    ]);
+    runtime
+        .eval(
+            "navigator.mediaDevices.enumerateDevices().then(devices => globalThis.hiddenDeviceLabel = devices[0].label); \
+             navigator.permissions.query({name:'camera'}).then(status => { globalThis.cameraStatus = status; });",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "hiddenDeviceLabel"), "");
+    assert_eq!(eval_str(&mut runtime, "cameraStatus.state"), "denied");
+    runtime.set_media_capture_permission(true);
+    runtime.run_jobs().unwrap();
+    assert_eq!(eval_str(&mut runtime, "cameraStatus.state"), "granted");
+    runtime
+        .eval(
+            r#"globalThis.capture = { events: [] };
+               navigator.mediaDevices.enumerateDevices().then(devices => capture.devices = devices.map(device => device.toJSON()));
+               navigator.mediaDevices.getUserMedia({audio:true, video:{deviceId:{exact:'cam-1'}}}).then(stream => {
+                 capture.stream = stream;
+                 capture.kinds = stream.getTracks().map(track => track.kind).join(',');
+                 const clone = stream.clone();
+                 stream.getAudioTracks()[0].stop();
+                 capture.cloneLive = clone.getAudioTracks()[0].readyState;
+                 const recorder = new MediaRecorder(stream, {mimeType:'video/webm'});
+                 recorder.onstart = () => capture.events.push('start');
+                 recorder.ondataavailable = event => capture.events.push(event.data.type + ':' + event.data.size);
+                 recorder.onstop = () => capture.events.push('stop');
+                 recorder.start(); recorder.requestData(); recorder.stop();
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "capture.devices.length"), "2");
+    assert_eq!(eval_str(&mut runtime, "capture.kinds"), "audio,video");
+    assert_eq!(eval_str(&mut runtime, "capture.cloneLive"), "live");
+    assert_eq!(
+        eval_str(&mut runtime, "capture.events.join('|')"),
+        "start|video/webm:16|video/webm:16|stop"
+    );
+
+    runtime.set_media_capture_permission(false);
+    runtime
+        .eval("navigator.mediaDevices.getUserMedia({audio:true}).catch(error => capture.denied = error.name)")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "capture.denied"), "NotAllowedError");
+}
+
+#[test]
+fn media_capture_stream_clone_and_recorder_defaults_match_web_contracts() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_media_capture_devices(vec![MediaCaptureDevice::new(
+        MediaDeviceKind::VideoInput,
+        "cam-1",
+        "Synthetic camera",
+    )]);
+    runtime.set_media_capture_permission(true);
+    runtime
+        .eval(
+            r#"globalThis.mediaContracts = {};
+               navigator.mediaDevices.getUserMedia({video:true}).then(stream => {
+                 const shared = new MediaStream(stream);
+                 const original = stream.getVideoTracks()[0];
+                 original.stop();
+                 const clone = stream.clone();
+                 const clonedTrack = clone.getVideoTracks()[0];
+                 const recorder = new MediaRecorder(clone);
+                 recorder.stop();
+                 const blobEvent = new BlobEvent('data', {data:new Blob([])});
+                 Object.assign(mediaContracts, {
+                   streamIdLength: stream.id.length,
+                   sharedTrack: shared.getVideoTracks()[0] === original,
+                   cloneTrack: clonedTrack !== original,
+                   cloneState: clonedTrack.readyState,
+                   recorderMime: recorder.mimeType,
+                   audioBits: recorder.audioBitsPerSecond,
+                   videoBits: recorder.videoBitsPerSecond,
+                   timecodeNaN: Number.isNaN(blobEvent.timecode),
+                 });
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "JSON.stringify(mediaContracts)"),
+        r#"{"streamIdLength":36,"sharedTrack":true,"cloneTrack":true,"cloneState":"ended","recorderMime":"","audioBits":128000,"videoBits":2500000,"timecodeNaN":true}"#
     );
 }
 
