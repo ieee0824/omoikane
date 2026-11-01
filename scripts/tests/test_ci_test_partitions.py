@@ -5,6 +5,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -457,7 +459,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_every_partition_uses_guarded_execution_and_preserves_all_artifacts(self):
         self.assertIn("partition: [unit-build, integration-0, integration-1, integration-2, integration-3]", self.normal)
-        self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/target", self.normal)
+        self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/../normal-test-target", self.normal)
         self.assertIn('CARGO_INCREMENTAL: "0"', self.normal)
         self.assertIn("ci-test-partitions.py run ${{ matrix.partition }}", self.normal)
         self.assertIn("name: normal-test-part-${{ matrix.partition }}-attempt-${{ github.run_attempt }}", self.normal)
@@ -467,6 +469,21 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("pattern: normal-test-inputs-attempt-*", self.aggregate)
         self.assertIn("name: browser-x86_64-unknown-linux-gnu-interpreter-attempt-${{ github.run_attempt }}", self.aggregate)
         self.assertIn("name: js-benchmark-report-attempt-${{ github.run_attempt }}", self.aggregate)
+
+    def test_workflow_target_is_guard_valid_and_matches_cache_target(self):
+        spec = importlib.util.spec_from_file_location("workflow_guard", SCRIPT.with_name("cargo-space-guard.py"))
+        guard = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = guard
+        spec.loader.exec_module(guard)
+        source = Path("/home/runner/work/omoikane/omoikane")
+        expression = re.search(r"CARGO_TARGET_DIR: (.+)", self.normal).group(1)
+        selected = Path(expression.replace("${{ github.workspace }}", str(source)))
+        cache_relative = re.search(r'workspaces: "\. -> ([^"]+)"', self.normal).group(1)
+        with mock.patch.object(guard, "worktree_root", return_value=source):
+            with self.assertRaisesRegex(ValueError, "separate"):
+                guard.validate_run_target(source / "target", source)
+            validated = guard.validate_run_target(selected, source)
+        self.assertEqual(validated, (source / cache_relative).resolve())
 
     def test_cache_has_only_the_main_unit_writer_and_capacity_evidence(self):
         self.assertIn("lookup-only: true", self.normal)

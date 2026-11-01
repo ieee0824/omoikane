@@ -64,6 +64,9 @@ cache lookup前後・font導入後・partition終了時にはfilesystemとtarget
 中身はpartition別のディレクトリで、元ログや画像を上書きして混ぜない。
 JS benchmark artifactも`js-benchmark-report-attempt-N`になる。
 
+targetは`${{ github.workspace }}/../normal-test-target`を使用し、ソースツリーの外に置く。
+cacheのworkspace mappingも`. -> ../normal-test-target`に揃え、guardと同じ実体を参照する。
+
 cacheは従来の`workspace-v2`をlookup-onlyで確認し、mainの`unit-build`だけが保存する。
 normal partitionでは既存archiveを展開しないため、展開中にguardの外で空き容量を
 使い切る経路を避ける。compile cacheの利益は失われるので、60分以内の完走は

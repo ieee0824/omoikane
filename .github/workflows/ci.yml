@@ -71,7 +71,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../normal-test-target
       CARGO_INCREMENTAL: "0"
     strategy:
       fail-fast: false
@@ -101,6 +101,7 @@ jobs:
         with:
           # Keep #1451's one main-only writer. Integration jobs restore only.
           shared-key: workspace-v2
+          workspaces: ". -> ../normal-test-target"
           save-if: ${{ github.ref == 'refs/heads/main' && matrix.partition == 'unit-build' }}
           cache-workspace-crates: true
           # Do not expand an unbounded old archive outside the capacity guard.
