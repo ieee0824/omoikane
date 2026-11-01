@@ -1493,6 +1493,10 @@
     {"path": "layout-instability/visible-to-hidden.html"},
     {"path": "css/css-animations/parsing/animation-composition-invalid.tentative.html"},
     {"path": "css/css-transitions/parsing/transition-behavior.html"},
-    {"path": "scroll-animations/scroll-timelines/constructor.html"}
+    {"path": "scroll-animations/scroll-timelines/constructor.html"},
+    {"path": "mediacapture-record/BlobEvent-constructor.html"},
+    {"path": "mediacapture-record/MediaRecorder-creation.https.html"},
+    {"path": "mediacapture-streams/MediaStream-clone.https.html"},
+    {"path": "mediacapture-streams/MediaStream-id.https.html"}
   ]
 }

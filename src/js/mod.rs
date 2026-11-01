@@ -164,6 +164,11 @@ mod form_submission;
 mod frame_policy;
 mod geolocation;
 pub use geolocation::GeolocationPositionData;
+mod media_capture;
+pub use media_capture::{
+    MediaCaptureDevice, MediaCaptureProvider, MediaCaptureSnapshot, MediaDeviceKind,
+    StaticMediaCaptureProvider,
+};
 mod automation;
 #[cfg(test)]
 mod cross_origin_focus_tests;
@@ -2392,6 +2397,7 @@ struct HostState {
     clipboard_permission_granted: bool,
     notification_permission: String,
     geolocation: geolocation::State,
+    media_capture: media_capture::State,
     compression_streams: compression_stream::Store,
     http_client: Client,
     /// Lazily started HTTP worker for best-effort CSP/Reporting delivery.
@@ -3373,6 +3379,7 @@ impl HostState {
             clipboard_permission_granted: true,
             notification_permission: "default".to_string(),
             geolocation: geolocation::State::default(),
+            media_capture: media_capture::State::default(),
             compression_streams: compression_stream::Store::new(),
             http_client,
             report_delivery: None,
@@ -16607,6 +16614,7 @@ fn register_host_bindings(
     form_selector_state::register(context, &mut bindings)?;
     form_submission::register(context, &mut bindings)?;
     geolocation::register(context, &mut bindings)?;
+    media_capture::register(context, &mut bindings)?;
     permissions_policy::register(context, &mut bindings)?;
     broadcast_channel::register(context, &mut bindings)?;
     web_locks::register(context, &mut bindings)?;
