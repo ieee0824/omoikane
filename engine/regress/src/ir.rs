@@ -573,7 +573,7 @@ impl fmt::Display for Regex {
         let mut result = Ok(());
         walk(
             false,
-            self.flags.unicode,
+            self.flags.unicode_aware(),
             &self.node,
             &mut |node: &Node, walk: &mut Walk| {
                 if result.is_ok() {
