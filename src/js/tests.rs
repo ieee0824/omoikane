@@ -18156,6 +18156,90 @@ fn media_capture_stream_clone_and_recorder_defaults_match_web_contracts() {
 }
 
 #[test]
+fn media_source_attaches_and_appends_owned_segments_in_event_order() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            r#"globalThis.mse = { events: [] };
+               mse.source = new MediaSource();
+               mse.source.onsourceopen = () => mse.events.push('sourceopen');
+               mse.url = URL.createObjectURL(mse.source);
+               mse.video = document.createElement('video');
+               mse.video.src = mse.url;"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "mse.source.readyState"), "open");
+    assert_eq!(eval_str(&mut runtime, "mse.events.join(',')"), "sourceopen");
+
+    runtime
+        .eval(
+            r#"mse.buffer = mse.source.addSourceBuffer('video/mp4; codecs=avc1');
+               for (const name of ['updatestart','update','updateend'])
+                 mse.buffer.addEventListener(name, () => mse.events.push(name));
+               mse.buffer.appendBuffer(new Uint8Array(2500));"#,
+        )
+        .unwrap();
+    assert_eq!(eval_str(&mut runtime, "mse.buffer.updating"), "true");
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "mse.events.join(',')"),
+        "sourceopen,updatestart,update,updateend"
+    );
+    assert_eq!(eval_str(&mut runtime, "mse.buffer.buffered.length"), "1");
+    assert_eq!(eval_str(&mut runtime, "mse.buffer.buffered.end(0)"), "2.5");
+}
+
+#[test]
+fn media_source_remove_abort_end_and_type_contracts() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            r#"globalThis.mse = { events: [] };
+               mse.source = new ManagedMediaSource();
+               mse.video = document.createElement('video');
+               mse.video.src = URL.createObjectURL(mse.source);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime
+        .eval(
+            r#"mse.buffer = mse.source.addSourceBuffer('audio/webm');
+               mse.buffer.onabort = () => mse.events.push('abort');
+               mse.buffer.onupdateend = () => mse.events.push('updateend');
+               mse.buffer.appendBuffer(new Uint8Array(1000));
+               mse.buffer.abort();
+               mse.source.endOfStream();"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "mse.events.join(',')"),
+        "abort,updateend"
+    );
+    assert_eq!(eval_str(&mut runtime, "mse.source.readyState"), "ended");
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "mse.source.handle instanceof MediaSourceHandle"
+        ),
+        "true"
+    );
+    assert_eq!(
+        eval_str(&mut runtime, "MediaSource.isTypeSupported('video/mp4')"),
+        "true"
+    );
+    assert_eq!(
+        eval_str(&mut runtime, "MediaSource.isTypeSupported('text/plain')"),
+        "false"
+    );
+    assert_eq!(
+        eval_str(&mut runtime, "MediaSource.canConstructInDedicatedWorker"),
+        "true"
+    );
+}
+
+#[test]
 fn match_media_evaluates_current_viewport() {
     let doc = NodeHandle::document();
     let mut runtime = JsRuntime::with_document(doc).unwrap();

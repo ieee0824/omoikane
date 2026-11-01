@@ -14068,6 +14068,11 @@ let omoikaneUserActivationState;
       if (!source) {
         return;
       }
+      const mediaSource = mediaSourceObjectUrls.get(String(source));
+      if (mediaSource) {
+        attachMediaSource(mediaSource, this, loadId);
+        return;
+      }
       const sourceType = mediaTypeFromSource(source);
       if (/^data:/i.test(source)) {
         queueMediaTask(() => this.__mediaReady(loadId, sourceType));
@@ -14107,6 +14112,8 @@ let omoikaneUserActivationState;
 
     __mediaLoad() {
       const loadId = ++this.__mediaLoadId;
+      const previousMediaSource = this.__attachedMediaSource;
+      if (previousMediaSource) detachMediaSource(previousMediaSource, this);
       this.__mediaCancelPlayback();
       this.__mediaRejectWaiters(new DOMException("The play() request was interrupted.", "AbortError"));
       this.__mediaCurrentSrc = this.src;
@@ -25709,6 +25716,73 @@ let omoikaneUserActivationState;
   }
   for (const type of ["start", "stop", "dataavailable", "pause", "resume", "error"]) defineEventHandler(MediaRecorder.prototype, type);
 
+  const mediaSourceToken = {};
+  const mediaSourceObjectUrls = new Map();
+  const mediaSourceState = new WeakMap();
+  const sourceBufferState = new WeakMap();
+  class MediaTimeRanges {
+    constructor(ranges = []) { this.__ranges = ranges; }
+    get length() { return this.__ranges.length; }
+    start(index) { if (index < 0 || index >= this.length) throw new DOMException("Invalid range index.", "IndexSizeError"); return this.__ranges[index][0]; }
+    end(index) { if (index < 0 || index >= this.length) throw new DOMException("Invalid range index.", "IndexSizeError"); return this.__ranges[index][1]; }
+  }
+  class SourceBufferList extends MediaEventTarget {
+    constructor(token) { super(); if (token !== mediaSourceToken) throw new TypeError("Illegal constructor"); this.__items = []; }
+    get length() { return this.__items.length; }
+    __sync() { for (const key of Object.keys(this)) if (/^\d+$/.test(key)) delete this[key]; this.__items.forEach((item, index) => Object.defineProperty(this, index, { configurable: true, enumerable: true, value: item })); }
+    [Symbol.iterator]() { return this.__items[Symbol.iterator](); }
+  }
+  for (const type of ["addsourcebuffer", "removesourcebuffer"]) defineEventHandler(SourceBufferList.prototype, type);
+  class SourceBuffer extends MediaEventTarget {
+    constructor(token, owner, mimeType) { super(); if (token !== mediaSourceToken) throw new TypeError("Illegal constructor"); sourceBufferState.set(this, { owner, mimeType, updating: false, ranges: [], timestampOffset: 0, appendWindowStart: 0, appendWindowEnd: Infinity, mode: "segments" }); }
+    __state() { return sourceBufferState.get(this) || illegalInvocation(); }
+    get updating() { return this.__state().updating; }
+    get buffered() { return new MediaTimeRanges(this.__state().ranges.slice()); }
+    get timestampOffset() { return this.__state().timestampOffset; }
+    set timestampOffset(value) { const state = this.__state(); if (state.updating) throw new DOMException("SourceBuffer is updating.", "InvalidStateError"); state.timestampOffset = Number(value); }
+    get appendWindowStart() { return this.__state().appendWindowStart; }
+    set appendWindowStart(value) { const state = this.__state(); const next = Number(value); if (next < 0 || next >= state.appendWindowEnd) throw new TypeError("Invalid append window"); state.appendWindowStart = next; }
+    get appendWindowEnd() { return this.__state().appendWindowEnd; }
+    set appendWindowEnd(value) { const state = this.__state(); const next = Number(value); if (Number.isNaN(next) || next <= state.appendWindowStart) throw new TypeError("Invalid append window"); state.appendWindowEnd = next; }
+    get mode() { return this.__state().mode; }
+    set mode(value) { const state = this.__state(); const next = String(value); if (next !== "segments" && next !== "sequence") throw new TypeError("Invalid SourceBuffer mode"); if (state.updating) throw new DOMException("SourceBuffer is updating.", "InvalidStateError"); state.mode = next; }
+    appendBuffer(data) {
+      const state = this.__state();
+      if (state.updating || mediaSourceState.get(state.owner).readyState !== "open") throw new DOMException("SourceBuffer cannot append now.", "InvalidStateError");
+      let result;
+      try { result = JSON.parse(String(__omoikane_media_source("append", state.mimeType, data))); }
+      catch (error) { const text = String(error); const name = text.includes("QuotaExceededError") ? "QuotaExceededError" : text.includes("NotSupportedError") ? "NotSupportedError" : "EncodingError"; throw new DOMException(text, name); }
+      state.updating = true; dispatchMediaEvent(this, "updatestart");
+      queueMediaTask(() => { if (!state.updating) return; const start = state.mode === "sequence" && state.ranges.length ? state.ranges[state.ranges.length - 1][1] : state.timestampOffset; const end = Math.min(start + Number(result.duration), state.appendWindowEnd); if (end > state.appendWindowStart) state.ranges.push([Math.max(start, state.appendWindowStart), end]); state.updating = false; dispatchMediaEvent(this, "update"); dispatchMediaEvent(this, "updateend"); });
+    }
+    remove(start, end) { const state = this.__state(); const from = Number(start), to = Number(end); if (state.updating) throw new DOMException("SourceBuffer is updating.", "InvalidStateError"); if (from < 0 || !(to > from)) throw new TypeError("Invalid removal range"); state.updating = true; dispatchMediaEvent(this, "updatestart"); queueMediaTask(() => { state.ranges = state.ranges.flatMap(([a,b]) => b <= from || a >= to ? [[a,b]] : [[a, Math.min(b, from)], [Math.max(a, to), b]].filter(([x,y]) => y > x)); state.updating = false; dispatchMediaEvent(this, "update"); dispatchMediaEvent(this, "updateend"); }); }
+    abort() { const state = this.__state(); if (mediaSourceState.get(state.owner).readyState !== "open") throw new DOMException("MediaSource is not open.", "InvalidStateError"); if (state.updating) { state.updating = false; dispatchMediaEvent(this, "abort"); dispatchMediaEvent(this, "updateend"); } state.appendWindowStart = 0; state.appendWindowEnd = Infinity; }
+    changeType(type) { const state = this.__state(); const next = String(type); if (!MediaSource.isTypeSupported(next)) throw new DOMException("Unsupported media type.", "NotSupportedError"); if (state.updating) throw new DOMException("SourceBuffer is updating.", "InvalidStateError"); state.mimeType = next; }
+  }
+  for (const type of ["updatestart", "update", "updateend", "error", "abort"]) defineEventHandler(SourceBuffer.prototype, type);
+  class MediaSourceHandle { constructor(token, source) { if (token !== mediaSourceToken) throw new TypeError("Illegal constructor"); this.__source = source; } }
+  class MediaSource extends MediaEventTarget {
+    constructor() { super(); mediaSourceState.set(this, { readyState: "closed", duration: NaN, sourceBuffers: new SourceBufferList(mediaSourceToken), activeSourceBuffers: new SourceBufferList(mediaSourceToken), handle: null }); }
+    __state() { return mediaSourceState.get(this) || illegalInvocation(); }
+    get readyState() { return this.__state().readyState; }
+    get sourceBuffers() { return this.__state().sourceBuffers; }
+    get activeSourceBuffers() { return this.__state().activeSourceBuffers; }
+    get duration() { return this.__state().duration; }
+    set duration(value) { const state = this.__state(); const next = Number(value); if (state.readyState !== "open" || Number.isNaN(next) || next < 0) throw new DOMException("Invalid duration.", "InvalidStateError"); state.duration = next; }
+    get handle() { const state = this.__state(); return state.handle || (state.handle = new MediaSourceHandle(mediaSourceToken, this)); }
+    addSourceBuffer(type) { const state = this.__state(); const mimeType = String(type); if (state.readyState !== "open") throw new DOMException("MediaSource is not open.", "InvalidStateError"); if (!MediaSource.isTypeSupported(mimeType)) throw new DOMException("Unsupported media type.", "NotSupportedError"); const buffer = new SourceBuffer(mediaSourceToken, this, mimeType); state.sourceBuffers.__items.push(buffer); state.activeSourceBuffers.__items.push(buffer); state.sourceBuffers.__sync(); state.activeSourceBuffers.__sync(); dispatchMediaEvent(state.sourceBuffers, "addsourcebuffer"); return buffer; }
+    removeSourceBuffer(buffer) { const state = this.__state(); const index = state.sourceBuffers.__items.indexOf(buffer); if (index < 0) throw new DOMException("SourceBuffer is not attached.", "NotFoundError"); state.sourceBuffers.__items.splice(index, 1); state.activeSourceBuffers.__items = state.activeSourceBuffers.__items.filter(item => item !== buffer); state.sourceBuffers.__sync(); state.activeSourceBuffers.__sync(); sourceBufferState.delete(buffer); dispatchMediaEvent(state.sourceBuffers, "removesourcebuffer"); }
+    endOfStream(error = undefined) { const state = this.__state(); if (state.readyState !== "open" || state.sourceBuffers.__items.some(buffer => buffer.updating)) throw new DOMException("MediaSource cannot end now.", "InvalidStateError"); if (error !== undefined && error !== "network" && error !== "decode") throw new TypeError("Invalid endOfStream error"); state.readyState = "ended"; dispatchMediaEvent(this, "sourceended"); }
+    setLiveSeekableRange(start, end) { const state = this.__state(); if (state.readyState !== "open") throw new DOMException("MediaSource is not open.", "InvalidStateError"); state.liveRange = [Number(start), Number(end)]; }
+    clearLiveSeekableRange() { const state = this.__state(); if (state.readyState !== "open") throw new DOMException("MediaSource is not open.", "InvalidStateError"); state.liveRange = null; }
+    static isTypeSupported(type) { const value = String(type); return value !== "" && __omoikane_media_source("supports", value, new Uint8Array()); }
+    static get canConstructInDedicatedWorker() { return true; }
+  }
+  for (const type of ["sourceopen", "sourceended", "sourceclose"]) defineEventHandler(MediaSource.prototype, type);
+  class ManagedMediaSource extends MediaSource { get streaming() { return false; } }
+  function attachMediaSource(source, element, loadId) { const state = mediaSourceState.get(source); if (!state || state.readyState !== "closed") { element.__mediaFailure(loadId, MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED, "NotSupportedError", "MediaSource cannot be attached."); return; } state.readyState = "open"; state.element = element; element.__attachedMediaSource = source; queueMediaTask(() => { if (element.__mediaLoadId === loadId) dispatchMediaEvent(source, "sourceopen"); }); }
+  function detachMediaSource(source, element) { const state = mediaSourceState.get(source); if (!state || state.element !== element) return; state.readyState = "closed"; state.duration = NaN; state.element = null; element.__attachedMediaSource = null; state.sourceBuffers.__items = []; state.activeSourceBuffers.__items = []; state.sourceBuffers.__sync(); state.activeSourceBuffers.__sync(); queueMediaTask(() => dispatchMediaEvent(source, "sourceclose")); }
+
   class Navigator {
     constructor(token) {
       if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
@@ -25753,6 +25827,11 @@ let omoikaneUserActivationState;
   globalThis.MediaStreamTrackEvent = MediaStreamTrackEvent;
   globalThis.MediaRecorder = MediaRecorder;
   globalThis.BlobEvent = BlobEvent;
+  globalThis.MediaSource = MediaSource;
+  globalThis.ManagedMediaSource = ManagedMediaSource;
+  globalThis.MediaSourceHandle = MediaSourceHandle;
+  globalThis.SourceBuffer = SourceBuffer;
+  globalThis.SourceBufferList = SourceBufferList;
   globalThis.navigator = new Navigator(navigatorConstructionToken);
   Object.defineProperty(globalThis, "isSecureContext", {
     configurable: true,
@@ -36239,22 +36318,26 @@ let omoikaneUserActivationState;
   }
 
   function createObjectURL(object) {
-    if (!(object instanceof Blob)) {
-      throw new TypeError("createObjectURL requires a Blob");
+    if (!(object instanceof Blob) && !(object instanceof MediaSource)) {
+      throw new TypeError("createObjectURL requires a Blob or MediaSource");
     }
     // about:blank and srcdoc can inherit an origin that differs from their
     // URL's `null` origin. Use the Document's security origin instead.
     const documentOrigin = __omoikane_storage_origin(__omoikane_document_id);
     const origin = documentOrigin === null ? "null" : new URL(documentOrigin).origin;
     const url = "blob:" + origin + "/" + crypto.randomUUID();
-    objectUrls.set(url, object);
-    __omoikane_register_object_url(url, object.__bytes, object.type);
+    if (object instanceof MediaSource) mediaSourceObjectUrls.set(url, object);
+    else {
+      objectUrls.set(url, object);
+      __omoikane_register_object_url(url, object.__bytes, object.type);
+    }
     return url;
   }
 
   function revokeObjectURL(url) {
     const key = String(url);
     objectUrls.delete(key);
+    mediaSourceObjectUrls.delete(key);
     __omoikane_revoke_object_url(key);
   }
 

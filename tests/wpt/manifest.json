@@ -1497,6 +1497,10 @@
     {"path": "mediacapture-record/BlobEvent-constructor.html"},
     {"path": "mediacapture-record/MediaRecorder-creation.https.html"},
     {"path": "mediacapture-streams/MediaStream-clone.https.html"},
-    {"path": "mediacapture-streams/MediaStream-id.https.html"}
+    {"path": "mediacapture-streams/MediaStream-id.https.html"},
+    {"path": "media-source/URL-createObjectURL-null.html"},
+    {"path": "media-source/URL-createObjectURL.html"},
+    {"path": "media-source/mediasource-closed.html"},
+    {"path": "media-source/mediasource-endofstream-invaliderror.html"}
   ]
 }
