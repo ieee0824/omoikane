@@ -16950,6 +16950,16 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(set_media_selector_state_native),
         ),
         (
+            js_string!("__omoikane_parse_webvtt"),
+            1,
+            NativeFunction::from_copy_closure(parse_webvtt_native),
+        ),
+        (
+            js_string!("__omoikane_set_media_cue_text"),
+            2,
+            NativeFunction::from_copy_closure(set_media_cue_text_native),
+        ),
+        (
             js_string!("__omoikane_set_directionality_control_value"),
             2,
             NativeFunction::from_copy_closure(set_directionality_control_value_native),
@@ -22063,6 +22073,79 @@ fn set_media_selector_state_native(
         })?;
         if node.set_media_selector_state(state) {
             host.borrow_mut().invalidate_style_cache_for_node(&node);
+        }
+        Ok(JsValue::undefined())
+    })
+}
+
+fn parse_webvtt_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let source = args
+        .first()
+        .unwrap_or(&JsValue::undefined())
+        .to_string(context)?
+        .to_std_string_escaped();
+    let document = crate::webvtt::parse_document(&source).map_err(|_| {
+        JsError::from(JsNativeError::syntax().with_message("Invalid WebVTT resource"))
+    })?;
+    let mut cues = Vec::with_capacity(document.cues.len());
+    for cue in document.cues {
+        cues.push(
+            JsArray::from_iter(
+                [
+                    JsValue::from(js_string!(cue.id)),
+                    JsValue::from(cue.start_time),
+                    JsValue::from(cue.end_time),
+                    JsValue::from(js_string!(cue.text)),
+                    JsValue::from(js_string!(cue.settings)),
+                ],
+                context,
+            )
+            .into(),
+        );
+    }
+    let cue_array = JsArray::from_iter(cues, context);
+    let mut regions = Vec::with_capacity(document.regions.len());
+    for region in document.regions {
+        regions.push(
+            JsArray::from_iter(
+                [
+                    JsValue::from(js_string!(region.id)),
+                    JsValue::from(region.width),
+                    JsValue::from(region.lines),
+                    JsValue::from(region.region_anchor.0),
+                    JsValue::from(region.region_anchor.1),
+                    JsValue::from(region.viewport_anchor.0),
+                    JsValue::from(region.viewport_anchor.1),
+                    JsValue::from(region.scroll_up),
+                ],
+                context,
+            )
+            .into(),
+        );
+    }
+    let region_array = JsArray::from_iter(regions, context);
+    Ok(JsArray::from_iter([cue_array.into(), region_array.into()], context).into())
+}
+
+fn set_media_cue_text_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    let text = match args.get(1) {
+        Some(value) if !value.is_null() && !value.is_undefined() => {
+            Some(value.to_string(context)?.to_std_string_escaped())
+        }
+        _ => None,
+    };
+    with_render_mutation(|host| {
+        let node = host.borrow().get_node(node_id).ok_or_else(|| {
+            JsError::from(JsNativeError::typ().with_message("Illegal invocation"))
+        })?;
+        if node.set_media_cue_text(text) {
+            host.borrow_mut().invalidate_paint_cache();
         }
         Ok(JsValue::undefined())
     })

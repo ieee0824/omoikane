@@ -137,7 +137,7 @@ fn source_track_datalist_map_and_embed_reflect_their_idl_attributes() {
         track.label = 'English'; track.default = true;
         if (track.kind !== 'captions' || !track.src.endsWith('/captions.vtt') || !track.default ||
             track.readyState !== HTMLTrackElement.NONE ||
-            track.track !== null) return false;
+            !(track.track instanceof TextTrack)) return false;
         track.setAttribute('kind', 'invalid');
         if (track.kind !== 'metadata') return false;
 
@@ -155,6 +155,39 @@ fn source_track_datalist_map_and_embed_reflect_their_idl_attributes() {
         embed.src = 'plugin.bin'; embed.type = 'application/octet-stream'; embed.width = 320; embed.height = 200;
         return embed.src.endsWith('/plugin.bin') && embed.type === 'application/octet-stream' &&
           embed.width === '320' && embed.height === '200' && embed.getSVGDocument() === null;
+      })()"#,
+    );
+}
+
+#[test]
+fn text_track_cues_have_stable_lists_and_deterministic_lifecycle() {
+    check(
+        r#"(() => {
+        const video = document.createElement('video');
+        const list = video.textTracks;
+        const track = video.addTextTrack('captions', 'English', 'en');
+        if (video.textTracks !== list || list.length !== 1 || list[0] !== track ||
+            list.getTrackById('missing') !== null || track.cues !== null) return false;
+        track.mode = 'showing';
+        const first = new VTTCue(1, 3, 'first'); first.id = 'a';
+        const second = new VTTCue(2, 4, 'second');
+        track.addCue(second); track.addCue(first);
+        if (!(track.cues instanceof TextTrackCueList) || track.cues.length !== 2 ||
+            track.cues[0] !== first || track.cues.getCueById('a') !== first ||
+            first.track !== track || first.getCueAsHTML().textContent !== 'first') return false;
+        video.currentTime = 2.5;
+        if (track.activeCues.length !== 2 || track.activeCues[0] !== first) return false;
+        video.currentTime = 3.5;
+        if (track.activeCues.length !== 1 || track.activeCues[0] !== second) return false;
+        track.removeCue(second);
+        const formatted = new VTTCue(-1, Infinity, '<i>formatted</i>').getCueAsHTML();
+        const region = new VTTRegion(); region.width = 42; region.scroll = 'invalid';
+        if (track.cues.length !== 1 || second.track !== null) throw new Error('removeCue');
+        if (Object.prototype.toString.call(first) !== '[object VTTCue]') throw new Error('brand');
+        if (!formatted.childNodes[0] || formatted.childNodes[0].localName !== 'i') throw new Error('cue tree element');
+        if (formatted.childNodes[0].textContent !== 'formatted') throw new Error('cue tree text');
+        if (region.width !== 42 || region.scroll !== '') throw new Error('region state');
+        return true;
       })()"#,
     );
 }

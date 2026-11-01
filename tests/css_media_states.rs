@@ -143,4 +143,52 @@ fn picture_in_picture_matches_only_the_active_video_and_closes_on_exit() {
         ),
         true
     );
+    for kind in ["mousePressed", "mouseReleased"] {
+        session
+            .dispatch(
+                "Input.dispatchMouseEvent",
+                json!({"type":kind,"x":5,"y":5,"button":"left","clickCount":1}),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        page_value(
+            &mut session,
+            "video.remove(); document.pictureInPictureElement===null && pipEvents.join(',')==='enterpictureinpicture:true:true,leavepictureinpicture:true:true,enterpictureinpicture:true:true,leavepictureinpicture:true:true'"
+        ),
+        true
+    );
+}
+
+#[test]
+fn picture_in_picture_idl_has_brands_descriptors_and_shadow_reflection() {
+    let mut runtime = runtime();
+    assert_eq!(
+        string(
+            &mut runtime,
+            r#"(()=>{try{
+const windowDescriptor=Object.getOwnPropertyDescriptor(globalThis,'PictureInPictureWindow');
+const eventDescriptor=Object.getOwnPropertyDescriptor(globalThis,'PictureInPictureEvent');
+const video=document.createElement('video');
+const host=document.createElement('div');
+const shadow=host.attachShadow({mode:'open'});shadow.append(video);document.body.append(host);
+const checks=[
+  windowDescriptor.enumerable===false&&windowDescriptor.writable&&windowDescriptor.configurable,
+  eventDescriptor.enumerable===false&&eventDescriptor.writable&&eventDescriptor.configurable,
+  PictureInPictureWindow.length===0,PictureInPictureEvent.length===2,
+  ['width','height','onresize'].every(name=>Object.getOwnPropertyDescriptor(PictureInPictureWindow.prototype,name).enumerable),
+  Object.getOwnPropertyDescriptor(PictureInPictureEvent.prototype,'pictureInPictureWindow').enumerable,
+  ['requestPictureInPicture','disablePictureInPicture','onenterpictureinpicture','onleavepictureinpicture'].every(name=>Object.getOwnPropertyDescriptor(HTMLVideoElement.prototype,name).enumerable),
+  ['pictureInPictureEnabled','pictureInPictureElement','exitPictureInPicture'].every(name=>Object.getOwnPropertyDescriptor(Document.prototype,name).enumerable),
+  Object.getOwnPropertyDescriptor(ShadowRoot.prototype,'pictureInPictureElement').enumerable,
+  HTMLVideoElement.prototype.requestPictureInPicture.call(null) instanceof Promise,
+];
+for(const [prototype,name] of [[PictureInPictureWindow.prototype,'width'],[PictureInPictureWindow.prototype,'height'],[PictureInPictureEvent.prototype,'pictureInPictureWindow'],[Document.prototype,'pictureInPictureElement'],[ShadowRoot.prototype,'pictureInPictureElement'],[HTMLVideoElement.prototype,'disablePictureInPicture']]){
+  try{prototype[name];checks.push(false)}catch(error){checks.push(error instanceof TypeError)}
+}
+return checks.every(Boolean)?'ok':JSON.stringify(checks);
+}catch(e){return e.name+': '+e.message;}})()"#,
+        ),
+        "ok"
+    );
 }

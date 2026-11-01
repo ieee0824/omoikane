@@ -297,6 +297,8 @@ fn content_type(path: &Path) -> &str {
         Some("js") => "text/javascript; charset=utf-8",
         Some("css") => "text/css; charset=utf-8",
         Some("json") => "application/json",
+        Some("mp4" | "m4v") => "video/mp4",
+        Some("webm") => "video/webm",
         _ => "application/octet-stream",
     }
 }
@@ -528,6 +530,9 @@ mod tests {
             ("script.js", "text/javascript; charset=utf-8"),
             ("style.css", "text/css; charset=utf-8"),
             ("data.json", "application/json"),
+            ("movie.mp4", "video/mp4"),
+            ("movie.m4v", "video/mp4"),
+            ("movie.webm", "video/webm"),
             ("image.bin", "application/octet-stream"),
         ] {
             assert_eq!(content_type(Path::new(path)), expected);

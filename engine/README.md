@@ -475,3 +475,26 @@ context that produced it. `Module::parse_with_host_defined` is unchanged.
 The browser keeps one parsed bootstrap module per runtime in `HostState` and
 creates each Realm's module from it. Verify with the nested Boa `module::`
 tests and Omoikane's iframe, WPT and full locked tests.
+
+## JIT verification ownership
+
+The arithmetic and runtime-helper tiers share verification of an immutable,
+published `CodeBlock`. Before publishing a cached proof, the verifier checks the
+block's instruction boundaries, registers, constant/binding/cache indices,
+branches and handlers, and recursively validates every nested function. Nested
+functions retain only the proof until they actually reach a JIT tier; decoded
+instruction and handler metadata is then retained locally and reused by both
+tiers. This avoids repeated recursive snapshot construction during DOM
+bootstrap without retaining decoded bodies for all unused Web API functions.
+
+The cache owns pure instruction metadata, with no GC handles, Realm references,
+or references to nested `CodeBlock`s. Its lifetime follows its owning block, and
+a cloned block starts with an empty cache so builders can edit clones safely.
+Mutable builders and Gate 2/3 consumers continue to use the fresh, complete
+`BytecodeContract::verify` snapshot, including nested constant metadata.
+
+The engine tests cover reuse between JIT tiers, zero repeated verification or
+constant-copy work after helper warmup as unrelated functions grow, native entry
+for supported loops, invalid nested code, clone invalidation, and lazy retention
+of decoded metadata. Browser validation must also exercise the original
+iframe/Worker and adoption WPT cases with their existing deadlines and assertions.
