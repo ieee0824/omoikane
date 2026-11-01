@@ -112,6 +112,16 @@ input for lookbehind, anchors, captures and backreferences. Ordinary global
 search continues to use the existing iterator. This avoids scanning the rest
 of an input after every failed sticky token match in WebIDL parsers.
 
+RegExp case canonicalization follows the [ECMAScript Canonicalize rules](https://tc39.es/ecma262/multipage/text-processing.html#sec-runtime-semantics-canonicalize-ch).
+Legacy matching uses uppercase equivalence without mapping non-ASCII characters
+into ASCII. Literals, character classes and backreferences share that rule.
+Either `u` or `v` selects Unicode-aware parsing, folding, optimization and input
+handling, while the public flags record keeps those two flags distinct. The
+browser regressions in `tests/regexp_latin1.rs` and the standalone regress tests
+cover long-s, Kelvin sign, dotless-i, Latin1 code units, captures and flag syntax.
+This correction is separate from the planned Latin1 input-copy optimization;
+neither the Boa nor regress origin manifest is rewritten.
+
 The bundled script-extension tables also merge overlapping intervals in Arabic,
 Bengali, Cyrillic, Devanagari, Grantha, Gujarati, Gurmukhi and Tamil. This preserves
 each table's character membership while satisfying the sorted, disjoint interval
