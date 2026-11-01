@@ -1562,6 +1562,12 @@
     {"path": "mediasession/mediametadata.html"},
     {"path": "mediasession/playbackstate.html"},
     {"path": "mediasession/positionstate.html"},
-    {"path": "mediasession/setactionhandler.html"}
+    {"path": "mediasession/setactionhandler.html"},
+    {"path": "speech-api/SpeechGrammarList-item.https.html"},
+    {"path": "speech-api/SpeechRecognition-basics.https.html"},
+    {"path": "speech-api/SpeechRecognition-onerror.https.html"},
+    {"path": "speech-api/SpeechSynthesisErrorEvent-constructor.html"},
+    {"path": "speech-api/SpeechSynthesisEvent-constructor.html"},
+    {"path": "speech-api/SpeechSynthesisUtterance-basics.https.html"}
   ]
 }

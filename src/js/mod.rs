@@ -179,6 +179,12 @@ pub use media_session::{
     DeterministicMediaSessionProvider, MediaSessionArtwork, MediaSessionArtworkFetch,
     MediaSessionMetadata, MediaSessionPositionState, MediaSessionProvider, MediaSessionSnapshot,
 };
+mod web_speech;
+pub use web_speech::{
+    DeterministicWebSpeechProvider, SpeechRecognitionFailure, SpeechRecognitionPhrase,
+    SpeechRecognitionRequest, SpeechSynthesisRequest, SpeechVoice, WebSpeechCommand,
+    WebSpeechProvider,
+};
 mod automation;
 #[cfg(test)]
 mod cross_origin_focus_tests;
@@ -2410,6 +2416,7 @@ struct HostState {
     media_capture: media_capture::State,
     media_source: media_source::State,
     media_session: media_session::State,
+    web_speech: web_speech::State,
     compression_streams: compression_stream::Store,
     http_client: Client,
     /// Lazily started HTTP worker for best-effort CSP/Reporting delivery.
@@ -3394,6 +3401,7 @@ impl HostState {
             media_capture: media_capture::State::default(),
             media_source: media_source::State::default(),
             media_session: media_session::State::default(),
+            web_speech: web_speech::State::default(),
             compression_streams: compression_stream::Store::new(),
             http_client,
             report_delivery: None,
@@ -16631,6 +16639,7 @@ fn register_host_bindings(
     media_capture::register(context, &mut bindings)?;
     media_source::register(context, &mut bindings)?;
     media_session::register(context, &mut bindings)?;
+    web_speech::register(context, &mut bindings)?;
     permissions_policy::register(context, &mut bindings)?;
     broadcast_channel::register(context, &mut bindings)?;
     web_locks::register(context, &mut bindings)?;

@@ -57,6 +57,8 @@ collect_pattern "/mediacapture-streams/" "/mediacapture-record/"
 collect_pattern "/media-source/"
 # Media Session metadata, playback, position, and action-handler contracts (#1618).
 collect_pattern "/mediasession/"
+# Web Speech synthesis and recognition contracts (#1619).
+collect_pattern "/speech-api/"
 collect_pattern "/common/performance-timeline-utils.js" "/common/performance-timeline-utils.js.headers"
 collect_pattern "/paint-timing/" "/largest-contentful-paint/" "/server-timing/" "/longtask-timing/" "/event-timing/" "/layout-instability/" "/images/"
 collect_pattern \
