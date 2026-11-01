@@ -197,7 +197,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y fonts-dejavu fonts-liberation fonts-noto-core fonts-noto-cjk
       - name: Fetch WPT references for integration tests
-        if: matrix.shard == 'integration'
+        if: startsWith(matrix.shard, 'integration-')
         env:
           WPT_ROOT: .cache/wpt
         run: scripts/fetch-wpt.sh

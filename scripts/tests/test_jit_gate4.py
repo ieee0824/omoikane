@@ -53,6 +53,14 @@ class PartitioningTests(unittest.TestCase):
             self.assertEqual(gate.STEPS[name], ["integration"])
         self.assertEqual(gate.STEPS["build"], ["examples-and-bins", "doc", "build"])
 
+    def test_each_integration_job_fetches_required_wpt_references(self):
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/ci.yml").read_text()
+        fetch = workflow.split("- name: Fetch WPT references for integration tests", 1)[1]
+        fetch = fetch.split("- name: Run gate partition", 1)[0]
+        self.assertIn("if: startsWith(matrix.shard, 'integration-')", fetch)
+        self.assertIn("WPT_ROOT: .cache/wpt", fetch)
+        self.assertIn("run: scripts/fetch-wpt.sh", fetch)
+
     def test_integration_partition_is_stable_disjoint_and_complete(self):
         targets = sorted(["jit_native_gate", *[f"target_{i}" for i in range(1000)]])
         partitions = [gate.integration_partition(targets, i)
