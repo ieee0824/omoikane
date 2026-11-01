@@ -239,6 +239,7 @@ pub(crate) use transform::{
 };
 
 mod font_shorthand;
+pub(crate) use font_shorthand::parse_canvas_font;
 #[cfg(test)]
 mod url_tests;
 

@@ -11,6 +11,7 @@ mod paint;
 mod raster;
 mod shadow;
 mod stroke;
+pub(crate) mod text;
 
 use serde::Deserialize;
 

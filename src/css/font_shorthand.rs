@@ -24,6 +24,34 @@ pub(super) fn expand(
     tokens: &[CssToken],
     important: bool,
 ) -> Result<Vec<Declaration>, CssParseError> {
+    expand_with_family(tokens, important).map(|(declarations, _)| declarations)
+}
+
+/// Parses a Canvas 2D `font` value, where keywords and units are ASCII
+/// case-insensitive. Returns the longhands and the font-family tokens with
+/// their original case and escapes resolved.
+pub(crate) fn parse_canvas_font(value: &str) -> Option<(Vec<Declaration>, Vec<CssToken>)> {
+    let tokens = super::tokenize(value).ok()?;
+    let folded = tokens
+        .iter()
+        .map(|token| match token {
+            CssToken::Ident(name) => CssToken::Ident(name.to_ascii_lowercase()),
+            CssToken::Dimension(number, unit) => {
+                CssToken::Dimension(*number, unit.to_ascii_lowercase())
+            }
+            other => other.clone(),
+        })
+        .collect::<Vec<_>>();
+    let (declarations, family_start) = expand_with_family(&folded, false).ok()?;
+    Some((declarations, tokens.get(family_start..)?.to_vec()))
+}
+
+/// Like [`expand`], also returning the index of the first font-family token
+/// (`tokens.len()` for a CSS-wide keyword).
+fn expand_with_family(
+    tokens: &[CssToken],
+    important: bool,
+) -> Result<(Vec<Declaration>, usize), CssParseError> {
     let significant: Vec<_> = tokens
         .iter()
         .enumerate()
@@ -35,14 +63,15 @@ pub(super) fn expand(
             "inherit" | "initial" | "unset" | "revert" | "revert-layer"
         )
     {
-        return Ok(LONGHANDS
+        let declarations = LONGHANDS
             .iter()
             .map(|name| Declaration {
                 name: (*name).into(),
                 value: Value::Keyword(keyword.clone()),
                 important,
             })
-            .collect());
+            .collect();
+        return Ok((declarations, tokens.len()));
     }
     let mut values = std::collections::HashMap::new();
     for name in [
@@ -147,14 +176,15 @@ pub(super) fn expand(
         "font-family",
         Value::Keyword(render_tokens(&tokens[*family_start..]).trim().into()),
     );
-    Ok(LONGHANDS
+    let declarations = LONGHANDS
         .iter()
         .map(|name| Declaration {
             name: (*name).into(),
             value: values.remove(name).unwrap(),
             important,
         })
-        .collect())
+        .collect();
+    Ok((declarations, *family_start))
 }
 
 fn font_size(token: &CssToken) -> Option<Value> {

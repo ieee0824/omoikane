@@ -101,6 +101,7 @@ mod canvas2d;
 mod canvas_blit;
 #[cfg(test)]
 mod canvas_blit_tests;
+mod canvas_text;
 mod child_effect_source_cache;
 #[cfg(test)]
 mod child_layout_cache_tests;
@@ -17460,6 +17461,16 @@ fn register_host_bindings(
             js_string!("__omoikane_canvas_parse_color"),
             1,
             NativeFunction::from_copy_closure(canvas2d::parse_color_native),
+        ),
+        (
+            js_string!("__omoikane_canvas_parse_font"),
+            2,
+            NativeFunction::from_copy_closure(canvas_text::parse_font_native),
+        ),
+        (
+            js_string!("__omoikane_canvas2d_text"),
+            2,
+            NativeFunction::from_copy_closure(canvas_text::text_native),
         ),
         (
             js_string!("__omoikane_canvas_commit"),
