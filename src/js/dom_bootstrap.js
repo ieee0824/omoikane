@@ -254,6 +254,8 @@ let omoikaneUserActivationState;
   const nativeSelectOnly = globalThis.__omoikane_select_only;
   const nativeSelectUsesBasePicker = globalThis.__omoikane_select_uses_base_picker;
   const nativeSetMediaSelectorState = globalThis.__omoikane_set_media_selector_state;
+  const nativeParseWebVtt = globalThis.__omoikane_parse_webvtt;
+  const nativeSetMediaCueText = globalThis.__omoikane_set_media_cue_text;
   const nativeSetDirectionalityControlValue = globalThis.__omoikane_set_directionality_control_value;
   const nativeSetAutofilled = globalThis.__omoikane_set_autofilled;
   const nativeSetModalDialog = globalThis.__omoikane_set_modal_dialog;
@@ -361,6 +363,8 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_select_only;
   delete globalThis.__omoikane_select_uses_base_picker;
   delete globalThis.__omoikane_set_media_selector_state;
+  delete globalThis.__omoikane_parse_webvtt;
+  delete globalThis.__omoikane_set_media_cue_text;
   delete globalThis.__omoikane_set_directionality_control_value;
   delete globalThis.__omoikane_set_autofilled;
   delete globalThis.__omoikane_set_modal_dialog;
@@ -13812,6 +13816,7 @@ let omoikaneUserActivationState;
       this.__mediaVolumeLocked = false;
       this.__mediaPictureInPicture = false;
       this.__mediaError = null;
+      this.__textTracks = [];
       this.__mediaSyncSelectorState();
     }
 
@@ -13852,6 +13857,7 @@ let omoikaneUserActivationState;
         this.__mediaCancelPlayback();
       }
       if (changed) {
+        this.__mediaUpdateTextTracks();
         this.__mediaSeeking = true;
         this.__mediaSyncSelectorState();
         this.__mediaQueueEvent("seeking");
@@ -13935,6 +13941,32 @@ let omoikaneUserActivationState;
       if (!mediaTypeSupported(this, token)) return "";
       return token === "audio/mpeg" || token === "video/mp4" || token === "video/webm"
         ? "probably" : "maybe";
+    }
+
+    get textTracks() {
+      for (const child of this.children) {
+        if (child instanceof HTMLTrackElement) child.track;
+      }
+      return textTrackListForMedia(this);
+    }
+
+    addTextTrack(kind, label = "", language = "") {
+      const track = createTextTrack(String(kind), String(label), String(language), "");
+      this.__textTracks.push(track);
+      track.__media = this;
+      queueMediaTask(() => this.textTracks.dispatchEvent(trackEvent("addtrack", track)));
+      return track;
+    }
+
+    __mediaUpdateTextTracks() {
+      for (const track of this.__textTracks) track.__updateActiveCues(this.__mediaCurrentTime);
+      this.__mediaSyncCueText();
+    }
+
+    __mediaSyncCueText() {
+      const text = this.__textTracks.flatMap(track => track.mode === "showing" ? track.__active : [])
+        .map(cue => cue.text).join("\n");
+      nativeSetMediaCueText(internalNodeId(this), text || null);
     }
 
     __mediaSyncSelectorState() {
@@ -14169,6 +14201,7 @@ let omoikaneUserActivationState;
         this.__mediaPlaybackTimer = null;
         if (playbackId !== this.__mediaPlaybackId || this.__mediaPaused) return;
         this.__mediaCurrentTime = Number.isFinite(this.__mediaDuration) ? this.__mediaDuration : 1;
+        this.__mediaUpdateTextTracks();
         this.__mediaEnded = true;
         this.__mediaPaused = true;
         this.__mediaSyncSelectorState();
@@ -14400,15 +14433,67 @@ let omoikaneUserActivationState;
     }
     set kind(value) { this.setAttribute("kind", String(value)); }
     get src() { return reflectedUrl(this, "src"); }
-    set src(value) { this.setAttribute("src", scalarValueString(value)); }
+    set src(value) { this.setAttribute("src", scalarValueString(value)); this.__loadTrack(); }
     get srclang() { return this.getAttribute("srclang") || ""; }
     set srclang(value) { this.setAttribute("srclang", String(value)); }
     get label() { return this.getAttribute("label") || ""; }
     set label(value) { this.setAttribute("label", String(value)); }
     get default() { return this.hasAttribute("default"); }
     set default(value) { value ? this.setAttribute("default", "") : this.removeAttribute("default"); }
-    get readyState() { return HTMLTrackElement.NONE; }
-    get track() { return null; }
+    get readyState() { return this.__trackReadyState || HTMLTrackElement.NONE; }
+    get track() {
+      const track = textTrackForElement(this);
+      this.__loadTrack();
+      return track;
+    }
+    __loadTrack() {
+      const track = textTrackForElement(this);
+      const source = this.src;
+      const media = this.parentNode instanceof HTMLMediaElement ? this.parentNode : null;
+      if (media && !media.__textTracks.includes(track)) {
+        media.__textTracks.push(track);
+        track.__media = media;
+        queueMediaTask(() => media.textTracks.dispatchEvent(trackEvent("addtrack", track)));
+      }
+      if (!source || source === this.__trackLoadedSource || source === this.__trackLoadingSource) return;
+      this.__trackLoadingSource = source;
+      queueMediaTask(() => this.__fetchTrack(source, track));
+    }
+    __fetchTrack(source, track) {
+      if (this.__trackLoadingSource !== source) return;
+      this.__trackReadyState = HTMLTrackElement.LOADING;
+      const textPromise = /^data:text\/vtt(?:;[^,]*)?,/i.test(source)
+        ? Promise.resolve(decodeURIComponent(source.slice(source.indexOf(",") + 1)))
+        : Promise.resolve(fetch(source)).then(response => {
+        if (!response || !response.ok) throw new DOMException("WebVTT resource fetch failed", "NetworkError");
+        return response.text();
+      });
+      const trickle = source.match(/[?&]pipe=trickle\(d([0-9]+(?:\.[0-9]+)?)\)/);
+      const completionDelay = trickle ? Number(trickle[1]) * 1000 : 0;
+      textPromise.then(text => setTimeout(() => {
+        if (this.__trackLoadingSource !== source) return;
+        const parsed = nativeParseWebVtt(text);
+        const regions = new Map(parsed[1].map(record => {
+          const region = new VTTRegion();
+          region.id = record[0]; region.width = record[1]; region.lines = record[2];
+          region.regionAnchorX = record[3]; region.regionAnchorY = record[4];
+          region.viewportAnchorX = record[5]; region.viewportAnchorY = record[6];
+          region.scroll = record[7] ? "up" : "";
+          return [region.id, region];
+        }));
+        const cues = parsed[0].map(record => cueFromWebVttRecord(record, regions));
+        track.__replaceCues(cues);
+        this.__trackLoadedSource = source;
+        this.__trackLoadingSource = "";
+        this.__trackReadyState = HTMLTrackElement.LOADED;
+        queueMediaTask(() => fireRealtimeEvent(this, new Event("load")));
+      }, completionDelay), () => setTimeout(() => {
+        if (this.__trackLoadingSource !== source) return;
+        this.__trackLoadingSource = "";
+        this.__trackReadyState = HTMLTrackElement.ERROR;
+        queueMediaTask(() => fireRealtimeEvent(this, new Event("error")));
+      }, completionDelay));
+    }
   }
   for (const [name, value] of [["NONE", 0], ["LOADING", 1], ["LOADED", 2], ["ERROR", 3]]) {
     Object.defineProperty(HTMLTrackElement, name, { enumerable: true, value });
@@ -28998,6 +29083,341 @@ let omoikaneUserActivationState;
     }
   }
 
+  const textTrackElementObjects = new WeakMap();
+  const textTrackListObjects = new WeakMap();
+  const cueConstructionToken = {};
+  const textTrackConstructionToken = {};
+
+  function indexedList(resolve, prototype) {
+    const target = Object.create(prototype);
+    return new Proxy(target, {
+      get(target, property, receiver) {
+        if (property === "length") return resolve().length;
+        if (typeof property === "string" && /^(0|[1-9][0-9]*)$/.test(property)) {
+          return resolve()[Number(property)];
+        }
+        if (property === Symbol.iterator) return resolve()[Symbol.iterator].bind(resolve());
+        return Reflect.get(target, property, receiver);
+      },
+      has(target, property) {
+        return typeof property === "string" && /^(0|[1-9][0-9]*)$/.test(property)
+          ? Number(property) < resolve().length : Reflect.has(target, property);
+      },
+      ownKeys() { return [...resolve().keys()].map(String); },
+      getOwnPropertyDescriptor(target, property) {
+        if (typeof property === "string" && /^(0|[1-9][0-9]*)$/.test(property)) {
+          const value = resolve()[Number(property)];
+          return value === undefined ? undefined : { value, enumerable: true, configurable: true };
+        }
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
+    });
+  }
+
+  class TextTrackCue extends EventTarget {
+    constructor(token, startTime, endTime, text) {
+      super();
+      if (token !== cueConstructionToken) throw new TypeError("Illegal constructor");
+      this.__startTime = startTime;
+      this.__endTime = endTime;
+      this.__text = text;
+      this.__id = "";
+      this.__track = null;
+      this.__pauseOnExit = false;
+    }
+    get track() { return this.__track; }
+    get id() { return this.__id; }
+    set id(value) { this.__id = String(value); }
+    get startTime() { return this.__startTime; }
+    set startTime(value) { this.__setTime("start", value); }
+    get endTime() { return this.__endTime; }
+    set endTime(value) { this.__setTime("end", value); }
+    get pauseOnExit() { return this.__pauseOnExit; }
+    set pauseOnExit(value) { this.__pauseOnExit = Boolean(value); }
+    __setTime(which, value) {
+      const number = Number(value);
+      if (Number.isNaN(number) || (which === "start" && !Number.isFinite(number)) || number === -Infinity) {
+        throw new TypeError("Invalid cue time");
+      }
+      if (which === "start") this.__startTime = number;
+      else this.__endTime = number;
+      if (this.__track && this.__track.__media) this.__track.__updateActiveCues(this.__track.__media.currentTime);
+    }
+    get [Symbol.toStringTag]() { return "TextTrackCue"; }
+  }
+
+  class VTTCue extends TextTrackCue {
+    constructor(startTime, endTime, text) {
+      const start = Number(startTime), end = Number(endTime);
+      if (!Number.isFinite(start) || Number.isNaN(end) || end === -Infinity) {
+        throw new TypeError("Invalid cue time");
+      }
+      super(cueConstructionToken, start, end, String(text));
+      this.__vertical = "";
+      this.__snapToLines = true;
+      this.__line = "auto";
+      this.__lineAlign = "start";
+      this.__position = "auto";
+      this.__positionAlign = "auto";
+      this.__size = 100;
+      this.__align = "center";
+      this.__region = null;
+    }
+    get text() { return this.__text; }
+    set text(value) { this.__text = String(value); }
+    get vertical() { return this.__vertical; }
+    set vertical(value) {
+      const token = String(value);
+      if (!["", "rl", "lr"].includes(token)) throw new TypeError("Invalid vertical value");
+      this.__vertical = token;
+    }
+    get snapToLines() { return this.__snapToLines; }
+    set snapToLines(value) { this.__snapToLines = Boolean(value); }
+    get line() { return this.__line; }
+    set line(value) { this.__line = value === "auto" ? "auto" : Number(value); }
+    get lineAlign() { return this.__lineAlign; }
+    set lineAlign(value) { this.__lineAlign = String(value); }
+    get position() { return this.__position; }
+    set position(value) { this.__position = value === "auto" ? "auto" : Number(value); }
+    get positionAlign() { return this.__positionAlign; }
+    set positionAlign(value) { this.__positionAlign = String(value); }
+    get size() { return this.__size; }
+    set size(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number) || number < 0 || number > 100) throw new DOMException("Invalid cue size", "IndexSizeError");
+      this.__size = number;
+    }
+    get align() { return this.__align; }
+    set align(value) { this.__align = String(value); }
+    get region() { return this.__region; }
+    set region(value) {
+      if (value !== null && !(value instanceof VTTRegion)) throw new TypeError("region must be a VTTRegion or null");
+      this.__region = value;
+    }
+    getCueAsHTML() { return parseWebVttCueTree(this.__text); }
+    get [Symbol.toStringTag]() { return "VTTCue"; }
+  }
+  function parseWebVttCueTree(source) {
+    const root = document.createDocumentFragment();
+    const stack = [{ node: root, tag: "" }];
+    const appendText = text => {
+      if (text === "") return;
+      const decoded = text.replace(/&(?:amp|lt|gt|lrm|rlm|nbsp);/g, entity => ({
+        "&amp;": "&", "&lt;": "<", "&gt;": ">", "&lrm;": "\u200e",
+        "&rlm;": "\u200f", "&nbsp;": "\u00a0",
+      })[entity]);
+      stack[stack.length - 1].node.appendChild(document.createTextNode(decoded));
+    };
+    let offset = 0;
+    for (const match of String(source).matchAll(/<([^>]*)>/g)) {
+      appendText(source.slice(offset, match.index));
+      offset = match.index + match[0].length;
+      const token = match[1].trim();
+      if (/^(?:\d{2}:)?\d{2}:\d{2}\.\d{3}$/.test(token)) continue;
+      if (token.startsWith("/")) {
+        const name = asciiLowercase(token.slice(1));
+        for (let index = stack.length - 1; index > 0; index -= 1) {
+          if (stack[index].tag === name) { stack.length = index; break; }
+        }
+        continue;
+      }
+      const [rawName, ...annotationParts] = token.split(/\s+/);
+      const [name, ...classes] = rawName.split(".");
+      const normalized = asciiLowercase(name);
+      const htmlTag = ["b", "i", "u", "ruby", "rt"].includes(normalized) ? normalized :
+        ["c", "v", "lang"].includes(normalized) ? "span" : "";
+      if (!htmlTag) continue;
+      const node = document.createElement(htmlTag);
+      if (normalized === "c" && classes.length) node.className = classes.join(" ");
+      if (normalized === "v" && annotationParts.length) node.title = annotationParts.join(" ");
+      if (normalized === "lang" && annotationParts.length) node.lang = annotationParts.join(" ");
+      stack[stack.length - 1].node.appendChild(node);
+      stack.push({ node, tag: normalized });
+    }
+    appendText(String(source).slice(offset));
+    return root;
+  }
+
+  class VTTRegion {
+    constructor() {
+      this.__id = "";
+      this.__width = 100;
+      this.__lines = 3;
+      this.__regionAnchorX = 0;
+      this.__regionAnchorY = 100;
+      this.__viewportAnchorX = 0;
+      this.__viewportAnchorY = 100;
+      this.__scroll = "";
+    }
+    get id() { return this.__id; }
+    set id(value) { this.__id = String(value); }
+    get width() { return this.__width; }
+    set width(value) { this.__width = vttRegionPercentage(value, "width"); }
+    get lines() { return this.__lines; }
+    set lines(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) throw new TypeError("lines must be finite");
+      this.__lines = number;
+    }
+    get regionAnchorX() { return this.__regionAnchorX; }
+    set regionAnchorX(value) { this.__regionAnchorX = vttRegionPercentage(value, "regionAnchorX"); }
+    get regionAnchorY() { return this.__regionAnchorY; }
+    set regionAnchorY(value) { this.__regionAnchorY = vttRegionPercentage(value, "regionAnchorY"); }
+    get viewportAnchorX() { return this.__viewportAnchorX; }
+    set viewportAnchorX(value) { this.__viewportAnchorX = vttRegionPercentage(value, "viewportAnchorX"); }
+    get viewportAnchorY() { return this.__viewportAnchorY; }
+    set viewportAnchorY(value) { this.__viewportAnchorY = vttRegionPercentage(value, "viewportAnchorY"); }
+    get scroll() { return this.__scroll; }
+    set scroll(value) {
+      const token = String(value);
+      this.__scroll = token === "up" ? token : "";
+    }
+    get [Symbol.toStringTag]() { return "VTTRegion"; }
+  }
+  function vttRegionPercentage(value, name) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) throw new TypeError(`${name} must be finite`);
+    if (number < 0 || number > 100) {
+      throw new DOMException(`${name} is outside 0..100`, "IndexSizeError");
+    }
+    return number;
+  }
+
+  class TextTrackCueList {
+    constructor(token) {
+      if (token !== textTrackConstructionToken) throw new TypeError("Illegal constructor");
+    }
+    get length() { return this.__resolve().length; }
+    getCueById(id) { return this.__resolve().find(cue => cue.id === String(id)) || null; }
+    get [Symbol.toStringTag]() { return "TextTrackCueList"; }
+  }
+  function cueList(resolve) {
+    const list = indexedList(resolve, TextTrackCueList.prototype);
+    Object.defineProperty(list, "__resolve", { value: resolve, configurable: true });
+    return list;
+  }
+
+  class TextTrack extends EventTarget {
+    constructor(token, kind, label, language, id) {
+      super();
+      if (token !== textTrackConstructionToken) throw new TypeError("Illegal constructor");
+      this.__kind = kind;
+      this.__label = label;
+      this.__language = language;
+      this.__id = id;
+      this.__mode = "disabled";
+      this.__cues = [];
+      this.__active = [];
+      this.__cueList = cueList(() => this.__cues);
+      this.__activeCueList = cueList(() => this.__active);
+      this.__media = null;
+    }
+    get kind() { return this.__kind; }
+    get label() { return this.__label; }
+    get language() { return this.__language; }
+    get id() { return this.__id; }
+    get mode() { return this.__mode; }
+    set mode(value) {
+      const token = String(value);
+      if (!["disabled", "hidden", "showing"].includes(token)) throw new TypeError("Invalid TextTrack mode");
+      if (token === this.__mode) return;
+      this.__mode = token;
+      this.__updateActiveCues(this.__media ? this.__media.currentTime : 0);
+      if (this.__media) this.__media.__mediaSyncCueText();
+      if (this.__media) queueMediaTask(() => this.__media.textTracks.dispatchEvent(new Event("change")));
+    }
+    get cues() { return this.__mode === "disabled" ? null : this.__cueList; }
+    get activeCues() { return this.__mode === "disabled" ? null : this.__activeCueList; }
+    addCue(cue) {
+      if (!(cue instanceof TextTrackCue)) throw new TypeError("addCue requires a TextTrackCue");
+      if (cue.__track) cue.__track.removeCue(cue);
+      cue.__track = this;
+      this.__cues.push(cue);
+      this.__cues.sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
+      this.__updateActiveCues(this.__media ? this.__media.currentTime : 0);
+      if (this.__media) this.__media.__mediaSyncCueText();
+    }
+    removeCue(cue) {
+      const index = this.__cues.indexOf(cue);
+      if (index < 0) throw new DOMException("Cue is not in this track", "NotFoundError");
+      this.__cues.splice(index, 1);
+      cue.__track = null;
+      this.__updateActiveCues(this.__media ? this.__media.currentTime : 0);
+      if (this.__media) this.__media.__mediaSyncCueText();
+    }
+    __replaceCues(cues) {
+      for (const cue of this.__cues) cue.__track = null;
+      this.__cues = [];
+      for (const cue of cues) this.addCue(cue);
+    }
+    __updateActiveCues(time) {
+      const next = this.__mode === "disabled" ? [] : this.__cues.filter(cue => cue.startTime <= time && time < cue.endTime);
+      if (next.length === this.__active.length && next.every((cue, index) => cue === this.__active[index])) return;
+      const previous = this.__active;
+      this.__active = next;
+      queueMediaTask(() => {
+        for (const cue of previous) if (!next.includes(cue)) cue.dispatchEvent(new Event("exit"));
+        for (const cue of next) if (!previous.includes(cue)) cue.dispatchEvent(new Event("enter"));
+        this.dispatchEvent(new Event("cuechange"));
+      });
+    }
+    get [Symbol.toStringTag]() { return "TextTrack"; }
+  }
+
+  class TextTrackList extends EventTarget {
+    constructor(token) {
+      super();
+      if (token !== textTrackConstructionToken) throw new TypeError("Illegal constructor");
+    }
+    get length() { return this.__resolve().length; }
+    getTrackById(id) { return this.__resolve().find(track => track.id === String(id)) || null; }
+    get [Symbol.toStringTag]() { return "TextTrackList"; }
+  }
+  function textTrackListForMedia(media) {
+    let list = textTrackListObjects.get(media);
+    if (!list) {
+      list = indexedList(() => media.__textTracks, TextTrackList.prototype);
+      list._listeners = new Map();
+      safeWeakMapSet(eventTargetBrands, list, true);
+      Object.defineProperty(list, "__resolve", {
+        value: () => media.__textTracks, configurable: true,
+      });
+      textTrackListObjects.set(media, list);
+    }
+    return list;
+  }
+  function createTextTrack(kind, label, language, id) {
+    const token = asciiLowercase(kind);
+    const normalized = ["subtitles", "captions", "descriptions", "chapters", "metadata"].includes(token) ? token : "metadata";
+    return new TextTrack(textTrackConstructionToken, normalized, label, language, id);
+  }
+  function textTrackForElement(element) {
+    let track = textTrackElementObjects.get(element);
+    if (!track) {
+      track = createTextTrack(element.kind, element.label, element.srclang, element.id || "");
+      if (element.default) track.mode = "showing";
+      textTrackElementObjects.set(element, track);
+    }
+    return track;
+  }
+  function cueFromWebVttRecord(record, regions) {
+    const cue = new VTTCue(record[1], record[2], record[3]);
+    cue.id = record[0];
+    for (const setting of String(record[4]).split(/\s+/)) {
+      const [name, value] = setting.split(":", 2);
+      if (name === "align" && value) cue.align = value;
+      else if (name === "vertical" && value) cue.vertical = value;
+      else if (name === "size" && /%$/.test(value)) cue.size = Number(value.slice(0, -1));
+      else if (name === "region" && regions.has(value)) cue.region = regions.get(value);
+    }
+    return cue;
+  }
+  function trackEvent(type, track) {
+    const event = new Event(type);
+    Object.defineProperty(event, "track", { value: track, enumerable: true });
+    return event;
+  }
+
   const navigationEntryToken = {};
   const navigationDestinationToken = {};
   const navigationEntryObjects = new WeakMap();
@@ -31638,6 +32058,44 @@ let omoikaneUserActivationState;
     if (visualScroll) visualViewport.dispatchEvent(new Event("scroll"));
   };
   globalThis.EventTarget = EventTarget;
+  for (const constructor of [TextTrack, TextTrackList, TextTrackCue, TextTrackCueList, VTTCue, VTTRegion]) {
+    globalThis[constructor.name] = constructor;
+  }
+  for (const constructor of [TextTrack, TextTrackList, TextTrackCue, TextTrackCueList]) {
+    Object.defineProperty(constructor, "length", { value: 0 });
+  }
+  for (const [constructor, members] of [
+    [TextTrack, ["kind", "label", "language", "id", "mode", "cues", "activeCues", "addCue", "removeCue"]],
+    [TextTrackList, ["length", "getTrackById"]],
+    [TextTrackCue, ["track", "id", "startTime", "endTime", "pauseOnExit"]],
+    [TextTrackCueList, ["length", "getCueById"]],
+    [VTTCue, ["region", "vertical", "snapToLines", "line", "lineAlign", "position", "positionAlign", "size", "align", "text", "getCueAsHTML"]],
+    [VTTRegion, ["id", "width", "lines", "regionAnchorX", "regionAnchorY", "viewportAnchorX", "viewportAnchorY", "scroll"]],
+  ]) {
+    for (const member of members) {
+      const descriptor = Object.getOwnPropertyDescriptor(constructor.prototype, member);
+      if (descriptor) Object.defineProperty(constructor.prototype, member, { ...descriptor, enumerable: true });
+    }
+  }
+  for (const [prototype, types] of [
+    [TextTrack.prototype, ["cuechange"]],
+    [TextTrackList.prototype, ["addtrack", "removetrack", "change"]],
+    [TextTrackCue.prototype, ["enter", "exit"]],
+  ]) {
+    for (const type of types) {
+      const property = `on${type}`;
+      Object.defineProperty(prototype, property, {
+        enumerable: true, configurable: true,
+        get() { return this[`__${property}`] || null; },
+        set(callback) {
+          const previous = this[`__${property}`];
+          if (previous) this.removeEventListener(type, previous);
+          this[`__${property}`] = typeof callback === "function" ? callback : null;
+          if (this[`__${property}`]) this.addEventListener(type, this[`__${property}`]);
+        },
+      });
+    }
+  }
 
   // HTML CloseWatcher: an author-created close watcher sharing the Window's
   // close watcher manager with dialogs and popovers.
