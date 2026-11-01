@@ -56,6 +56,8 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_canvas2d_contains;
   const nativeCanvasParseColor = globalThis.__omoikane_canvas_parse_color;
   delete globalThis.__omoikane_canvas_parse_color;
+  const nativeCanvasParseFilter = globalThis.__omoikane_canvas_parse_filter;
+  delete globalThis.__omoikane_canvas_parse_filter;
   const nativeCanvasParseFont = globalThis.__omoikane_canvas_parse_font;
   delete globalThis.__omoikane_canvas_parse_font;
   const nativeCanvasText = globalThis.__omoikane_canvas2d_text;
@@ -19086,6 +19088,7 @@ let omoikaneUserActivationState;
     const command = { kind, paths, rule: options.rule || "nonzero", transform: style.transform,
       alpha: style.globalAlpha, composite: style.globalCompositeOperation, clip: style.clip,
       smoothing: style.imageSmoothingEnabled };
+    if (style.filter !== "none") command.filter = style.filter;
     let texture = options.texture;
     if (kind !== "clear") {
       if (options.paint) command.paint = options.paint;
@@ -19465,7 +19468,11 @@ let omoikaneUserActivationState;
     context.__s.style.fontData = font;
     return font.serialized;
   });
-  defineCanvasAttribute("filter", value => value, value => String(value).trim() || undefined);
+  // Valid values are kept as written; CSS-wide keywords and invalid lists are ignored.
+  defineCanvasAttribute("filter", value => value, value => {
+    const text = String(value);
+    return nativeCanvasParseFilter(text) ? text : undefined;
+  });
   for (const name of ["letterSpacing", "wordSpacing"]) {
     defineCanvasAttribute(name, value => value, value => {
       const text = String(value).trim().toLowerCase();

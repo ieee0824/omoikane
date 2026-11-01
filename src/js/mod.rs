@@ -17463,6 +17463,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(canvas2d::parse_color_native),
         ),
         (
+            js_string!("__omoikane_canvas_parse_filter"),
+            1,
+            NativeFunction::from_copy_closure(canvas2d::parse_filter_native),
+        ),
+        (
             js_string!("__omoikane_canvas_parse_font"),
             2,
             NativeFunction::from_copy_closure(canvas_text::parse_font_native),

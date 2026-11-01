@@ -407,3 +407,32 @@ fn transferred_canvases_show_the_offscreen_canvas_and_reject_other_access() {
         "#,
     );
 }
+
+#[test]
+fn filters_keep_valid_values_and_apply_before_shadows_and_compositing() {
+    check(
+        30,
+        10,
+        r#"
+        if (ctx.filter !== 'none') return 'initial ' + ctx.filter;
+        ctx.filter = 'blur(  5px)';
+        for (const invalid of ['blur(10)', 'blur 10px', 'inherit', 'initial', 'unset', '', null, undefined])
+          { ctx.filter = invalid; if (ctx.filter !== 'blur(  5px)') return 'invalid ' + invalid + ' ' + ctx.filter; }
+        ctx.save(); ctx.filter = 'none'; ctx.restore();
+        if (ctx.filter !== 'blur(  5px)') return 'restore ' + ctx.filter;
+        ctx.filter = 'invert(1)';
+        ctx.fillStyle = '#ff0000';
+        ctx.fillRect(0, 0, 5, 5);
+        if (px(2, 2) !== '0,255,255,255') return 'invert ' + px(2, 2);
+        ctx.filter = 'drop-shadow(10px 0 0 #00ff00)';
+        ctx.fillStyle = '#0000ff';
+        ctx.fillRect(10, 0, 5, 5);
+        if (px(12, 2) !== '0,0,255,255' || px(22, 2) !== '0,255,0,255') return 'drop-shadow ' + px(12, 2) + ' ' + px(22, 2);
+        ctx.filter = 'blur(2px)';
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 8, 2, 2);
+        // The blur spreads alpha beyond the rectangle's edge.
+        return px(4, 8).split(',')[3] !== '0' || 'blur ' + px(4, 8);
+        "#,
+    );
+}
