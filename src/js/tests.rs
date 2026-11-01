@@ -3233,14 +3233,22 @@ fn canvas_2d_pixels_transform_clip_image_data_draw_image_and_png() {
           const copy=document.createElement('canvas'); copy.width=2; copy.height=2; copy.getContext('2d').drawImage(canvas,0,0,2,2,0,0,2,2);
           const p=ctx.getImageData(0,0,6,4).data;
           globalThis.canvasUrl=canvas.toDataURL('image/png');
-          globalThis.canvasWidth=ctx.measureText('abcd').width;
+          globalThis.canvasWidths=[ctx.measureText('abcd').width, ctx.measureText('abcdabcd').width];
           globalThis.copyPixel=Array.from(copy.getContext('2d').getImageData(0,0,1,1).data).join(',');
           return [p.slice(0,4),p.slice(8,12),p.slice(48,52),p.slice(92,96)].map(x=>Array.from(x).join(',')).join('|');
         })()"#,
     );
     assert_eq!(result, "255,0,0,255|0,0,255,255|0,255,0,255|9,8,7,255");
     assert_eq!(eval_str(&mut runtime, "copyPixel"), "255,0,0,255");
-    assert_eq!(eval_str(&mut runtime, "String(canvasWidth)"), "24");
+    // Widths come from the default 10px sans-serif glyph advances: lowercase
+    // glyphs are narrower than an em, and a longer run is wider.
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "String(canvasWidths[0] > 0 && canvasWidths[0] < 40 && canvasWidths[1] > canvasWidths[0])"
+        ),
+        "true"
+    );
     let data_url = eval_str(&mut runtime, "canvasUrl");
     let png = base64::engine::general_purpose::STANDARD
         .decode(data_url.split_once(',').unwrap().1)
@@ -17836,7 +17844,7 @@ fn permissions_query_maps_existing_states_and_notifies_lifecycle_changes() {
     runtime
         .eval(
             r#"globalThis.invalidPermission = 'pending';
-                   navigator.permissions.query({ name: 'camera' }).catch(error => invalidPermission = error.name);
+                   navigator.permissions.query({ name: 'midi' }).catch(error => invalidPermission = error.name);
                    globalThis.invalidDescriptor = 'pending';
                    navigator.permissions.query(null).catch(error => invalidDescriptor = error.name);"#,
         )
@@ -18057,6 +18065,275 @@ fn dedicated_worker_does_not_expose_geolocation() {
     assert_eq!(
         eval_str(&mut runtime, "JSON.stringify(workerValues[0])"),
         "[\"undefined\",\"undefined\",\"undefined\"]"
+    );
+}
+
+#[test]
+fn media_capture_provider_tracks_constraints_and_recorder_lifecycle() {
+    let mut runtime = JsRuntime::new().unwrap_or_else(|error| panic!("{error}"));
+    runtime.set_media_capture_devices(vec![
+        MediaCaptureDevice::new(MediaDeviceKind::AudioInput, "mic-1", "Synthetic microphone"),
+        MediaCaptureDevice::new(MediaDeviceKind::VideoInput, "cam-1", "Synthetic camera"),
+    ]);
+    runtime
+        .eval(
+            "navigator.mediaDevices.enumerateDevices().then(devices => globalThis.hiddenDeviceLabel = devices[0].label); \
+             navigator.permissions.query({name:'camera'}).then(status => { globalThis.cameraStatus = status; });",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "hiddenDeviceLabel"), "");
+    assert_eq!(eval_str(&mut runtime, "cameraStatus.state"), "denied");
+    runtime.set_media_capture_permission(true);
+    runtime.run_jobs().unwrap();
+    assert_eq!(eval_str(&mut runtime, "cameraStatus.state"), "granted");
+    runtime
+        .eval(
+            r#"globalThis.capture = { events: [] };
+               navigator.mediaDevices.enumerateDevices().then(devices => capture.devices = devices.map(device => device.toJSON()));
+               navigator.mediaDevices.getUserMedia({audio:true, video:{deviceId:{exact:'cam-1'}}}).then(stream => {
+                 capture.stream = stream;
+                 capture.kinds = stream.getTracks().map(track => track.kind).join(',');
+                 const clone = stream.clone();
+                 stream.getAudioTracks()[0].stop();
+                 capture.cloneLive = clone.getAudioTracks()[0].readyState;
+                 const recorder = new MediaRecorder(stream, {mimeType:'video/webm'});
+                 recorder.onstart = () => capture.events.push('start');
+                 recorder.ondataavailable = event => capture.events.push(event.data.type + ':' + event.data.size);
+                 recorder.onstop = () => capture.events.push('stop');
+                 recorder.start(); recorder.requestData(); recorder.stop();
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "capture.devices.length"), "2");
+    assert_eq!(eval_str(&mut runtime, "capture.kinds"), "audio,video");
+    assert_eq!(eval_str(&mut runtime, "capture.cloneLive"), "live");
+    assert_eq!(
+        eval_str(&mut runtime, "capture.events.join('|')"),
+        "start|video/webm:16|video/webm:16|stop"
+    );
+
+    runtime.set_media_capture_permission(false);
+    runtime
+        .eval("navigator.mediaDevices.getUserMedia({audio:true}).catch(error => capture.denied = error.name)")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "capture.denied"), "NotAllowedError");
+}
+
+#[test]
+fn media_capture_stream_clone_and_recorder_defaults_match_web_contracts() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_media_capture_devices(vec![MediaCaptureDevice::new(
+        MediaDeviceKind::VideoInput,
+        "cam-1",
+        "Synthetic camera",
+    )]);
+    runtime.set_media_capture_permission(true);
+    runtime
+        .eval(
+            r#"globalThis.mediaContracts = {};
+               navigator.mediaDevices.getUserMedia({video:true}).then(stream => {
+                 const shared = new MediaStream(stream);
+                 const original = stream.getVideoTracks()[0];
+                 original.stop();
+                 const clone = stream.clone();
+                 const clonedTrack = clone.getVideoTracks()[0];
+                 const recorder = new MediaRecorder(clone);
+                 recorder.stop();
+                 const blobEvent = new BlobEvent('data', {data:new Blob([])});
+                 Object.assign(mediaContracts, {
+                   streamIdLength: stream.id.length,
+                   sharedTrack: shared.getVideoTracks()[0] === original,
+                   cloneTrack: clonedTrack !== original,
+                   cloneState: clonedTrack.readyState,
+                   recorderMime: recorder.mimeType,
+                   audioBits: recorder.audioBitsPerSecond,
+                   videoBits: recorder.videoBitsPerSecond,
+                   timecodeNaN: Number.isNaN(blobEvent.timecode),
+                 });
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "JSON.stringify(mediaContracts)"),
+        r#"{"streamIdLength":36,"sharedTrack":true,"cloneTrack":true,"cloneState":"ended","recorderMime":"","audioBits":128000,"videoBits":2500000,"timecodeNaN":true}"#
+    );
+}
+
+#[test]
+fn media_source_attaches_and_appends_owned_segments_in_event_order() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            r#"globalThis.mse = { events: [] };
+               mse.source = new MediaSource();
+               mse.source.onsourceopen = () => mse.events.push('sourceopen');
+               mse.url = URL.createObjectURL(mse.source);
+               mse.video = document.createElement('video');
+               mse.video.src = mse.url;"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "mse.source.readyState"), "open");
+    assert_eq!(eval_str(&mut runtime, "mse.events.join(',')"), "sourceopen");
+
+    runtime
+        .eval(
+            r#"mse.buffer = mse.source.addSourceBuffer('video/mp4; codecs=avc1');
+               for (const name of ['updatestart','update','updateend'])
+                 mse.buffer.addEventListener(name, () => mse.events.push(name));
+               mse.buffer.appendBuffer(new Uint8Array(2500));"#,
+        )
+        .unwrap();
+    assert_eq!(eval_str(&mut runtime, "mse.buffer.updating"), "true");
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "mse.events.join(',')"),
+        "sourceopen,updatestart,update,updateend"
+    );
+    assert_eq!(eval_str(&mut runtime, "mse.buffer.buffered.length"), "1");
+    assert_eq!(eval_str(&mut runtime, "mse.buffer.buffered.end(0)"), "2.5");
+}
+
+#[test]
+fn media_source_remove_abort_end_and_type_contracts() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            r#"globalThis.mse = { events: [] };
+               mse.source = new ManagedMediaSource();
+               mse.video = document.createElement('video');
+               mse.video.src = URL.createObjectURL(mse.source);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime
+        .eval(
+            r#"mse.buffer = mse.source.addSourceBuffer('audio/webm');
+               mse.buffer.onabort = () => mse.events.push('abort');
+               mse.buffer.onupdateend = () => mse.events.push('updateend');
+               mse.buffer.appendBuffer(new Uint8Array(1000));
+               mse.buffer.abort();
+               mse.source.endOfStream();"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "mse.events.join(',')"),
+        "abort,updateend"
+    );
+    assert_eq!(eval_str(&mut runtime, "mse.source.readyState"), "ended");
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "mse.source.handle instanceof MediaSourceHandle"
+        ),
+        "true"
+    );
+    assert_eq!(
+        eval_str(&mut runtime, "MediaSource.isTypeSupported('video/mp4')"),
+        "true"
+    );
+    assert_eq!(
+        eval_str(&mut runtime, "MediaSource.isTypeSupported('text/plain')"),
+        "false"
+    );
+    assert_eq!(
+        eval_str(&mut runtime, "MediaSource.canConstructInDedicatedWorker"),
+        "true"
+    );
+}
+
+#[test]
+fn media_session_publishes_owned_metadata_position_and_playback_snapshots() {
+    let (port, _server) = spawn_static_http_server("image/png", "Hi");
+    let mut runtime = JsRuntime::with_document_and_url(
+        NodeHandle::document(),
+        &format!("http://127.0.0.1:{port}/player"),
+    )
+    .unwrap();
+    let provider = Arc::new(DeterministicMediaSessionProvider::default());
+    runtime.set_media_session_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.sessionMetadata = new MediaMetadata({
+                 title: 'First', artist: 'Artist', album: 'Album',
+                 artwork: [{src:'/cover.png', sizes:'128x128', type:'image/png'}]
+               });
+               navigator.mediaSession.metadata = sessionMetadata;
+               sessionMetadata.title = 'Updated';
+               navigator.mediaSession.playbackState = 'playing';
+               navigator.mediaSession.setPositionState({duration:60, position:12, playbackRate:1.5});"#,
+        )
+        .unwrap();
+    let snapshot = provider.snapshot();
+    assert_eq!(snapshot.playback_state, "playing");
+    assert_eq!(snapshot.metadata.as_ref().unwrap().title, "Updated");
+    assert_eq!(
+        snapshot.metadata.as_ref().unwrap().artwork[0].src,
+        format!("http://127.0.0.1:{port}/cover.png")
+    );
+    assert_eq!(snapshot.position_state.unwrap().position, 12.0);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "String(Object.isFrozen(sessionMetadata.artwork) && Object.isFrozen(sessionMetadata.artwork[0]))"
+        ),
+        "true"
+    );
+    runtime.request_media_session_artwork(0).unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        provider.artwork_fetches()[0].bytes.as_deref(),
+        Some(&b"Hi"[..])
+    );
+    drop(runtime);
+    assert_eq!(provider.snapshot(), MediaSessionSnapshot::default());
+}
+
+#[test]
+fn media_session_actions_use_host_dispatch_and_validate_state_boundaries() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            r#"globalThis.mediaActions = [];
+               navigator.mediaSession.setActionHandler('seekto', details => mediaActions.push(details.action + ':' + details.seekTime));"#,
+        )
+        .unwrap();
+    assert!(
+        runtime
+            .dispatch_media_session_action("seekto", serde_json::json!({"seekTime": 4.5}))
+            .unwrap()
+    );
+    assert_eq!(
+        eval_str(&mut runtime, "mediaActions.join(',')"),
+        "seekto:4.5"
+    );
+    runtime
+        .eval(
+            r#"globalThis.mediaErrors = [];
+               for (const state of [
+                 {duration:-1}, {duration:10, position:20}, {duration:10, playbackRate:0}
+               ]) {
+                 try { navigator.mediaSession.setPositionState(state); }
+                 catch (error) { mediaErrors.push(error.name); }
+               }
+               try { navigator.mediaSession.setActionHandler('invalid', null); }
+               catch (error) { mediaErrors.push(error.name); }
+               navigator.mediaSession.setActionHandler('seekto', null);"#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "mediaErrors.join(',')"),
+        "TypeError,TypeError,TypeError,TypeError"
+    );
+    assert!(
+        !runtime
+            .dispatch_media_session_action("seekto", serde_json::json!({"seekTime": 8}))
+            .unwrap()
     );
 }
 

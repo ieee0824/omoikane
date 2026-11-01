@@ -558,6 +558,8 @@ pub struct Element {
     fullscreen: bool,
     /// Dynamic HTML media state exposed to CSS pseudo-class matching.
     media_selector_state: Option<u8>,
+    /// Active showing WebVTT cue text painted over a video replaced box.
+    media_cue_text: Option<String>,
     /// Stable ordering among elements currently rendered in the top layer.
     top_layer_order: Option<u64>,
 }
@@ -659,6 +661,7 @@ impl Element {
             modal_dialog: false,
             fullscreen: false,
             media_selector_state,
+            media_cue_text: None,
             top_layer_order: None,
         }
     }
@@ -722,6 +725,7 @@ impl Element {
             modal_dialog: false,
             fullscreen: false,
             media_selector_state,
+            media_cue_text: None,
             top_layer_order: None,
         }
     }
@@ -2572,6 +2576,29 @@ impl NodeHandle {
         }
         element.media_selector_state = Some(state);
         true
+    }
+
+    /// Replaces the owned active subtitle text for an HTML video element.
+    pub(crate) fn set_media_cue_text(&self, text: Option<String>) -> bool {
+        let mut inner = self.0.borrow_mut();
+        let NodeData::Element(element) = &mut inner.data else {
+            return false;
+        };
+        if !is_html_media_element(element) || element.media_cue_text == text {
+            return false;
+        }
+        element.media_cue_text = text;
+        true
+    }
+
+    /// Returns the active subtitle text, if this is a media element with cues.
+    pub(crate) fn media_cue_text(&self) -> Option<String> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) if is_html_media_element(element) => {
+                element.media_cue_text.clone()
+            }
+            _ => None,
+        }
     }
 
     /// Returns whether this element is an open modal dialog.

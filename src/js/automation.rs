@@ -200,6 +200,22 @@ fn register_driver(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
 fn set_permission(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let document = active_document(context)?;
     let name = string_argument(args.first(), "", context)?;
+    if matches!(name.as_str(), "camera" | "microphone") {
+        let granted = match string_argument(args.get(1), "", context)?.as_str() {
+            "granted" => true,
+            "prompt" | "denied" => false,
+            _ => {
+                return Err(JsNativeError::typ()
+                    .with_message("Invalid permission state")
+                    .into());
+            }
+        };
+        with_host_state(|host| {
+            host.borrow_mut().media_capture.set_permission(granted);
+            Ok(())
+        })?;
+        return Ok(JsValue::undefined());
+    }
     if name != "storage-access" {
         return Err(JsNativeError::typ()
             .with_message("Unsupported automation permission")

@@ -56,6 +56,10 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_canvas2d_contains;
   const nativeCanvasParseColor = globalThis.__omoikane_canvas_parse_color;
   delete globalThis.__omoikane_canvas_parse_color;
+  const nativeCanvasParseFont = globalThis.__omoikane_canvas_parse_font;
+  delete globalThis.__omoikane_canvas_parse_font;
+  const nativeCanvasText = globalThis.__omoikane_canvas2d_text;
+  delete globalThis.__omoikane_canvas2d_text;
   const nativeCanvasSvgPath = globalThis.__omoikane_canvas_svg_path;
   delete globalThis.__omoikane_canvas_svg_path;
   const nativeBeginFetch = globalThis.__omoikane_begin_fetch;
@@ -161,6 +165,8 @@ let omoikaneUserActivationState;
   const nativeClipboardEventWrite = globalThis.__omoikane_clipboard_event_write;
   const nativeClipboardPermission = globalThis.__omoikane_clipboard_permission;
   const nativeGeolocationPermission = globalThis.__omoikane_geolocation_permission;
+  const nativeMediaCaptureSnapshot = globalThis.__omoikane_media_capture_snapshot;
+  try { delete globalThis.__omoikane_media_capture_snapshot; } catch (_) {}
   const nativeIsSecureContext = globalThis.__omoikane_is_secure_context;
   const nativeCrossOriginIsolated = globalThis.__omoikane_cross_origin_isolated;
   const nativeStorageManager = globalThis.__omoikane_storage_manager;
@@ -254,6 +260,8 @@ let omoikaneUserActivationState;
   const nativeSelectOnly = globalThis.__omoikane_select_only;
   const nativeSelectUsesBasePicker = globalThis.__omoikane_select_uses_base_picker;
   const nativeSetMediaSelectorState = globalThis.__omoikane_set_media_selector_state;
+  const nativeParseWebVtt = globalThis.__omoikane_parse_webvtt;
+  const nativeSetMediaCueText = globalThis.__omoikane_set_media_cue_text;
   const nativeSetDirectionalityControlValue = globalThis.__omoikane_set_directionality_control_value;
   const nativeSetAutofilled = globalThis.__omoikane_set_autofilled;
   const nativeSetModalDialog = globalThis.__omoikane_set_modal_dialog;
@@ -361,6 +369,8 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_select_only;
   delete globalThis.__omoikane_select_uses_base_picker;
   delete globalThis.__omoikane_set_media_selector_state;
+  delete globalThis.__omoikane_parse_webvtt;
+  delete globalThis.__omoikane_set_media_cue_text;
   delete globalThis.__omoikane_set_directionality_control_value;
   delete globalThis.__omoikane_set_autofilled;
   delete globalThis.__omoikane_set_modal_dialog;
@@ -13823,6 +13833,7 @@ let omoikaneUserActivationState;
       this.__mediaVolumeLocked = false;
       this.__mediaPictureInPicture = false;
       this.__mediaError = null;
+      this.__textTracks = [];
       this.__mediaSyncSelectorState();
     }
 
@@ -13863,6 +13874,7 @@ let omoikaneUserActivationState;
         this.__mediaCancelPlayback();
       }
       if (changed) {
+        this.__mediaUpdateTextTracks();
         this.__mediaSeeking = true;
         this.__mediaSyncSelectorState();
         this.__mediaQueueEvent("seeking");
@@ -13946,6 +13958,32 @@ let omoikaneUserActivationState;
       if (!mediaTypeSupported(this, token)) return "";
       return token === "audio/mpeg" || token === "video/mp4" || token === "video/webm"
         ? "probably" : "maybe";
+    }
+
+    get textTracks() {
+      for (const child of this.children) {
+        if (child instanceof HTMLTrackElement) child.track;
+      }
+      return textTrackListForMedia(this);
+    }
+
+    addTextTrack(kind, label = "", language = "") {
+      const track = createTextTrack(String(kind), String(label), String(language), "");
+      this.__textTracks.push(track);
+      track.__media = this;
+      queueMediaTask(() => this.textTracks.dispatchEvent(trackEvent("addtrack", track)));
+      return track;
+    }
+
+    __mediaUpdateTextTracks() {
+      for (const track of this.__textTracks) track.__updateActiveCues(this.__mediaCurrentTime);
+      this.__mediaSyncCueText();
+    }
+
+    __mediaSyncCueText() {
+      const text = this.__textTracks.flatMap(track => track.mode === "showing" ? track.__active : [])
+        .map(cue => cue.text).join("\n");
+      nativeSetMediaCueText(internalNodeId(this), text || null);
     }
 
     __mediaSyncSelectorState() {
@@ -14045,6 +14083,11 @@ let omoikaneUserActivationState;
       if (!source) {
         return;
       }
+      const mediaSource = mediaSourceObjectUrls.get(String(source));
+      if (mediaSource) {
+        attachMediaSource(mediaSource, this, loadId);
+        return;
+      }
       const sourceType = mediaTypeFromSource(source);
       if (/^data:/i.test(source)) {
         queueMediaTask(() => this.__mediaReady(loadId, sourceType));
@@ -14084,6 +14127,8 @@ let omoikaneUserActivationState;
 
     __mediaLoad() {
       const loadId = ++this.__mediaLoadId;
+      const previousMediaSource = this.__attachedMediaSource;
+      if (previousMediaSource) detachMediaSource(previousMediaSource, this);
       this.__mediaCancelPlayback();
       this.__mediaRejectWaiters(new DOMException("The play() request was interrupted.", "AbortError"));
       this.__mediaCurrentSrc = this.src;
@@ -14180,6 +14225,7 @@ let omoikaneUserActivationState;
         this.__mediaPlaybackTimer = null;
         if (playbackId !== this.__mediaPlaybackId || this.__mediaPaused) return;
         this.__mediaCurrentTime = Number.isFinite(this.__mediaDuration) ? this.__mediaDuration : 1;
+        this.__mediaUpdateTextTracks();
         this.__mediaEnded = true;
         this.__mediaPaused = true;
         this.__mediaSyncSelectorState();
@@ -14411,15 +14457,67 @@ let omoikaneUserActivationState;
     }
     set kind(value) { this.setAttribute("kind", String(value)); }
     get src() { return reflectedUrl(this, "src"); }
-    set src(value) { this.setAttribute("src", scalarValueString(value)); }
+    set src(value) { this.setAttribute("src", scalarValueString(value)); this.__loadTrack(); }
     get srclang() { return this.getAttribute("srclang") || ""; }
     set srclang(value) { this.setAttribute("srclang", String(value)); }
     get label() { return this.getAttribute("label") || ""; }
     set label(value) { this.setAttribute("label", String(value)); }
     get default() { return this.hasAttribute("default"); }
     set default(value) { value ? this.setAttribute("default", "") : this.removeAttribute("default"); }
-    get readyState() { return HTMLTrackElement.NONE; }
-    get track() { return null; }
+    get readyState() { return this.__trackReadyState || HTMLTrackElement.NONE; }
+    get track() {
+      const track = textTrackForElement(this);
+      this.__loadTrack();
+      return track;
+    }
+    __loadTrack() {
+      const track = textTrackForElement(this);
+      const source = this.src;
+      const media = this.parentNode instanceof HTMLMediaElement ? this.parentNode : null;
+      if (media && !media.__textTracks.includes(track)) {
+        media.__textTracks.push(track);
+        track.__media = media;
+        queueMediaTask(() => media.textTracks.dispatchEvent(trackEvent("addtrack", track)));
+      }
+      if (!source || source === this.__trackLoadedSource || source === this.__trackLoadingSource) return;
+      this.__trackLoadingSource = source;
+      queueMediaTask(() => this.__fetchTrack(source, track));
+    }
+    __fetchTrack(source, track) {
+      if (this.__trackLoadingSource !== source) return;
+      this.__trackReadyState = HTMLTrackElement.LOADING;
+      const textPromise = /^data:text\/vtt(?:;[^,]*)?,/i.test(source)
+        ? Promise.resolve(decodeURIComponent(source.slice(source.indexOf(",") + 1)))
+        : Promise.resolve(fetch(source)).then(response => {
+        if (!response || !response.ok) throw new DOMException("WebVTT resource fetch failed", "NetworkError");
+        return response.text();
+      });
+      const trickle = source.match(/[?&]pipe=trickle\(d([0-9]+(?:\.[0-9]+)?)\)/);
+      const completionDelay = trickle ? Number(trickle[1]) * 1000 : 0;
+      textPromise.then(text => setTimeout(() => {
+        if (this.__trackLoadingSource !== source) return;
+        const parsed = nativeParseWebVtt(text);
+        const regions = new Map(parsed[1].map(record => {
+          const region = new VTTRegion();
+          region.id = record[0]; region.width = record[1]; region.lines = record[2];
+          region.regionAnchorX = record[3]; region.regionAnchorY = record[4];
+          region.viewportAnchorX = record[5]; region.viewportAnchorY = record[6];
+          region.scroll = record[7] ? "up" : "";
+          return [region.id, region];
+        }));
+        const cues = parsed[0].map(record => cueFromWebVttRecord(record, regions));
+        track.__replaceCues(cues);
+        this.__trackLoadedSource = source;
+        this.__trackLoadingSource = "";
+        this.__trackReadyState = HTMLTrackElement.LOADED;
+        queueMediaTask(() => fireRealtimeEvent(this, new Event("load")));
+      }, completionDelay), () => setTimeout(() => {
+        if (this.__trackLoadingSource !== source) return;
+        this.__trackLoadingSource = "";
+        this.__trackReadyState = HTMLTrackElement.ERROR;
+        queueMediaTask(() => fireRealtimeEvent(this, new Event("error")));
+      }, completionDelay));
+    }
   }
   for (const [name, value] of [["NONE", 0], ["LOADING", 1], ["LOADED", 2], ["ERROR", 3]]) {
     Object.defineProperty(HTMLTrackElement, name, { enumerable: true, value });
@@ -18990,6 +19088,95 @@ let omoikaneUserActivationState;
     }
     return [context.__s.path.subpaths, args];
   }
+  /// The computed font size of the root element of a canvas element's
+  /// document (connected or not), which `rem` refers to; 16 without one.
+  function canvasRootFontSize(canvas) {
+    try {
+      const root = canvas && canvas.nodeType === 1 && canvas.ownerDocument && canvas.ownerDocument.documentElement;
+      if (root && root.isConnected) return parseFloat(getComputedStyle(root).fontSize) || 16;
+    } catch (_) {}
+    return 16;
+  }
+  /// Parses a `font` value relative to the canvas's computed font size. The
+  /// result records the root font size so spacing resolves `rem` alike.
+  function canvasParseFont(value, canvas) {
+    let parentSize = 10;
+    try {
+      if (canvas && canvas.isConnected) parentSize = parseFloat(getComputedStyle(canvas).fontSize) || 10;
+    } catch (_) {}
+    const rootSize = canvasRootFontSize(canvas);
+    const context = { parentSize, rootSize, viewport: [globalThis.innerWidth || 0, globalThis.innerHeight || 0] };
+    const json = nativeCanvasParseFont(String(value), JSON.stringify(context));
+    if (!json) return null;
+    const font = JSON.parse(json);
+    font.rootSize = rootSize;
+    return font;
+  }
+  function canvasFont(context) {
+    const style = context.__s.style;
+    if (!style.fontData) style.fontData = canvasParseFont(style.font, context.canvas) || canvasParseFont("10px sans-serif", null);
+    return style.fontData;
+  }
+  function canvasIsRtl(context) {
+    const direction = context.__s.style.direction;
+    if (direction !== "inherit") return direction === "rtl";
+    try {
+      return !!(context.canvas && context.canvas.isConnected && getComputedStyle(context.canvas).direction === "rtl");
+    } catch (_) { return false; }
+  }
+  /// A letterSpacing/wordSpacing value in pixels for a font of `size` and a
+  /// root font size of `rootSize`.
+  function canvasSpacing(value, size, rootSize) {
+    const match = /^(-?[\d.]+)([a-z]*)$/.exec(value);
+    if (!match) return 0;
+    const units = { px: 1, "": 1, em: size, rem: rootSize, ex: size / 2, ch: size / 2, pt: 96 / 72, pc: 16, in: 96,
+      cm: 96 / 2.54, mm: 96 / 25.4, q: 96 / 101.6, vw: (globalThis.innerWidth || 0) / 100,
+      vh: (globalThis.innerHeight || 0) / 100 };
+    units.vmin = Math.min(units.vw, units.vh); units.vmax = Math.max(units.vw, units.vh);
+    return parseFloat(match[1]) * (units[match[2]] ?? 0);
+  }
+  /// Lays out `text` from the start of its alphabetic baseline, y down.
+  /// Without any usable font, a box of 0.6em advances stands in for glyphs.
+  function canvasTextLayout(context, text) {
+    const style = context.__s.style, font = canvasFont(context);
+    text = String(text);
+    const request = { text, size: font.size, family: font.family, style: font.style, weight: font.weight,
+      stretch: font.stretch, letterSpacing: canvasSpacing(style.letterSpacing, font.size, font.rootSize),
+      wordSpacing: canvasSpacing(style.wordSpacing, font.size, font.rootSize), rtl: canvasIsRtl(context),
+      caps: style.fontVariantCaps !== "normal" ? style.fontVariantCaps : font.variant,
+      kerning: style.fontKerning !== "none" };
+    const canvas = context.canvas, id = canvas && canvas.nodeType === 1 ? internalNodeId(canvas) : null;
+    const json = nativeCanvasText(id ?? null, JSON.stringify(request));
+    if (json) return JSON.parse(json);
+    const size = font.size, width = [...text].length * size * .6;
+    return { width, contours: width ? [[[0, -size * .8], [width, -size * .8], [width, size * .2], [0, size * .2]]] : [],
+      ink: width ? [0, -size * .8, width, size * .2] : null, fontAscent: size * .8, fontDescent: size * .2,
+      emAscent: size * .8, emDescent: size * .2, hanging: size * .64, ideographic: -size * .2 };
+  }
+  /// The x offset of the text start from the anchor for textAlign, and how
+  /// far the textBaseline line sits above the alphabetic baseline.
+  function canvasTextPlacement(context, layout) {
+    const style = context.__s.style, rtl = canvasIsRtl(context);
+    const align = style.textAlign === "start" ? (rtl ? "right" : "left")
+      : style.textAlign === "end" ? (rtl ? "left" : "right") : style.textAlign;
+    const offset = align === "right" ? -layout.width : align === "center" ? -layout.width / 2 : 0;
+    const baseline = { top: layout.emAscent, hanging: layout.hanging, middle: (layout.emAscent - layout.emDescent) / 2,
+      alphabetic: 0, ideographic: layout.ideographic, bottom: -layout.emDescent }[style.textBaseline];
+    return [offset, baseline];
+  }
+  function canvasDrawText(context, kind, text, x, y, maxWidth) {
+    if (!canvasFinite(x, y) || (maxWidth !== undefined && !(maxWidth > 0))) return;
+    const layout = canvasTextLayout(context, text);
+    if (!layout.contours.length) return;
+    const [offset, baseline] = canvasTextPlacement(context, layout);
+    const scale = maxWidth !== undefined && layout.width > maxWidth ? maxWidth / layout.width : 1;
+    const m = context.__s.style.transform;
+    const paths = layout.contours.map(contour => ({
+      points: contour.map(([px, py]) => applyCanvasMatrix(m, x + (offset + px) * scale, y + baseline + py)),
+      closed: true,
+    }));
+    canvasDraw(context, kind, paths);
+  }
   function canvasRectPath(context, x, y, w, h) {
     const path = newCanvasPath();
     canvasPathRect(path, context.__s.style.transform, x, y, w, h);
@@ -19185,24 +19372,24 @@ let omoikaneUserActivationState;
       });
     }
     measureText(text) {
-      const size = parseFloat(this.__s.style.font) || 10;
-      const width = String(text).length * size * .6;
-      return domInterfaces.makeTextMetrics({ width, actualBoundingBoxLeft: 0, actualBoundingBoxRight: width,
-        actualBoundingBoxAscent: size * .8, actualBoundingBoxDescent: size * .2 });
+      const layout = canvasTextLayout(this, text);
+      const [offset, baseline] = canvasTextPlacement(this, layout);
+      const ink = layout.ink || [0, 0, 0, 0];
+      return domInterfaces.makeTextMetrics({
+        width: layout.width,
+        actualBoundingBoxLeft: -(offset + ink[0]), actualBoundingBoxRight: offset + ink[2],
+        actualBoundingBoxAscent: -(ink[1] + baseline), actualBoundingBoxDescent: ink[3] + baseline,
+        fontBoundingBoxAscent: layout.fontAscent - baseline, fontBoundingBoxDescent: layout.fontDescent + baseline,
+        emHeightAscent: layout.emAscent - baseline, emHeightDescent: layout.emDescent + baseline,
+        hangingBaseline: layout.hanging - baseline, alphabeticBaseline: -baseline,
+        ideographicBaseline: layout.ideographic - baseline,
+      });
     }
-    __textBox(text, x, y) {
-      const style = this.__s.style, size = parseFloat(style.font) || 10, width = this.measureText(text).width;
-      const rtl = style.direction === "rtl";
-      const align = style.textAlign === "start" ? (rtl ? "right" : "left") : style.textAlign === "end" ? (rtl ? "left" : "right") : style.textAlign;
-      const left = align === "right" ? x - width : align === "center" ? x - width / 2 : x;
-      const baseline = { top: 0, hanging: size * .2, middle: size * .5, alphabetic: size * .8, ideographic: size, bottom: size }[style.textBaseline];
-      return [left, y - baseline, width, size];
+    fillText(text, x, y, maxWidth = undefined) {
+      canvasDrawText(this, "fill", text, +x, +y, arguments.length > 3 ? +maxWidth : undefined);
     }
-    fillText(text, x, y) {
-      if (canvasFinite(+x, +y)) canvasDraw(this, "fill", canvasRectPath(this, ...this.__textBox(text, +x, +y)));
-    }
-    strokeText(text, x, y) {
-      if (canvasFinite(+x, +y)) canvasDraw(this, "stroke", canvasRectPath(this, ...this.__textBox(text, +x, +y)));
+    strokeText(text, x, y, maxWidth = undefined) {
+      canvasDrawText(this, "stroke", text, +x, +y, arguments.length > 3 ? +maxWidth : undefined);
     }
     get [Symbol.toStringTag]() { return "CanvasRenderingContext2D"; }
   }
@@ -19238,7 +19425,12 @@ let omoikaneUserActivationState;
   defineCanvasAttribute("globalCompositeOperation", value => value,
     value => canvasCompositeOperations.has(String(value)) ? String(value) : undefined);
   defineCanvasAttribute("imageSmoothingEnabled", value => value, value => !!value);
-  defineCanvasAttribute("font", value => value, value => String(value).trim() || undefined);
+  defineCanvasAttribute("font", value => value, (value, context) => {
+    const font = canvasParseFont(value, context.canvas);
+    if (!font) return undefined;
+    context.__s.style.fontData = font;
+    return font.serialized;
+  });
   defineCanvasAttribute("filter", value => value, value => String(value).trim() || undefined);
   for (const name of ["letterSpacing", "wordSpacing"]) {
     defineCanvasAttribute(name, value => value, value => {
@@ -25435,6 +25627,414 @@ let omoikaneUserActivationState;
     globalThis.StorageManager = StorageManager;
   }
 
+  const mediaTrackState = new WeakMap();
+  const mediaStreamState = new WeakMap();
+  let nextMediaStreamId = 1;
+  let nextMediaTrackId = 1;
+  function mediaIdentifier(sequence) {
+    const suffix = Number(sequence).toString(16).padStart(12, "0").slice(-12);
+    return `00000000-0000-4000-8000-${suffix}`;
+  }
+  function illegalInvocation() { throw new TypeError("Illegal invocation"); }
+  // EventTarget/Event are installed later in this bootstrap. Capture objects
+  // are constructed only after that point, while this bridge keeps Navigator
+  // construction free of temporal-dead-zone dependencies.
+  class MediaEventTarget {
+    constructor() { this._listeners = new Map(); }
+    addEventListener(...args) { return globalThis.EventTarget.prototype.addEventListener.call(this, ...args); }
+    removeEventListener(...args) { return globalThis.EventTarget.prototype.removeEventListener.call(this, ...args); }
+    dispatchEvent(...args) { return globalThis.EventTarget.prototype.dispatchEvent.call(this, ...args); }
+  }
+  function defineEventHandler(target, name) {
+    Object.defineProperty(target, "on" + name, {
+      configurable: true, enumerable: true,
+      get() { return this["__on" + name] || null; },
+      set(value) { this["__on" + name] = typeof value === "function" ? value : null; },
+    });
+  }
+  function dispatchMediaEvent(target, type, event = new Event(type)) {
+    const handler = target["on" + type];
+    if (typeof handler === "function") __omoikane_call_event_listener(handler, target, event);
+    target.dispatchEvent(event);
+  }
+  class MediaDeviceInfo {
+    constructor(token, data) {
+      if (token !== mediaCaptureToken) throw new TypeError("Illegal constructor");
+      for (const name of ["deviceId", "kind", "label", "groupId"]) {
+        Object.defineProperty(this, name, { enumerable: true, value: String(data[name] || "") });
+      }
+    }
+    toJSON() { return { deviceId: this.deviceId, kind: this.kind, label: this.label, groupId: this.groupId }; }
+    get [Symbol.toStringTag]() { return "MediaDeviceInfo"; }
+  }
+  class MediaStreamTrackEvent {
+    constructor(type, init = {}) {
+      if (!(init.track instanceof MediaStreamTrack)) throw new TypeError("track must be a MediaStreamTrack");
+      const event = new globalThis.Event(type, init);
+      Object.setPrototypeOf(event, MediaStreamTrackEvent.prototype);
+      Object.defineProperty(event, "track", { enumerable: true, value: init.track });
+      return event;
+    }
+    get [Symbol.toStringTag]() { return "MediaStreamTrackEvent"; }
+  }
+  class MediaStreamTrack extends MediaEventTarget {
+    constructor(token, data) {
+      super();
+      if (token !== mediaCaptureToken) throw new TypeError("Illegal constructor");
+      mediaTrackState.set(this, {
+        id: data.id || mediaIdentifier(nextMediaTrackId++),
+        kind: data.kind,
+        label: data.label || "",
+        deviceId: data.deviceId || "",
+        enabled: data.enabled === undefined ? true : !!data.enabled,
+        muted: !!data.muted,
+        readyState: data.readyState === "ended" ? "ended" : "live",
+      });
+    }
+    get kind() { return mediaTrackState.get(this)?.kind ?? illegalInvocation(); }
+    get id() { return mediaTrackState.get(this)?.id ?? illegalInvocation(); }
+    get label() { return mediaTrackState.get(this)?.label ?? illegalInvocation(); }
+    get enabled() { return mediaTrackState.get(this)?.enabled ?? illegalInvocation(); }
+    set enabled(value) { const state = mediaTrackState.get(this); if (!state) illegalInvocation(); state.enabled = !!value; }
+    get muted() { return mediaTrackState.get(this)?.muted ?? illegalInvocation(); }
+    get readyState() { return mediaTrackState.get(this)?.readyState ?? illegalInvocation(); }
+    get contentHint() { return ""; }
+    set contentHint(_value) {}
+    clone() {
+      const state = mediaTrackState.get(this); if (!state) illegalInvocation();
+      return new MediaStreamTrack(mediaCaptureToken, { ...state, id: mediaIdentifier(nextMediaTrackId++) });
+    }
+    stop() {
+      const state = mediaTrackState.get(this); if (!state) illegalInvocation();
+      if (state.readyState === "ended") return;
+      state.readyState = "ended";
+    }
+    getCapabilities() { const state = mediaTrackState.get(this); if (!state) illegalInvocation(); return { deviceId: state.deviceId }; }
+    getConstraints() { if (!mediaTrackState.has(this)) illegalInvocation(); return {}; }
+    getSettings() { const state = mediaTrackState.get(this); if (!state) illegalInvocation(); return { deviceId: state.deviceId }; }
+    applyConstraints(constraints = {}) {
+      const state = mediaTrackState.get(this);
+      if (!state) return Promise.reject(new TypeError("Illegal invocation"));
+      return Promise.resolve().then(() => {
+        const exact = requestedDeviceId(constraints);
+        if (exact && exact !== state.deviceId) {
+          const error = new DOMException("No device satisfies the constraints.", "OverconstrainedError");
+          Object.defineProperty(error, "constraint", { enumerable: true, value: "deviceId" });
+          throw error;
+        }
+      });
+    }
+    get [Symbol.toStringTag]() { return "MediaStreamTrack"; }
+  }
+  for (const type of ["ended", "mute", "unmute"]) defineEventHandler(MediaStreamTrack.prototype, type);
+  class MediaStream extends MediaEventTarget {
+    constructor(value = undefined) {
+      super();
+      let tracks = [];
+      if (value instanceof MediaStream) tracks = value.getTracks();
+      else if (value !== undefined) tracks = Array.from(value);
+      if (tracks.some(track => !(track instanceof MediaStreamTrack))) throw new TypeError("tracks must contain MediaStreamTrack values");
+      mediaStreamState.set(this, { id: mediaIdentifier(nextMediaStreamId++), tracks: tracks.slice() });
+    }
+    get id() { return mediaStreamState.get(this)?.id ?? illegalInvocation(); }
+    get active() { const state = mediaStreamState.get(this); if (!state) illegalInvocation(); return state.tracks.some(track => track.readyState === "live"); }
+    getTracks() { const state = mediaStreamState.get(this); if (!state) illegalInvocation(); return state.tracks.slice(); }
+    getAudioTracks() { return this.getTracks().filter(track => track.kind === "audio"); }
+    getVideoTracks() { return this.getTracks().filter(track => track.kind === "video"); }
+    getTrackById(id) { const key = String(id); return this.getTracks().find(track => track.id === key) || null; }
+    addTrack(track) {
+      const state = mediaStreamState.get(this); if (!state) illegalInvocation();
+      if (!(track instanceof MediaStreamTrack)) throw new TypeError("track must be a MediaStreamTrack");
+      if (state.tracks.includes(track)) return;
+      state.tracks.push(track); dispatchMediaEvent(this, "addtrack", new MediaStreamTrackEvent("addtrack", { track }));
+    }
+    removeTrack(track) {
+      const state = mediaStreamState.get(this); if (!state) illegalInvocation();
+      const index = state.tracks.indexOf(track); if (index < 0) return;
+      state.tracks.splice(index, 1); dispatchMediaEvent(this, "removetrack", new MediaStreamTrackEvent("removetrack", { track }));
+    }
+    clone() { return new MediaStream(this.getTracks().map(track => track.clone())); }
+    get [Symbol.toStringTag]() { return "MediaStream"; }
+  }
+  for (const type of ["addtrack", "removetrack"]) defineEventHandler(MediaStream.prototype, type);
+  const mediaCaptureToken = {};
+  function mediaSnapshot() { return JSON.parse(String(nativeMediaCaptureSnapshot(__omoikane_document_id))); }
+  function requestedDeviceId(value) {
+    if (value == null || value === true) return null;
+    if (value === false) return false;
+    const object = Object(value);
+    const deviceId = object.deviceId;
+    if (deviceId == null) return null;
+    if (typeof deviceId === "object" && deviceId.exact !== undefined) return String(deviceId.exact);
+    return typeof deviceId === "string" ? deviceId : null;
+  }
+  function captureTracks(constraints, display) {
+    if (!nativeIsSecureContext()) throw new DOMException("Media capture requires a secure context.", "NotAllowedError");
+    const snapshot = mediaSnapshot();
+    if (!snapshot.permission) throw new DOMException("Media capture permission was denied.", "NotAllowedError");
+    const value = constraints == null ? {} : Object(constraints);
+    const requested = display ? [["video", value.video === undefined ? true : value.video]] : [["audio", value.audio], ["video", value.video]];
+    if (!requested.some(([, constraint]) => constraint !== undefined && constraint !== false)) throw new TypeError("At least one media kind must be requested");
+    return requested.flatMap(([kind, constraint]) => {
+      if (constraint === undefined || constraint === false) return [];
+      const deviceKind = kind === "audio" ? "audioinput" : "videoinput";
+      const exact = requestedDeviceId(constraint);
+      const device = snapshot.devices.find(item => item.kind === deviceKind && (exact == null || item.deviceId === exact));
+      if (!device) throw new DOMException(exact == null ? "No capture device is available." : "No device satisfies the constraints.", exact == null ? "NotFoundError" : "OverconstrainedError");
+      return [new MediaStreamTrack(mediaCaptureToken, { kind, label: device.label, deviceId: device.deviceId })];
+    });
+  }
+  class MediaDevices extends MediaEventTarget {
+    constructor(token) { super(); if (token !== mediaCaptureToken) throw new TypeError("Illegal constructor"); }
+    enumerateDevices() { return Promise.resolve().then(() => mediaSnapshot().devices.map(device => new MediaDeviceInfo(mediaCaptureToken, device))); }
+    getUserMedia(constraints) { return Promise.resolve().then(() => new MediaStream(captureTracks(constraints, false))); }
+    getDisplayMedia(constraints = { video: true }) { return Promise.resolve().then(() => new MediaStream(captureTracks(constraints, true))); }
+    getSupportedConstraints() { return { deviceId: true, groupId: true, width: true, height: true, frameRate: true, sampleRate: true, channelCount: true }; }
+    get [Symbol.toStringTag]() { return "MediaDevices"; }
+  }
+  defineEventHandler(MediaDevices.prototype, "devicechange");
+  class BlobEvent {
+    constructor(type, init) { if (!init || !(init.data instanceof Blob)) throw new TypeError("BlobEvent requires data"); const event = new globalThis.Event(type, init); Object.setPrototypeOf(event, BlobEvent.prototype); Object.defineProperties(event, { data: { enumerable: true, value: init.data }, timecode: { enumerable: true, value: init.timecode === undefined ? NaN : Number(init.timecode) } }); return event; }
+    get [Symbol.toStringTag]() { return "BlobEvent"; }
+  }
+  const recorderState = new WeakMap();
+  class MediaRecorder extends MediaEventTarget {
+    constructor(stream, options = {}) {
+      super(); if (!(stream instanceof MediaStream)) throw new TypeError("MediaRecorder requires a MediaStream");
+      const init = options == null ? {} : Object(options); const mimeType = init.mimeType === undefined ? "" : String(init.mimeType);
+      if (mimeType && !MediaRecorder.isTypeSupported(mimeType)) throw new DOMException("Unsupported recording MIME type.", "NotSupportedError");
+      const audioBitsPerSecond = init.audioBitsPerSecond === undefined ? 128000 : Number(init.audioBitsPerSecond) >>> 0;
+      const videoBitsPerSecond = init.videoBitsPerSecond === undefined ? 2500000 : Number(init.videoBitsPerSecond) >>> 0;
+      recorderState.set(this, { stream, state: "inactive", mimeType, sequence: 0, timer: 0, audioBitsPerSecond, videoBitsPerSecond });
+    }
+    get stream() { return recorderState.get(this)?.stream ?? illegalInvocation(); }
+    get state() { return recorderState.get(this)?.state ?? illegalInvocation(); }
+    get mimeType() { return recorderState.get(this)?.mimeType ?? illegalInvocation(); }
+    get audioBitsPerSecond() { return recorderState.get(this)?.audioBitsPerSecond ?? illegalInvocation(); }
+    get videoBitsPerSecond() { return recorderState.get(this)?.videoBitsPerSecond ?? illegalInvocation(); }
+    get audioBitrateMode() { if (!recorderState.has(this)) illegalInvocation(); return "variable"; }
+    start(timeslice = undefined) { const state = recorderState.get(this); if (!state) illegalInvocation(); if (state.state !== "inactive") throw new DOMException("Recorder is not inactive.", "InvalidStateError"); if (!state.stream.active) throw new DOMException("The stream has no live tracks.", "NotSupportedError"); state.state = "recording"; const interval = timeslice === undefined ? 0 : Math.max(0, Number(timeslice) || 0); if (interval > 0) this.__scheduleSlice(interval); queueMicrotask(() => dispatchMediaEvent(this, "start")); }
+    stop() { const state = recorderState.get(this); if (!state) illegalInvocation(); if (state.state === "inactive") return; state.state = "inactive"; if (state.timer) { clearTimeout(state.timer); state.timer = 0; } queueMicrotask(() => { this.__emitData(); dispatchMediaEvent(this, "stop"); }); }
+    pause() { const state = recorderState.get(this); if (!state) illegalInvocation(); if (state.state !== "recording") throw new DOMException("Recorder is not recording.", "InvalidStateError"); state.state = "paused"; queueMicrotask(() => dispatchMediaEvent(this, "pause")); }
+    resume() { const state = recorderState.get(this); if (!state) illegalInvocation(); if (state.state !== "paused") throw new DOMException("Recorder is not paused.", "InvalidStateError"); state.state = "recording"; queueMicrotask(() => dispatchMediaEvent(this, "resume")); }
+    requestData() { const state = recorderState.get(this); if (!state) illegalInvocation(); if (state.state === "inactive") throw new DOMException("Recorder is inactive.", "InvalidStateError"); queueMicrotask(() => this.__emitData()); }
+    __scheduleSlice(interval) { const state = recorderState.get(this); state.timer = setTimeout(() => { state.timer = 0; if (state.state !== "inactive") { if (state.state === "recording") this.__emitData(); this.__scheduleSlice(interval); } }, interval); }
+    __emitData() { const state = recorderState.get(this); const bytes = new TextEncoder().encode(`OMOIKANE-MEDIA-${state.sequence++}`); const type = state.mimeType || (state.stream.getVideoTracks().length ? "video/webm" : "audio/webm"); dispatchMediaEvent(this, "dataavailable", new BlobEvent("dataavailable", { data: new Blob([bytes], { type }), timecode: state.sequence })); }
+    static isTypeSupported(type) { const value = String(type).toLowerCase().replace(/\s+/g, ""); return value === "" || value === "video/webm" || value === "audio/webm" || value === "video/webm;codecs=vp8" || value === "audio/webm;codecs=opus"; }
+    get [Symbol.toStringTag]() { return "MediaRecorder"; }
+  }
+  for (const type of ["start", "stop", "dataavailable", "pause", "resume", "error"]) defineEventHandler(MediaRecorder.prototype, type);
+
+  const mediaSourceToken = {};
+  const mediaSourceObjectUrls = new Map();
+  const mediaSourceState = new WeakMap();
+  const sourceBufferState = new WeakMap();
+  class MediaTimeRanges {
+    constructor(ranges = []) { this.__ranges = ranges; }
+    get length() { return this.__ranges.length; }
+    start(index) { if (index < 0 || index >= this.length) throw new DOMException("Invalid range index.", "IndexSizeError"); return this.__ranges[index][0]; }
+    end(index) { if (index < 0 || index >= this.length) throw new DOMException("Invalid range index.", "IndexSizeError"); return this.__ranges[index][1]; }
+  }
+  class SourceBufferList extends MediaEventTarget {
+    constructor(token) { super(); if (token !== mediaSourceToken) throw new TypeError("Illegal constructor"); this.__items = []; }
+    get length() { return this.__items.length; }
+    __sync() { for (const key of Object.keys(this)) if (/^\d+$/.test(key)) delete this[key]; this.__items.forEach((item, index) => Object.defineProperty(this, index, { configurable: true, enumerable: true, value: item })); }
+    [Symbol.iterator]() { return this.__items[Symbol.iterator](); }
+  }
+  for (const type of ["addsourcebuffer", "removesourcebuffer"]) defineEventHandler(SourceBufferList.prototype, type);
+  class SourceBuffer extends MediaEventTarget {
+    constructor(token, owner, mimeType) { super(); if (token !== mediaSourceToken) throw new TypeError("Illegal constructor"); sourceBufferState.set(this, { owner, mimeType, updating: false, ranges: [], timestampOffset: 0, appendWindowStart: 0, appendWindowEnd: Infinity, mode: "segments" }); }
+    __state() { return sourceBufferState.get(this) || illegalInvocation(); }
+    get updating() { return this.__state().updating; }
+    get buffered() { return new MediaTimeRanges(this.__state().ranges.slice()); }
+    get timestampOffset() { return this.__state().timestampOffset; }
+    set timestampOffset(value) { const state = this.__state(); if (state.updating) throw new DOMException("SourceBuffer is updating.", "InvalidStateError"); state.timestampOffset = Number(value); }
+    get appendWindowStart() { return this.__state().appendWindowStart; }
+    set appendWindowStart(value) { const state = this.__state(); const next = Number(value); if (next < 0 || next >= state.appendWindowEnd) throw new TypeError("Invalid append window"); state.appendWindowStart = next; }
+    get appendWindowEnd() { return this.__state().appendWindowEnd; }
+    set appendWindowEnd(value) { const state = this.__state(); const next = Number(value); if (Number.isNaN(next) || next <= state.appendWindowStart) throw new TypeError("Invalid append window"); state.appendWindowEnd = next; }
+    get mode() { return this.__state().mode; }
+    set mode(value) { const state = this.__state(); const next = String(value); if (next !== "segments" && next !== "sequence") throw new TypeError("Invalid SourceBuffer mode"); if (state.updating) throw new DOMException("SourceBuffer is updating.", "InvalidStateError"); state.mode = next; }
+    appendBuffer(data) {
+      const state = this.__state();
+      if (state.updating || mediaSourceState.get(state.owner).readyState !== "open") throw new DOMException("SourceBuffer cannot append now.", "InvalidStateError");
+      let result;
+      try { result = JSON.parse(String(__omoikane_media_source("append", state.mimeType, data))); }
+      catch (error) { const text = String(error); const name = text.includes("QuotaExceededError") ? "QuotaExceededError" : text.includes("NotSupportedError") ? "NotSupportedError" : "EncodingError"; throw new DOMException(text, name); }
+      state.updating = true; dispatchMediaEvent(this, "updatestart");
+      queueMediaTask(() => { if (!state.updating) return; const start = state.mode === "sequence" && state.ranges.length ? state.ranges[state.ranges.length - 1][1] : state.timestampOffset; const end = Math.min(start + Number(result.duration), state.appendWindowEnd); if (end > state.appendWindowStart) state.ranges.push([Math.max(start, state.appendWindowStart), end]); state.updating = false; dispatchMediaEvent(this, "update"); dispatchMediaEvent(this, "updateend"); });
+    }
+    remove(start, end) { const state = this.__state(); const from = Number(start), to = Number(end); if (state.updating) throw new DOMException("SourceBuffer is updating.", "InvalidStateError"); if (from < 0 || !(to > from)) throw new TypeError("Invalid removal range"); state.updating = true; dispatchMediaEvent(this, "updatestart"); queueMediaTask(() => { state.ranges = state.ranges.flatMap(([a,b]) => b <= from || a >= to ? [[a,b]] : [[a, Math.min(b, from)], [Math.max(a, to), b]].filter(([x,y]) => y > x)); state.updating = false; dispatchMediaEvent(this, "update"); dispatchMediaEvent(this, "updateend"); }); }
+    abort() { const state = this.__state(); if (mediaSourceState.get(state.owner).readyState !== "open") throw new DOMException("MediaSource is not open.", "InvalidStateError"); if (state.updating) { state.updating = false; dispatchMediaEvent(this, "abort"); dispatchMediaEvent(this, "updateend"); } state.appendWindowStart = 0; state.appendWindowEnd = Infinity; }
+    changeType(type) { const state = this.__state(); const next = String(type); if (!MediaSource.isTypeSupported(next)) throw new DOMException("Unsupported media type.", "NotSupportedError"); if (state.updating) throw new DOMException("SourceBuffer is updating.", "InvalidStateError"); state.mimeType = next; }
+  }
+  for (const type of ["updatestart", "update", "updateend", "error", "abort"]) defineEventHandler(SourceBuffer.prototype, type);
+  class MediaSourceHandle { constructor(token, source) { if (token !== mediaSourceToken) throw new TypeError("Illegal constructor"); this.__source = source; } }
+  class MediaSource extends MediaEventTarget {
+    constructor() { super(); mediaSourceState.set(this, { readyState: "closed", duration: NaN, sourceBuffers: new SourceBufferList(mediaSourceToken), activeSourceBuffers: new SourceBufferList(mediaSourceToken), handle: null }); }
+    __state() { return mediaSourceState.get(this) || illegalInvocation(); }
+    get readyState() { return this.__state().readyState; }
+    get sourceBuffers() { return this.__state().sourceBuffers; }
+    get activeSourceBuffers() { return this.__state().activeSourceBuffers; }
+    get duration() { return this.__state().duration; }
+    set duration(value) { const state = this.__state(); const next = Number(value); if (state.readyState !== "open" || Number.isNaN(next) || next < 0) throw new DOMException("Invalid duration.", "InvalidStateError"); state.duration = next; }
+    get handle() { const state = this.__state(); return state.handle || (state.handle = new MediaSourceHandle(mediaSourceToken, this)); }
+    addSourceBuffer(type) { const state = this.__state(); const mimeType = String(type); if (state.readyState !== "open") throw new DOMException("MediaSource is not open.", "InvalidStateError"); if (!MediaSource.isTypeSupported(mimeType)) throw new DOMException("Unsupported media type.", "NotSupportedError"); const buffer = new SourceBuffer(mediaSourceToken, this, mimeType); state.sourceBuffers.__items.push(buffer); state.activeSourceBuffers.__items.push(buffer); state.sourceBuffers.__sync(); state.activeSourceBuffers.__sync(); dispatchMediaEvent(state.sourceBuffers, "addsourcebuffer"); return buffer; }
+    removeSourceBuffer(buffer) { const state = this.__state(); const index = state.sourceBuffers.__items.indexOf(buffer); if (index < 0) throw new DOMException("SourceBuffer is not attached.", "NotFoundError"); state.sourceBuffers.__items.splice(index, 1); state.activeSourceBuffers.__items = state.activeSourceBuffers.__items.filter(item => item !== buffer); state.sourceBuffers.__sync(); state.activeSourceBuffers.__sync(); sourceBufferState.delete(buffer); dispatchMediaEvent(state.sourceBuffers, "removesourcebuffer"); }
+    endOfStream(error = undefined) { const state = this.__state(); if (state.readyState !== "open" || state.sourceBuffers.__items.some(buffer => buffer.updating)) throw new DOMException("MediaSource cannot end now.", "InvalidStateError"); if (error !== undefined && error !== "network" && error !== "decode") throw new TypeError("Invalid endOfStream error"); state.readyState = "ended"; dispatchMediaEvent(this, "sourceended"); }
+    setLiveSeekableRange(start, end) { const state = this.__state(); if (state.readyState !== "open") throw new DOMException("MediaSource is not open.", "InvalidStateError"); state.liveRange = [Number(start), Number(end)]; }
+    clearLiveSeekableRange() { const state = this.__state(); if (state.readyState !== "open") throw new DOMException("MediaSource is not open.", "InvalidStateError"); state.liveRange = null; }
+    static isTypeSupported(type) { const value = String(type); return value !== "" && __omoikane_media_source("supports", value, new Uint8Array()); }
+    static get canConstructInDedicatedWorker() { return true; }
+  }
+  for (const type of ["sourceopen", "sourceended", "sourceclose"]) defineEventHandler(MediaSource.prototype, type);
+  class ManagedMediaSource extends MediaSource { get streaming() { return false; } }
+  function attachMediaSource(source, element, loadId) { const state = mediaSourceState.get(source); if (!state || state.readyState !== "closed") { element.__mediaFailure(loadId, MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED, "NotSupportedError", "MediaSource cannot be attached."); return; } state.readyState = "open"; state.element = element; element.__attachedMediaSource = source; queueMediaTask(() => { if (element.__mediaLoadId === loadId) dispatchMediaEvent(source, "sourceopen"); }); }
+  function detachMediaSource(source, element) { const state = mediaSourceState.get(source); if (!state || state.element !== element) return; state.readyState = "closed"; state.duration = NaN; state.element = null; element.__attachedMediaSource = null; state.sourceBuffers.__items = []; state.activeSourceBuffers.__items = []; state.sourceBuffers.__sync(); state.activeSourceBuffers.__sync(); queueMediaTask(() => dispatchMediaEvent(source, "sourceclose")); }
+
+  const mediaSessionToken = {};
+  const mediaMetadataState = new WeakMap();
+  const mediaSessionState = new WeakMap();
+  function mediaImageResource(value) {
+    const item = Object(value);
+    if (item.src === undefined) throw new TypeError("MediaImage requires src");
+    return Object.freeze({
+      src: new URL(String(item.src), document.URL).href,
+      sizes: item.sizes === undefined ? "" : String(item.sizes),
+      type: item.type === undefined ? "" : String(item.type),
+    });
+  }
+  function frozenArtwork(value) {
+    if (value === undefined) return Object.freeze([]);
+    return Object.freeze(Array.from(value, mediaImageResource));
+  }
+  function frozenChapters(value) {
+    if (value === undefined) return Object.freeze([]);
+    return Object.freeze(Array.from(value, chapter => {
+      const item = Object(chapter);
+      return Object.freeze({
+        title: item.title === undefined ? "" : String(item.title),
+        startTime: Number(item.startTime),
+        artwork: frozenArtwork(item.artwork),
+      });
+    }));
+  }
+  function publishMediaSession(session) {
+    const state = mediaSessionState.get(session);
+    if (!state) return;
+    const metadataState = state.metadata ? mediaMetadataState.get(state.metadata) : null;
+    const metadata = metadataState ? {
+      title: metadataState.title,
+      artist: metadataState.artist,
+      album: metadataState.album,
+      artwork: metadataState.artwork.map(item => ({ src: item.src, sizes: item.sizes, mediaType: item.type })),
+    } : null;
+    __omoikane_media_session("publish", JSON.stringify({
+      metadata,
+      playbackState: state.playbackState,
+      positionState: state.positionState,
+      handledActions: Array.from(state.handlers.keys()).sort(),
+    }));
+  }
+  function publishMetadataOwners(metadata) {
+    const state = mediaMetadataState.get(metadata);
+    if (state) for (const session of state.owners) publishMediaSession(session);
+  }
+  class MediaMetadata {
+    constructor(init = {}) {
+      if (init === null) init = {};
+      if (typeof init !== "object") throw new TypeError("MediaMetadata init must be a dictionary");
+      mediaMetadataState.set(this, {
+        title: init.title === undefined ? "" : String(init.title),
+        artist: init.artist === undefined ? "" : String(init.artist),
+        album: init.album === undefined ? "" : String(init.album),
+        artwork: frozenArtwork(init.artwork),
+        chapterInfo: frozenChapters(init.chapterInfo),
+        owners: new Set(),
+      });
+    }
+    __state() { return mediaMetadataState.get(this) || illegalInvocation(); }
+    get title() { return this.__state().title; }
+    set title(value) { this.__state().title = String(value); publishMetadataOwners(this); }
+    get artist() { return this.__state().artist; }
+    set artist(value) { this.__state().artist = String(value); publishMetadataOwners(this); }
+    get album() { return this.__state().album; }
+    set album(value) { this.__state().album = String(value); publishMetadataOwners(this); }
+    get artwork() { return this.__state().artwork; }
+    set artwork(value) { this.__state().artwork = frozenArtwork(value); publishMetadataOwners(this); }
+    get chapterInfo() { return this.__state().chapterInfo; }
+    get [Symbol.toStringTag]() { return "MediaMetadata"; }
+  }
+  class MediaSession {
+    constructor(token) {
+      if (token !== mediaSessionToken) throw new TypeError("Illegal constructor");
+      mediaSessionState.set(this, { metadata: null, playbackState: "none", positionState: null, handlers: new Map() });
+    }
+    __state() { return mediaSessionState.get(this) || illegalInvocation(); }
+    get metadata() { return this.__state().metadata; }
+    set metadata(value) {
+      if (value !== null && !(value instanceof MediaMetadata)) throw new TypeError("metadata must be MediaMetadata or null");
+      const state = this.__state();
+      if (state.metadata) mediaMetadataState.get(state.metadata).owners.delete(this);
+      state.metadata = value;
+      if (value) mediaMetadataState.get(value).owners.add(this);
+      publishMediaSession(this);
+    }
+    get playbackState() { return this.__state().playbackState; }
+    set playbackState(value) {
+      const next = String(value);
+      if (!new Set(["none", "paused", "playing"]).has(next)) return;
+      this.__state().playbackState = next;
+      publishMediaSession(this);
+    }
+    setActionHandler(action, handler) {
+      const name = String(action);
+      if (!__omoikane_media_session("supports", name)) throw new TypeError("Unsupported Media Session action");
+      if (handler !== null && typeof handler !== "function") throw new TypeError("handler must be callable or null");
+      const state = this.__state();
+      if (handler === null) state.handlers.delete(name); else state.handlers.set(name, handler);
+      publishMediaSession(this);
+    }
+    setPositionState(value = {}) {
+      const state = this.__state();
+      if (value === null) { state.positionState = null; publishMediaSession(this); return; }
+      const init = Object(value);
+      if (init.duration === undefined && init.position === undefined && init.playbackRate === undefined) { state.positionState = null; publishMediaSession(this); return; }
+      if (init.duration === undefined) throw new TypeError("duration is required");
+      const duration = Number(init.duration);
+      const position = init.position === undefined ? 0 : Number(init.position);
+      const playbackRate = init.playbackRate === undefined ? 1 : Number(init.playbackRate);
+      if (!Number.isFinite(duration) || duration < 0) throw new TypeError("duration must be non-negative and finite");
+      if (!Number.isFinite(position) || position < 0 || position > duration) throw new TypeError("position must be within duration");
+      if (!Number.isFinite(playbackRate) || playbackRate === 0) throw new TypeError("playbackRate must be finite and non-zero");
+      state.positionState = { duration, position, playbackRate };
+      publishMediaSession(this);
+    }
+    get [Symbol.toStringTag]() { return "MediaSession"; }
+  }
+  const mediaSession = new MediaSession(mediaSessionToken);
+  globalThis.__omoikane_dispatch_media_session_action = function(action, details = {}) {
+    const state = mediaSessionState.get(mediaSession);
+    const handler = state.handlers.get(String(action));
+    if (!handler) return false;
+    const event = Object.freeze({ ...Object(details), action: String(action) });
+    __omoikane_call_event_listener(handler, undefined, event);
+    return true;
+  };
+  globalThis.__omoikane_fetch_media_session_artwork = function(index) {
+    const metadata = mediaSessionState.get(mediaSession).metadata;
+    const artwork = metadata && mediaMetadataState.get(metadata).artwork[Number(index)];
+    if (!artwork) throw new RangeError("Media Session artwork index is out of range");
+    Promise.resolve(fetch(artwork.src)).then(response => {
+      if (!response.ok && response.status !== 0) throw new Error(`Artwork fetch failed with status ${response.status}`);
+      return response.arrayBuffer();
+    }).then(buffer => {
+      __omoikane_media_session("artwork-success", artwork.src, new Uint8Array(buffer));
+    }, error => {
+      __omoikane_media_session("artwork-error", artwork.src, String(error));
+    });
+  };
+
   class Navigator {
     constructor(token) {
       if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
@@ -25447,6 +26047,8 @@ let omoikaneUserActivationState;
       this.plugins = new PluginArray(navigatorConstructionToken);
       this.mimeTypes = new MimeTypeArray(navigatorConstructionToken);
       this.geolocation = new Geolocation(geolocationConstructionToken);
+      this.mediaDevices = new MediaDevices(mediaCaptureToken);
+      this.mediaSession = mediaSession;
       this.serviceWorker = new ServiceWorkerContainer(serviceWorkerContainerConstructionToken);
       // The Permissions object is installed after EventTarget is defined
       // below.  Keep the property present while Navigator is constructed so
@@ -25471,6 +26073,20 @@ let omoikaneUserActivationState;
   globalThis.GeolocationCoordinates = GeolocationCoordinates;
   globalThis.GeolocationPosition = GeolocationPosition;
   globalThis.GeolocationPositionError = GeolocationPositionError;
+  globalThis.MediaDeviceInfo = MediaDeviceInfo;
+  globalThis.MediaDevices = MediaDevices;
+  globalThis.MediaStream = MediaStream;
+  globalThis.MediaStreamTrack = MediaStreamTrack;
+  globalThis.MediaStreamTrackEvent = MediaStreamTrackEvent;
+  globalThis.MediaRecorder = MediaRecorder;
+  globalThis.BlobEvent = BlobEvent;
+  globalThis.MediaMetadata = MediaMetadata;
+  globalThis.MediaSession = MediaSession;
+  globalThis.MediaSource = MediaSource;
+  globalThis.ManagedMediaSource = ManagedMediaSource;
+  globalThis.MediaSourceHandle = MediaSourceHandle;
+  globalThis.SourceBuffer = SourceBuffer;
+  globalThis.SourceBufferList = SourceBufferList;
   globalThis.navigator = new Navigator(navigatorConstructionToken);
   Object.defineProperty(globalThis, "isSecureContext", {
     configurable: true,
@@ -29009,6 +29625,341 @@ let omoikaneUserActivationState;
     }
   }
 
+  const textTrackElementObjects = new WeakMap();
+  const textTrackListObjects = new WeakMap();
+  const cueConstructionToken = {};
+  const textTrackConstructionToken = {};
+
+  function indexedList(resolve, prototype) {
+    const target = Object.create(prototype);
+    return new Proxy(target, {
+      get(target, property, receiver) {
+        if (property === "length") return resolve().length;
+        if (typeof property === "string" && /^(0|[1-9][0-9]*)$/.test(property)) {
+          return resolve()[Number(property)];
+        }
+        if (property === Symbol.iterator) return resolve()[Symbol.iterator].bind(resolve());
+        return Reflect.get(target, property, receiver);
+      },
+      has(target, property) {
+        return typeof property === "string" && /^(0|[1-9][0-9]*)$/.test(property)
+          ? Number(property) < resolve().length : Reflect.has(target, property);
+      },
+      ownKeys() { return [...resolve().keys()].map(String); },
+      getOwnPropertyDescriptor(target, property) {
+        if (typeof property === "string" && /^(0|[1-9][0-9]*)$/.test(property)) {
+          const value = resolve()[Number(property)];
+          return value === undefined ? undefined : { value, enumerable: true, configurable: true };
+        }
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
+    });
+  }
+
+  class TextTrackCue extends EventTarget {
+    constructor(token, startTime, endTime, text) {
+      super();
+      if (token !== cueConstructionToken) throw new TypeError("Illegal constructor");
+      this.__startTime = startTime;
+      this.__endTime = endTime;
+      this.__text = text;
+      this.__id = "";
+      this.__track = null;
+      this.__pauseOnExit = false;
+    }
+    get track() { return this.__track; }
+    get id() { return this.__id; }
+    set id(value) { this.__id = String(value); }
+    get startTime() { return this.__startTime; }
+    set startTime(value) { this.__setTime("start", value); }
+    get endTime() { return this.__endTime; }
+    set endTime(value) { this.__setTime("end", value); }
+    get pauseOnExit() { return this.__pauseOnExit; }
+    set pauseOnExit(value) { this.__pauseOnExit = Boolean(value); }
+    __setTime(which, value) {
+      const number = Number(value);
+      if (Number.isNaN(number) || (which === "start" && !Number.isFinite(number)) || number === -Infinity) {
+        throw new TypeError("Invalid cue time");
+      }
+      if (which === "start") this.__startTime = number;
+      else this.__endTime = number;
+      if (this.__track && this.__track.__media) this.__track.__updateActiveCues(this.__track.__media.currentTime);
+    }
+    get [Symbol.toStringTag]() { return "TextTrackCue"; }
+  }
+
+  class VTTCue extends TextTrackCue {
+    constructor(startTime, endTime, text) {
+      const start = Number(startTime), end = Number(endTime);
+      if (!Number.isFinite(start) || Number.isNaN(end) || end === -Infinity) {
+        throw new TypeError("Invalid cue time");
+      }
+      super(cueConstructionToken, start, end, String(text));
+      this.__vertical = "";
+      this.__snapToLines = true;
+      this.__line = "auto";
+      this.__lineAlign = "start";
+      this.__position = "auto";
+      this.__positionAlign = "auto";
+      this.__size = 100;
+      this.__align = "center";
+      this.__region = null;
+    }
+    get text() { return this.__text; }
+    set text(value) { this.__text = String(value); }
+    get vertical() { return this.__vertical; }
+    set vertical(value) {
+      const token = String(value);
+      if (!["", "rl", "lr"].includes(token)) throw new TypeError("Invalid vertical value");
+      this.__vertical = token;
+    }
+    get snapToLines() { return this.__snapToLines; }
+    set snapToLines(value) { this.__snapToLines = Boolean(value); }
+    get line() { return this.__line; }
+    set line(value) { this.__line = value === "auto" ? "auto" : Number(value); }
+    get lineAlign() { return this.__lineAlign; }
+    set lineAlign(value) { this.__lineAlign = String(value); }
+    get position() { return this.__position; }
+    set position(value) { this.__position = value === "auto" ? "auto" : Number(value); }
+    get positionAlign() { return this.__positionAlign; }
+    set positionAlign(value) { this.__positionAlign = String(value); }
+    get size() { return this.__size; }
+    set size(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number) || number < 0 || number > 100) throw new DOMException("Invalid cue size", "IndexSizeError");
+      this.__size = number;
+    }
+    get align() { return this.__align; }
+    set align(value) { this.__align = String(value); }
+    get region() { return this.__region; }
+    set region(value) {
+      if (value !== null && !(value instanceof VTTRegion)) throw new TypeError("region must be a VTTRegion or null");
+      this.__region = value;
+    }
+    getCueAsHTML() { return parseWebVttCueTree(this.__text); }
+    get [Symbol.toStringTag]() { return "VTTCue"; }
+  }
+  function parseWebVttCueTree(source) {
+    const root = document.createDocumentFragment();
+    const stack = [{ node: root, tag: "" }];
+    const appendText = text => {
+      if (text === "") return;
+      const decoded = text.replace(/&(?:amp|lt|gt|lrm|rlm|nbsp);/g, entity => ({
+        "&amp;": "&", "&lt;": "<", "&gt;": ">", "&lrm;": "\u200e",
+        "&rlm;": "\u200f", "&nbsp;": "\u00a0",
+      })[entity]);
+      stack[stack.length - 1].node.appendChild(document.createTextNode(decoded));
+    };
+    let offset = 0;
+    for (const match of String(source).matchAll(/<([^>]*)>/g)) {
+      appendText(source.slice(offset, match.index));
+      offset = match.index + match[0].length;
+      const token = match[1].trim();
+      if (/^(?:\d{2}:)?\d{2}:\d{2}\.\d{3}$/.test(token)) continue;
+      if (token.startsWith("/")) {
+        const name = asciiLowercase(token.slice(1));
+        for (let index = stack.length - 1; index > 0; index -= 1) {
+          if (stack[index].tag === name) { stack.length = index; break; }
+        }
+        continue;
+      }
+      const [rawName, ...annotationParts] = token.split(/\s+/);
+      const [name, ...classes] = rawName.split(".");
+      const normalized = asciiLowercase(name);
+      const htmlTag = ["b", "i", "u", "ruby", "rt"].includes(normalized) ? normalized :
+        ["c", "v", "lang"].includes(normalized) ? "span" : "";
+      if (!htmlTag) continue;
+      const node = document.createElement(htmlTag);
+      if (normalized === "c" && classes.length) node.className = classes.join(" ");
+      if (normalized === "v" && annotationParts.length) node.title = annotationParts.join(" ");
+      if (normalized === "lang" && annotationParts.length) node.lang = annotationParts.join(" ");
+      stack[stack.length - 1].node.appendChild(node);
+      stack.push({ node, tag: normalized });
+    }
+    appendText(String(source).slice(offset));
+    return root;
+  }
+
+  class VTTRegion {
+    constructor() {
+      this.__id = "";
+      this.__width = 100;
+      this.__lines = 3;
+      this.__regionAnchorX = 0;
+      this.__regionAnchorY = 100;
+      this.__viewportAnchorX = 0;
+      this.__viewportAnchorY = 100;
+      this.__scroll = "";
+    }
+    get id() { return this.__id; }
+    set id(value) { this.__id = String(value); }
+    get width() { return this.__width; }
+    set width(value) { this.__width = vttRegionPercentage(value, "width"); }
+    get lines() { return this.__lines; }
+    set lines(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) throw new TypeError("lines must be finite");
+      this.__lines = number;
+    }
+    get regionAnchorX() { return this.__regionAnchorX; }
+    set regionAnchorX(value) { this.__regionAnchorX = vttRegionPercentage(value, "regionAnchorX"); }
+    get regionAnchorY() { return this.__regionAnchorY; }
+    set regionAnchorY(value) { this.__regionAnchorY = vttRegionPercentage(value, "regionAnchorY"); }
+    get viewportAnchorX() { return this.__viewportAnchorX; }
+    set viewportAnchorX(value) { this.__viewportAnchorX = vttRegionPercentage(value, "viewportAnchorX"); }
+    get viewportAnchorY() { return this.__viewportAnchorY; }
+    set viewportAnchorY(value) { this.__viewportAnchorY = vttRegionPercentage(value, "viewportAnchorY"); }
+    get scroll() { return this.__scroll; }
+    set scroll(value) {
+      const token = String(value);
+      this.__scroll = token === "up" ? token : "";
+    }
+    get [Symbol.toStringTag]() { return "VTTRegion"; }
+  }
+  function vttRegionPercentage(value, name) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) throw new TypeError(`${name} must be finite`);
+    if (number < 0 || number > 100) {
+      throw new DOMException(`${name} is outside 0..100`, "IndexSizeError");
+    }
+    return number;
+  }
+
+  class TextTrackCueList {
+    constructor(token) {
+      if (token !== textTrackConstructionToken) throw new TypeError("Illegal constructor");
+    }
+    get length() { return this.__resolve().length; }
+    getCueById(id) { return this.__resolve().find(cue => cue.id === String(id)) || null; }
+    get [Symbol.toStringTag]() { return "TextTrackCueList"; }
+  }
+  function cueList(resolve) {
+    const list = indexedList(resolve, TextTrackCueList.prototype);
+    Object.defineProperty(list, "__resolve", { value: resolve, configurable: true });
+    return list;
+  }
+
+  class TextTrack extends EventTarget {
+    constructor(token, kind, label, language, id) {
+      super();
+      if (token !== textTrackConstructionToken) throw new TypeError("Illegal constructor");
+      this.__kind = kind;
+      this.__label = label;
+      this.__language = language;
+      this.__id = id;
+      this.__mode = "disabled";
+      this.__cues = [];
+      this.__active = [];
+      this.__cueList = cueList(() => this.__cues);
+      this.__activeCueList = cueList(() => this.__active);
+      this.__media = null;
+    }
+    get kind() { return this.__kind; }
+    get label() { return this.__label; }
+    get language() { return this.__language; }
+    get id() { return this.__id; }
+    get mode() { return this.__mode; }
+    set mode(value) {
+      const token = String(value);
+      if (!["disabled", "hidden", "showing"].includes(token)) throw new TypeError("Invalid TextTrack mode");
+      if (token === this.__mode) return;
+      this.__mode = token;
+      this.__updateActiveCues(this.__media ? this.__media.currentTime : 0);
+      if (this.__media) this.__media.__mediaSyncCueText();
+      if (this.__media) queueMediaTask(() => this.__media.textTracks.dispatchEvent(new Event("change")));
+    }
+    get cues() { return this.__mode === "disabled" ? null : this.__cueList; }
+    get activeCues() { return this.__mode === "disabled" ? null : this.__activeCueList; }
+    addCue(cue) {
+      if (!(cue instanceof TextTrackCue)) throw new TypeError("addCue requires a TextTrackCue");
+      if (cue.__track) cue.__track.removeCue(cue);
+      cue.__track = this;
+      this.__cues.push(cue);
+      this.__cues.sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
+      this.__updateActiveCues(this.__media ? this.__media.currentTime : 0);
+      if (this.__media) this.__media.__mediaSyncCueText();
+    }
+    removeCue(cue) {
+      const index = this.__cues.indexOf(cue);
+      if (index < 0) throw new DOMException("Cue is not in this track", "NotFoundError");
+      this.__cues.splice(index, 1);
+      cue.__track = null;
+      this.__updateActiveCues(this.__media ? this.__media.currentTime : 0);
+      if (this.__media) this.__media.__mediaSyncCueText();
+    }
+    __replaceCues(cues) {
+      for (const cue of this.__cues) cue.__track = null;
+      this.__cues = [];
+      for (const cue of cues) this.addCue(cue);
+    }
+    __updateActiveCues(time) {
+      const next = this.__mode === "disabled" ? [] : this.__cues.filter(cue => cue.startTime <= time && time < cue.endTime);
+      if (next.length === this.__active.length && next.every((cue, index) => cue === this.__active[index])) return;
+      const previous = this.__active;
+      this.__active = next;
+      queueMediaTask(() => {
+        for (const cue of previous) if (!next.includes(cue)) cue.dispatchEvent(new Event("exit"));
+        for (const cue of next) if (!previous.includes(cue)) cue.dispatchEvent(new Event("enter"));
+        this.dispatchEvent(new Event("cuechange"));
+      });
+    }
+    get [Symbol.toStringTag]() { return "TextTrack"; }
+  }
+
+  class TextTrackList extends EventTarget {
+    constructor(token) {
+      super();
+      if (token !== textTrackConstructionToken) throw new TypeError("Illegal constructor");
+    }
+    get length() { return this.__resolve().length; }
+    getTrackById(id) { return this.__resolve().find(track => track.id === String(id)) || null; }
+    get [Symbol.toStringTag]() { return "TextTrackList"; }
+  }
+  function textTrackListForMedia(media) {
+    let list = textTrackListObjects.get(media);
+    if (!list) {
+      list = indexedList(() => media.__textTracks, TextTrackList.prototype);
+      list._listeners = new Map();
+      safeWeakMapSet(eventTargetBrands, list, true);
+      Object.defineProperty(list, "__resolve", {
+        value: () => media.__textTracks, configurable: true,
+      });
+      textTrackListObjects.set(media, list);
+    }
+    return list;
+  }
+  function createTextTrack(kind, label, language, id) {
+    const token = asciiLowercase(kind);
+    const normalized = ["subtitles", "captions", "descriptions", "chapters", "metadata"].includes(token) ? token : "metadata";
+    return new TextTrack(textTrackConstructionToken, normalized, label, language, id);
+  }
+  function textTrackForElement(element) {
+    let track = textTrackElementObjects.get(element);
+    if (!track) {
+      track = createTextTrack(element.kind, element.label, element.srclang, element.id || "");
+      if (element.default) track.mode = "showing";
+      textTrackElementObjects.set(element, track);
+    }
+    return track;
+  }
+  function cueFromWebVttRecord(record, regions) {
+    const cue = new VTTCue(record[1], record[2], record[3]);
+    cue.id = record[0];
+    for (const setting of String(record[4]).split(/\s+/)) {
+      const [name, value] = setting.split(":", 2);
+      if (name === "align" && value) cue.align = value;
+      else if (name === "vertical" && value) cue.vertical = value;
+      else if (name === "size" && /%$/.test(value)) cue.size = Number(value.slice(0, -1));
+      else if (name === "region" && regions.has(value)) cue.region = regions.get(value);
+    }
+    return cue;
+  }
+  function trackEvent(type, track) {
+    const event = new Event(type);
+    Object.defineProperty(event, "track", { value: track, enumerable: true });
+    return event;
+  }
+
   const navigationEntryToken = {};
   const navigationDestinationToken = {};
   const navigationEntryObjects = new WeakMap();
@@ -30116,7 +31067,7 @@ let omoikaneUserActivationState;
   let permissionLifecycleActive = true;
   const supportedPermissionNames = Object.freeze([
     "notifications", "geolocation", "clipboard-read", "clipboard-write", "persistent-storage",
-    "accelerometer", "gyroscope", "magnetometer", "storage-access",
+    "accelerometer", "gyroscope", "magnetometer", "storage-access", "camera", "microphone",
   ]);
 
   function permissionDescriptorName(descriptor) {
@@ -30156,6 +31107,9 @@ let omoikaneUserActivationState;
       } catch (_) {
         return "denied";
       }
+    }
+    if (name === "camera" || name === "microphone") {
+      try { return mediaSnapshot().permission ? "granted" : "denied"; } catch (_) { return "denied"; }
     }
     try {
       return nativeIsSecureContext() && nativeClipboardPermission() ? "granted" : "denied";
@@ -31649,6 +32603,50 @@ let omoikaneUserActivationState;
     if (visualScroll) visualViewport.dispatchEvent(new Event("scroll"));
   };
   globalThis.EventTarget = EventTarget;
+  Object.setPrototypeOf(MediaEventTarget.prototype, EventTarget.prototype);
+  Object.setPrototypeOf(MediaEventTarget, EventTarget);
+  Object.setPrototypeOf(MediaStreamTrackEvent.prototype, Event.prototype);
+  Object.setPrototypeOf(MediaStreamTrackEvent, Event);
+  Object.setPrototypeOf(BlobEvent.prototype, Event.prototype);
+  Object.setPrototypeOf(BlobEvent, Event);
+  for (const constructor of [TextTrack, TextTrackList, TextTrackCue, TextTrackCueList, VTTCue, VTTRegion]) {
+    globalThis[constructor.name] = constructor;
+  }
+  for (const constructor of [TextTrack, TextTrackList, TextTrackCue, TextTrackCueList]) {
+    Object.defineProperty(constructor, "length", { value: 0 });
+  }
+  for (const [constructor, members] of [
+    [TextTrack, ["kind", "label", "language", "id", "mode", "cues", "activeCues", "addCue", "removeCue"]],
+    [TextTrackList, ["length", "getTrackById"]],
+    [TextTrackCue, ["track", "id", "startTime", "endTime", "pauseOnExit"]],
+    [TextTrackCueList, ["length", "getCueById"]],
+    [VTTCue, ["region", "vertical", "snapToLines", "line", "lineAlign", "position", "positionAlign", "size", "align", "text", "getCueAsHTML"]],
+    [VTTRegion, ["id", "width", "lines", "regionAnchorX", "regionAnchorY", "viewportAnchorX", "viewportAnchorY", "scroll"]],
+  ]) {
+    for (const member of members) {
+      const descriptor = Object.getOwnPropertyDescriptor(constructor.prototype, member);
+      if (descriptor) Object.defineProperty(constructor.prototype, member, { ...descriptor, enumerable: true });
+    }
+  }
+  for (const [prototype, types] of [
+    [TextTrack.prototype, ["cuechange"]],
+    [TextTrackList.prototype, ["addtrack", "removetrack", "change"]],
+    [TextTrackCue.prototype, ["enter", "exit"]],
+  ]) {
+    for (const type of types) {
+      const property = `on${type}`;
+      Object.defineProperty(prototype, property, {
+        enumerable: true, configurable: true,
+        get() { return this[`__${property}`] || null; },
+        set(callback) {
+          const previous = this[`__${property}`];
+          if (previous) this.removeEventListener(type, previous);
+          this[`__${property}`] = typeof callback === "function" ? callback : null;
+          if (this[`__${property}`]) this.addEventListener(type, this[`__${property}`]);
+        },
+      });
+    }
+  }
 
   // HTML CloseWatcher: an author-created close watcher sharing the Window's
   // close watcher manager with dialogs and popovers.
@@ -35575,22 +36573,26 @@ let omoikaneUserActivationState;
   }
 
   function createObjectURL(object) {
-    if (!(object instanceof Blob)) {
-      throw new TypeError("createObjectURL requires a Blob");
+    if (!(object instanceof Blob) && !(object instanceof MediaSource)) {
+      throw new TypeError("createObjectURL requires a Blob or MediaSource");
     }
     // about:blank and srcdoc can inherit an origin that differs from their
     // URL's `null` origin. Use the Document's security origin instead.
     const documentOrigin = __omoikane_storage_origin(__omoikane_document_id);
     const origin = documentOrigin === null ? "null" : new URL(documentOrigin).origin;
     const url = "blob:" + origin + "/" + crypto.randomUUID();
-    objectUrls.set(url, object);
-    __omoikane_register_object_url(url, object.__bytes, object.type);
+    if (object instanceof MediaSource) mediaSourceObjectUrls.set(url, object);
+    else {
+      objectUrls.set(url, object);
+      __omoikane_register_object_url(url, object.__bytes, object.type);
+    }
     return url;
   }
 
   function revokeObjectURL(url) {
     const key = String(url);
     objectUrls.delete(key);
+    mediaSourceObjectUrls.delete(key);
     __omoikane_revoke_object_url(key);
   }
 

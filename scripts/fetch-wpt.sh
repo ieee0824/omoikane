@@ -49,6 +49,14 @@ collect_pattern "/requestidlecallback/" "/scheduler/" "/dom/abort/resources/"
 collect_pattern "/beacon/" "/fetch/fetch-later/"
 # Picture-in-Picture IDL conformance (#1615).
 collect_pattern "/picture-in-picture/" "/common/media.js" "/media/movie_5.mp4" "/media/movie_5.webm"
+# TextTrack and WebVTT parsing/IDL conformance (#1614).
+collect_pattern "/webvtt/" "/html/semantics/embedded-content/media-elements/track/"
+# Media capture streams and deterministic MediaRecorder behavior (#1612).
+collect_pattern "/mediacapture-streams/" "/mediacapture-record/"
+# Media Source Extensions state, object URL, and SourceBuffer contracts (#1613).
+collect_pattern "/media-source/"
+# Media Session metadata, playback, position, and action-handler contracts (#1618).
+collect_pattern "/mediasession/"
 collect_pattern "/common/performance-timeline-utils.js" "/common/performance-timeline-utils.js.headers"
 collect_pattern "/paint-timing/" "/largest-contentful-paint/" "/server-timing/" "/longtask-timing/" "/event-timing/" "/layout-instability/" "/images/"
 collect_pattern \
@@ -686,7 +694,7 @@ collect_pattern \
   "/navigation-api/navigate-event/event-constructor.html" \
   "/navigation-api/navigation-methods/navigate-info-and-state.html"
 # Canvas 2D drawing (#1292).
-collect_pattern "/html/canvas/element/" "/html/canvas/resources/" "/images/"
+collect_pattern "/html/canvas/element/" "/html/canvas/resources/" "/images/" "/fonts/CanvasTest*.ttf" "/fonts/Lato-Medium.ttf" "/fonts/pass.woff" "/fonts/fail.woff"
 # A pinned revision alone does not prove that newly requested WPT paths exist.
 if [[ "$current_revision" == "$revision" ]] &&
   diff -q <(printf '%s\n' "${patterns[@]}" | LC_ALL=C sort -u) \
