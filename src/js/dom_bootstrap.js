@@ -201,6 +201,20 @@ let omoikaneUserActivationState;
   const nativeCompressionWrite = globalThis.__omoikane_compression_write;
   const nativeCompressionFinish = globalThis.__omoikane_compression_finish;
   const nativeCompressionAbort = globalThis.__omoikane_compression_abort;
+  const nativeWasmValidate = globalThis.__omoikane_wasm_validate;
+  const nativeWasmCompile = globalThis.__omoikane_wasm_compile;
+  const nativeWasmModuleMetadata = globalThis.__omoikane_wasm_module_metadata;
+  const nativeWasmInstantiate = globalThis.__omoikane_wasm_instantiate;
+  const nativeWasmInstanceExports = globalThis.__omoikane_wasm_instance_exports;
+  const nativeWasmCall = globalThis.__omoikane_wasm_call;
+  const nativeWasmMemoryNew = globalThis.__omoikane_wasm_memory_new;
+  const nativeWasmMemoryBuffer = globalThis.__omoikane_wasm_memory_buffer;
+  const nativeWasmMemoryGrow = globalThis.__omoikane_wasm_memory_grow;
+  const nativeWasmGlobalNew = globalThis.__omoikane_wasm_global_new;
+  const nativeWasmGlobalValue = globalThis.__omoikane_wasm_global_value;
+  const nativeWasmExportHandle = globalThis.__omoikane_wasm_export_handle;
+  const nativeWasmTableNew = globalThis.__omoikane_wasm_table_new;
+  const nativeWasmTableOp = globalThis.__omoikane_wasm_table_op;
   const nativeArrayBufferInfo = globalThis.__omoikane_array_buffer_info;
   const nativeCloneArrayBuffer = globalThis.__omoikane_clone_array_buffer;
   const nativeTransferArrayBuffer = globalThis.__omoikane_transfer_array_buffer;
@@ -394,6 +408,8 @@ let omoikaneUserActivationState;
   const nativeSetAttributeNS = globalThis.__omoikane_set_attribute_ns;
   const nativeSetStyleComputationSource =
     globalThis.__omoikane_set_style_computation_source;
+  const nativeCloseStyleValueFunctions =
+    globalThis.__omoikane_close_style_value_functions;
   const nativeRemoveAttributeNS = globalThis.__omoikane_remove_attribute_ns;
   const nativeIframeContentDocument = globalThis.__omoikane_iframe_content_document;
   const nativeWindowNamedSnapshot = globalThis.__omoikane_window_named_snapshot;
@@ -494,6 +510,7 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_serialize_xml;
   delete globalThis.__omoikane_set_attribute_ns;
   delete globalThis.__omoikane_set_style_computation_source;
+  delete globalThis.__omoikane_close_style_value_functions;
   delete globalThis.__omoikane_remove_attribute_ns;
   delete globalThis.__omoikane_iframe_content_document;
   delete globalThis.__omoikane_iframe_global;
@@ -1172,6 +1189,7 @@ let omoikaneUserActivationState;
     /(?:^|[^\w-])(?:calc|min|max|clamp|round|mod|rem|hypot|abs|sign|sin|cos|tan|asin|acos|atan|atan2|pow|sqrt|log|exp)\s*\(/i;
   const needsStyleValueNormalization = (name, value) =>
     name === "transition" || name.startsWith("transition-") ||
+    name === "animation-composition" ||
     name === "hyphenate-character" ||
     name === "initial-letter" || name === "text-box-edge" ||
     logicalBoxStyleProperties.has(name) ||
@@ -1181,6 +1199,11 @@ let omoikaneUserActivationState;
     validatesSpecialStyleProperties.has(name) ||
     (!name.startsWith("--") && numericMathFunctionPattern.test(value)) ||
     (!name.startsWith("--") && /sibling-(?:index|count)\s*\(/i.test(value));
+  // A component value may end with implicitly closed parentheses. Complete it
+  // before adding a declaration's semicolon, preserving unquantized color tokens.
+  const styleComputationValue = value =>
+    safeApply(safeRegExpExec, /\(/, [value]) !== null
+      ? nativeCloseStyleValueFunctions(value) : value;
   const styleShorthandLonghands = Object.freeze({
     "margin-block": ["margin-block-start", "margin-block-end"],
     "margin-inline": ["margin-inline-start", "margin-inline-end"],
@@ -4415,7 +4438,9 @@ let omoikaneUserActivationState;
       const normalizeDecls = (declarations) => {
         const normalized = [];
         for (const declaration of declarations) {
-          const computationValue = declaration.computationValue || declaration.value;
+          const computationValue = styleComputationValue(
+            declaration.computationValue || declaration.value
+          );
           if (needsStyleValueNormalization(declaration.name, declaration.value)) {
             const value = __omoikane_normalize_style_value(
               declaration.name, declaration.value
@@ -4535,7 +4560,7 @@ let omoikaneUserActivationState;
       // retains remove/append precedence for logical and shorthand groups.
       const setValue = (kebab, value, priority) => {
         value = String(value);
-        const computationValue = value;
+        const computationValue = styleComputationValue(value);
         if (needsStyleValueNormalization(kebab, value)) {
           const normalized = __omoikane_normalize_style_value(kebab, value);
           if (normalized === null) return;
@@ -40251,6 +40276,400 @@ let omoikaneUserActivationState;
     // Parser-authored attributes precede author scripts in a newly created Realm.
     wireInlineHandlers(globalThis.document);
   };
+  {
+    const moduleHandles = new WeakMap();
+    const instanceExports = new WeakMap();
+    class CompileError extends Error {
+      constructor(message) { super(message); this.name = "CompileError"; }
+    }
+    class LinkError extends Error {
+      constructor(message) { super(message); this.name = "LinkError"; }
+    }
+    class RuntimeError extends Error {
+      constructor(message) { super(message); this.name = "RuntimeError"; }
+    }
+    class WasmModule {
+      constructor(bytes) {
+        if (arguments.length === 0) throw new TypeError("WebAssembly.Module requires a BufferSource");
+        try { moduleHandles.set(this, nativeWasmCompile(bytes)); }
+        catch (error) {
+          if (error instanceof SyntaxError || error instanceof RangeError) throw new CompileError(error.message);
+          throw error;
+        }
+      }
+      static imports(module) {
+        const handle = moduleHandles.get(module);
+        if (handle === undefined) throw new TypeError("Argument 0 must be a WebAssembly.Module");
+        return JSON.parse(nativeWasmModuleMetadata(handle, "imports", ""));
+      }
+      static exports(module) {
+        const handle = moduleHandles.get(module);
+        if (handle === undefined) throw new TypeError("Argument 0 must be a WebAssembly.Module");
+        return JSON.parse(nativeWasmModuleMetadata(handle, "exports", ""));
+      }
+      static customSections(module, sectionName) {
+        const handle = moduleHandles.get(module);
+        if (handle === undefined) throw new TypeError("Argument 0 must be a WebAssembly.Module");
+        if (arguments.length < 2) throw new TypeError("WebAssembly.Module.customSections requires a section name");
+        const sections = JSON.parse(nativeWasmModuleMetadata(handle, "customSections", String(sectionName)));
+        return sections.map(bytes => Uint8Array.from(bytes).buffer);
+      }
+    }
+    Object.defineProperty(WasmModule, "name", { value: "Module" });
+    for (const name of ["imports", "exports", "customSections"]) {
+      Object.defineProperty(WasmModule, name, { ...Object.getOwnPropertyDescriptor(WasmModule, name), enumerable: true });
+    }
+    Object.defineProperty(WasmModule.prototype, Symbol.toStringTag, { value: "WebAssembly.Module", configurable: true });
+    const wasmIndex = (value, name) => {
+      const number = Number(value);
+      if (!Number.isFinite(number) || number < 0 || Math.floor(number) !== number || number > 0xffffffff) {
+        throw new TypeError(`${name} must be a non-negative integer`);
+      }
+      return number;
+    };
+    const resourceWrappers = new WeakMap();
+    const memoryHandles = new WeakMap();
+    class WasmMemory {
+      constructor(descriptor) {
+        if (descriptor === null || (typeof descriptor !== "object" && typeof descriptor !== "function")) {
+          throw new TypeError("WebAssembly.Memory descriptor must be an object");
+        }
+        if (descriptor.shared) throw new TypeError("Shared WebAssembly.Memory is not supported");
+        const initial = wasmIndex(descriptor.initial, "initial");
+        const maximumValue = descriptor.maximum;
+        const maximum = maximumValue === undefined ? undefined : wasmIndex(maximumValue, "maximum");
+        if (maximum !== undefined && initial > maximum) throw new RangeError("initial exceeds maximum");
+        const handle = nativeWasmMemoryNew(initial, maximum);
+        memoryHandles.set(this, handle);
+        resourceWrappers.set(handle, this);
+      }
+      get buffer() {
+        const handle = memoryHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Memory.buffer called on incompatible receiver");
+        return nativeWasmMemoryBuffer(handle);
+      }
+      grow(delta) {
+        const handle = memoryHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Memory.grow called on incompatible receiver");
+        return nativeWasmMemoryGrow(handle, wasmIndex(delta, "delta"));
+      }
+    }
+    Object.defineProperty(WasmMemory, "name", { value: "Memory" });
+    Object.defineProperty(WasmMemory.prototype, Symbol.toStringTag, { value: "WebAssembly.Memory", configurable: true });
+    const globalHandles = new WeakMap();
+    class WasmGlobal {
+      constructor(descriptor, ...values) {
+        if (descriptor === null || (typeof descriptor !== "object" && typeof descriptor !== "function")) {
+          throw new TypeError("WebAssembly.Global descriptor must be an object");
+        }
+        const mutable = Boolean(descriptor.mutable);
+        const type = String(descriptor.value);
+        if (!["i32", "i64", "f32", "f64"].includes(type)) throw new TypeError("Invalid WebAssembly.Global value type");
+        const value = values[0] === undefined ? (type === "i64" ? 0n : 0) : values[0];
+        const handle = nativeWasmGlobalNew(type, value, mutable);
+        globalHandles.set(this, handle);
+        resourceWrappers.set(handle, this);
+      }
+      get value() {
+        const handle = globalHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Global.value called on incompatible receiver");
+        return nativeWasmGlobalValue(handle);
+      }
+      set value(value) {
+        const handle = globalHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Global.value called on incompatible receiver");
+        nativeWasmGlobalValue(handle, value);
+      }
+      valueOf() {
+        const handle = globalHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Global.valueOf called on incompatible receiver");
+        return nativeWasmGlobalValue(handle);
+      }
+    }
+    Object.defineProperty(WasmGlobal, "name", { value: "Global" });
+    Object.defineProperty(WasmGlobal.prototype, Symbol.toStringTag, { value: "WebAssembly.Global", configurable: true });
+    const memoryFromHandle = handle => {
+      const existing = resourceWrappers.get(handle);
+      if (existing !== undefined) return existing;
+      const memory = Object.create(WasmMemory.prototype);
+      memoryHandles.set(memory, handle);
+      resourceWrappers.set(handle, memory);
+      return memory;
+    };
+    const globalFromHandle = handle => {
+      const existing = resourceWrappers.get(handle);
+      if (existing !== undefined) return existing;
+      const global = Object.create(WasmGlobal.prototype);
+      globalHandles.set(global, handle);
+      resourceWrappers.set(handle, global);
+      return global;
+    };
+    const tableHandles = new WeakMap();
+    const tableElements = new WeakMap();
+    const wasmFunctionHandles = new WeakMap();
+    class WasmTable {
+      constructor(descriptor, ...values) {
+        if (descriptor === null || (typeof descriptor !== "object" && typeof descriptor !== "function")) {
+          throw new TypeError("WebAssembly.Table descriptor must be an object");
+        }
+        const element = String(descriptor.element);
+        if (!["externref", "funcref", "anyfunc"].includes(element)) throw new TypeError("Invalid WebAssembly.Table element type");
+        const initial = wasmIndex(descriptor.initial, "initial");
+        const maximumValue = descriptor.maximum;
+        const maximum = maximumValue === undefined ? undefined : wasmIndex(maximumValue, "maximum");
+        if (maximum !== undefined && initial > maximum) throw new RangeError("initial exceeds maximum");
+        let value = values.length ? values[0] : (element === "externref" ? undefined : null);
+        if (element !== "externref" && value === undefined) value = null;
+        const functionHandle = element !== "externref" && value !== null ? wasmFunctionHandles.get(value) : undefined;
+        if (element !== "externref" && value !== null && functionHandle === undefined) throw new TypeError("funcref table values must be null or Wasm functions");
+        const handle = nativeWasmTableNew(element, initial, maximum, functionHandle ?? value, value);
+        tableHandles.set(this, handle);
+        resourceWrappers.set(handle, this);
+        tableElements.set(this, element === "externref" ? "externref" : "funcref");
+      }
+      get length() {
+        const handle = tableHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Table.length called on incompatible receiver");
+        return nativeWasmTableOp(handle, "length", 0, null);
+      }
+      get(index) {
+        const handle = tableHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Table.get called on incompatible receiver");
+        return nativeWasmTableOp(handle, "get", wasmIndex(index, "index"), null);
+      }
+      set(index, ...values) {
+        const handle = tableHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Table.set called on incompatible receiver");
+        const convertedIndex = wasmIndex(index, "index");
+        const value = values.length ? values[0] : (tableElements.get(this) === "externref" ? undefined : null);
+        const functionHandle = tableElements.get(this) === "funcref" && value !== null ? wasmFunctionHandles.get(value) : undefined;
+        if (tableElements.get(this) === "funcref" && value !== null && functionHandle === undefined) throw new TypeError("funcref value must be a Wasm function");
+        nativeWasmTableOp(handle, "set", convertedIndex, value, functionHandle ?? value);
+      }
+      grow(delta, ...values) {
+        const handle = tableHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Table.grow called on incompatible receiver");
+        const value = values.length ? values[0] : (tableElements.get(this) === "externref" ? undefined : null);
+        const functionHandle = tableElements.get(this) === "funcref" && value !== null ? wasmFunctionHandles.get(value) : undefined;
+        if (tableElements.get(this) === "funcref" && value !== null && functionHandle === undefined) throw new TypeError("funcref value must be a Wasm function");
+        return nativeWasmTableOp(handle, "grow", wasmIndex(delta, "delta"), value, functionHandle ?? value);
+      }
+    }
+    Object.defineProperty(WasmTable, "name", { value: "Table" });
+    Object.defineProperty(WasmTable.prototype, Symbol.toStringTag, { value: "WebAssembly.Table", configurable: true });
+    const tableFromHandle = (handle, element) => {
+      const existing = resourceWrappers.get(handle);
+      if (existing !== undefined) return existing;
+      const table = Object.create(WasmTable.prototype);
+      tableHandles.set(table, handle);
+      tableElements.set(table, element);
+      resourceWrappers.set(handle, table);
+      return table;
+    };
+    class WasmInstance {
+      constructor(module, imports = undefined) {
+        const moduleHandle = moduleHandles.get(module);
+        if (moduleHandle === undefined) throw new TypeError("Argument 0 must be a WebAssembly.Module");
+        if (imports !== undefined && (imports === null || (typeof imports !== "object" && typeof imports !== "function"))) {
+          throw new TypeError("WebAssembly imports argument must be an object");
+        }
+        const descriptors = WasmModule.imports(module);
+        const signatures = JSON.parse(nativeWasmModuleMetadata(moduleHandle, "runtimeImports", ""));
+        const values = descriptors.map((descriptor, index) => {
+          const namespace = imports[descriptor.module];
+          if (namespace === null || (typeof namespace !== "object" && typeof namespace !== "function")) {
+            throw new TypeError(`WebAssembly import module ${descriptor.module} must be an object`);
+          }
+          const value = namespace[descriptor.name];
+          if (descriptor.kind === "memory") {
+            const handle = memoryHandles.get(value);
+            if (handle === undefined) throw new LinkError(`WebAssembly import ${descriptor.module}.${descriptor.name} must be a Memory`);
+            return handle;
+          }
+          if (descriptor.kind === "global") {
+            const handle = globalHandles.get(value);
+            if (handle === undefined) throw new LinkError(`WebAssembly import ${descriptor.module}.${descriptor.name} must be a Global`);
+            return handle;
+          }
+          if (descriptor.kind === "table") {
+            const handle = tableHandles.get(value);
+            if (handle === undefined) throw new LinkError(`WebAssembly import ${descriptor.module}.${descriptor.name} must be a Table`);
+            return handle;
+          }
+          if (descriptor.kind !== "function") return value;
+          if (typeof value !== "function") throw new LinkError(`WebAssembly import ${descriptor.module}.${descriptor.name} must be callable`);
+          if (signatures[index].results <= 1) return value;
+          return (...args) => collectHTMLRoots(value(...args));
+        });
+        let handle;
+        try { handle = nativeWasmInstantiate(moduleHandle, values); }
+        catch (error) {
+          if (error instanceof TypeError) throw new LinkError(error.message);
+          if (error instanceof Error && error.message.startsWith("__WASM_LINK__")) throw new LinkError(error.message.slice(13));
+          if (error instanceof Error && error.message.startsWith("__WASM_RUNTIME__")) throw new RuntimeError(error.message.slice(16));
+          throw error;
+        }
+        const exports = Object.create(null);
+        let exportIndex = 0;
+        for (const descriptor of JSON.parse(nativeWasmInstanceExports(handle))) {
+          const currentIndex = exportIndex++;
+          if (descriptor.kind !== "function") {
+            const nativeHandle = nativeWasmExportHandle(handle, currentIndex, descriptor.name, descriptor.kind);
+            const value = descriptor.kind === "memory" ? memoryFromHandle(nativeHandle) :
+              descriptor.kind === "global" ? globalFromHandle(nativeHandle) :
+              descriptor.kind === "table" ? tableFromHandle(nativeHandle, descriptor.element) : undefined;
+            if (value !== undefined) Object.defineProperty(exports, descriptor.name, { value, enumerable: true });
+            continue;
+          }
+          const exportedHandle = nativeWasmExportHandle(handle, currentIndex, descriptor.name, descriptor.kind);
+          if (typeof exportedHandle === "function") {
+            Object.defineProperty(exports, descriptor.name, { value: exportedHandle, enumerable: true });
+            continue;
+          }
+          const fn = (...args) => {
+            try { return nativeWasmCall(handle, descriptor.name, args); }
+            catch (error) {
+              if (error instanceof TypeError || error instanceof RangeError) throw error;
+              if (error instanceof Error && error.message.startsWith("__WASM_EXCEPTION__")) {
+                throw new WasmException(new WasmTag({ parameters: [] }), []);
+              }
+              if (error instanceof Error && error.message.startsWith("__WASM_RUNTIME__")) throw new RuntimeError(error.message.slice(16));
+              throw error;
+            }
+          };
+          Object.defineProperty(fn, "name", { value: descriptor.functionName, configurable: true });
+          Object.defineProperty(fn, "length", { value: descriptor.params, configurable: true });
+          wasmFunctionHandles.set(fn, exportedHandle);
+          Object.defineProperty(exports, descriptor.name, { value: fn, enumerable: true });
+        }
+        Object.preventExtensions(exports);
+        instanceExports.set(this, exports);
+      }
+      get exports() {
+        const exports = instanceExports.get(this);
+        if (exports === undefined) throw new TypeError("WebAssembly.Instance.exports called on incompatible receiver");
+        return exports;
+      }
+    }
+    Object.defineProperty(WasmInstance, "name", { value: "Instance" });
+    Object.defineProperty(WasmInstance.prototype, Symbol.toStringTag, { value: "WebAssembly.Instance", configurable: true });
+    const tagTypes = new WeakMap();
+    class WasmTag {
+      constructor(descriptor) {
+        if (descriptor === null || (typeof descriptor !== "object" && typeof descriptor !== "function")) {
+          throw new TypeError("WebAssembly.Tag descriptor must be an object");
+        }
+        const parameters = Array.from(descriptor.parameters, value => String(value));
+        if (parameters.some(type => !["i32", "i64", "f32", "f64", "externref", "funcref"].includes(type))) {
+          throw new TypeError("Invalid WebAssembly.Tag parameter type");
+        }
+        tagTypes.set(this, parameters);
+      }
+      type() {
+        const parameters = tagTypes.get(this);
+        if (parameters === undefined) throw new TypeError("WebAssembly.Tag.type called on incompatible receiver");
+        return { parameters: parameters.slice() };
+      }
+    }
+    Object.defineProperty(WasmTag, "name", { value: "Tag" });
+    Object.defineProperty(WasmTag.prototype, Symbol.toStringTag, { value: "WebAssembly.Tag", configurable: true });
+    const exceptionStates = new WeakMap();
+    const convertExceptionValue = (type, value) => {
+      if (type === "i64") return BigInt(value);
+      if (type === "externref") return value;
+      if (type === "funcref") {
+        if (value === null || wasmFunctionHandles.has(value)) return value;
+        throw new TypeError("WebAssembly.Exception funcref values must be null or Wasm functions");
+      }
+      if (typeof value === "bigint") throw new TypeError(`WebAssembly.Exception ${type} values must be numbers`);
+      const number = Number(value);
+      if (type === "i32") return number >> 0;
+      return type === "f32" ? Math.fround(number) : number;
+    };
+    const exceptionIndex = value => {
+      const number = Number(value);
+      if (!Number.isFinite(number) || number < 0 || Math.floor(number) !== number || number > 0xffffffff) {
+        throw new RangeError("WebAssembly.Exception argument index is out of range");
+      }
+      return number;
+    };
+    class WasmException {
+      constructor(tag, values, options = undefined) {
+        const parameters = tagTypes.get(tag);
+        if (parameters === undefined) throw new TypeError("Argument 0 must be a WebAssembly.Tag");
+        const payload = Array.from(values);
+        if (payload.length !== parameters.length) throw new TypeError("WebAssembly.Exception argument count does not match its tag");
+        exceptionStates.set(this, {
+          tag,
+          values: payload.map((value, index) => convertExceptionValue(parameters[index], value)),
+        });
+        if (options !== undefined && options !== null && Boolean(Object(options).traceStack)) {
+          Object.defineProperty(this, "stack", { value: new Error().stack, configurable: true, writable: true });
+        }
+      }
+      getArg(tag, index) {
+        const state = exceptionStates.get(this);
+        if (state === undefined) throw new TypeError("WebAssembly.Exception.getArg called on incompatible receiver");
+        if (arguments.length < 2) throw new TypeError("WebAssembly.Exception.getArg requires a tag and index");
+        if (!tagTypes.has(tag)) throw new TypeError("Argument 0 must be a WebAssembly.Tag");
+        const convertedIndex = exceptionIndex(index);
+        if (tag !== state.tag || convertedIndex >= state.values.length) {
+          throw new RangeError("WebAssembly.Exception argument index is out of range");
+        }
+        return state.values[convertedIndex];
+      }
+      is(tag) {
+        const state = exceptionStates.get(this);
+        if (state === undefined) throw new TypeError("WebAssembly.Exception.is called on incompatible receiver");
+        if (!tagTypes.has(tag)) throw new TypeError("Argument 0 must be a WebAssembly.Tag");
+        return tag === state.tag;
+      }
+    }
+    Object.defineProperty(WasmException, "name", { value: "Exception" });
+    Object.defineProperty(WasmException.prototype, Symbol.toStringTag, { value: "WebAssembly.Exception", configurable: true });
+    const WebAssembly = {};
+    const compile = bytes => Promise.resolve().then(() => new WasmModule(bytes));
+    const instantiate = (source, imports) => Promise.resolve().then(() => {
+      if (moduleHandles.has(source)) return new WasmInstance(source, imports);
+      const module = new WasmModule(source);
+      return { module, instance: new WasmInstance(module, imports) };
+    });
+    const streamingResponse = source => Promise.resolve(source).then(response => {
+      if (!(response instanceof Response)) throw new TypeError("WebAssembly streaming source must be a Response");
+      if (!response.ok) throw new TypeError("WebAssembly streaming response must have an ok status");
+      const contentType = response.headers.get("content-type");
+      if (contentType === null || contentType.toLowerCase() !== "application/wasm") {
+        throw new TypeError("WebAssembly streaming response must have Content-Type application/wasm");
+      }
+      return response.arrayBuffer();
+    });
+    const compileStreaming = source => streamingResponse(source).then(bytes => new WasmModule(bytes));
+    const instantiateStreaming = (source, imports) => compileStreaming(source).then(module => ({
+      module, instance: new WasmInstance(module, imports),
+    }));
+    Object.defineProperties(WebAssembly, {
+      Module: { value: WasmModule, writable: true, configurable: true },
+      Instance: { value: WasmInstance, writable: true, configurable: true },
+      Memory: { value: WasmMemory, writable: true, configurable: true },
+      Global: { value: WasmGlobal, writable: true, configurable: true },
+      Table: { value: WasmTable, writable: true, configurable: true },
+      Tag: { value: WasmTag, writable: true, configurable: true },
+      Exception: { value: WasmException, writable: true, configurable: true },
+      CompileError: { value: CompileError, writable: true, configurable: true },
+      LinkError: { value: LinkError, writable: true, configurable: true },
+      RuntimeError: { value: RuntimeError, writable: true, configurable: true },
+      validate: { value(bytes) {
+        if (arguments.length === 0) throw new TypeError("WebAssembly.validate requires a BufferSource");
+        return nativeWasmValidate(bytes);
+      }, writable: true, enumerable: true, configurable: true },
+      compile: { value: compile, writable: true, enumerable: true, configurable: true },
+      instantiate: { value: instantiate, writable: true, enumerable: true, configurable: true },
+      compileStreaming: { value: compileStreaming, writable: true, enumerable: true, configurable: true },
+      instantiateStreaming: { value: instantiateStreaming, writable: true, enumerable: true, configurable: true },
+      [Symbol.toStringTag]: { value: "WebAssembly", configurable: true },
+    });
+    Object.defineProperty(globalThis, "WebAssembly", { value: WebAssembly, writable: true, configurable: true });
+  }
   // The parser already reset each select's selectedness. Mirror it into the
   // selectedcontent elements before author scripts run.
   for (const selectedcontent of Array.from(globalThis.document.getElementsByTagName("selectedcontent"))) {

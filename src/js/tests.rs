@@ -50,6 +50,303 @@ fn sample_document() -> NodeHandle {
 }
 
 #[test]
+fn webassembly_validates_modules_and_exposes_owned_metadata() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let value = runtime
+        .eval(
+            r#"
+            (() => {
+              const empty = Uint8Array.of(0,97,115,109,1,0,0,0);
+              const described = Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,4,1,96,0,0,
+                2,9,1,3,101,110,118,1,102,0,0,
+                7,7,1,3,114,117,110,0,0,
+                0,4,1,120,1,2
+              );
+              const module = new WebAssembly.Module(described);
+              const custom = WebAssembly.Module.customSections(module, "x");
+              const detached = custom[0];
+              new Uint8Array(detached)[0] = 9;
+              return JSON.stringify({
+                namespace: Object.prototype.toString.call(WebAssembly),
+                moduleBrand: Object.prototype.toString.call(module),
+                valid: WebAssembly.validate(empty),
+                invalid: WebAssembly.validate(Uint8Array.of(0,1,2)),
+                imports: WebAssembly.Module.imports(module),
+                exports: WebAssembly.Module.exports(module),
+                custom: Array.from(new Uint8Array(WebAssembly.Module.customSections(module, "x")[0])),
+                owned: Array.from(new Uint8Array(detached)),
+                compileError: (() => { try { new WebAssembly.Module(Uint8Array.of(0)); } catch (e) { return e instanceof WebAssembly.CompileError && e.name; } })(),
+                sourceTypeError: (() => { try { WebAssembly.validate({}); } catch (e) { return e instanceof TypeError; } })(),
+                brandTypeError: (() => { try { WebAssembly.Module.exports({}); } catch (e) { return e instanceof TypeError; } })(),
+              });
+            })()
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        r#"{"namespace":"[object WebAssembly]","moduleBrand":"[object WebAssembly.Module]","valid":true,"invalid":false,"imports":[{"module":"env","name":"f","kind":"function"}],"exports":[{"name":"run","kind":"function"}],"custom":[1,2],"owned":[9,2],"compileError":"CompileError","sourceTypeError":true,"brandTypeError":true}"#
+    );
+}
+
+#[test]
+fn webassembly_promise_and_streaming_entry_points() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            r#"
+            globalThis.webassemblyPromiseChecks = undefined;
+            (async () => {
+              const bytes = Uint8Array.of(0,97,115,109,1,0,0,0);
+              const module = await WebAssembly.compile(bytes);
+              const fromBytes = await WebAssembly.instantiate(bytes);
+              const fromModule = await WebAssembly.instantiate(module);
+              const response = new Response(bytes, { headers: { "Content-Type": "APPLICATION/WASM" } });
+              const streamed = await WebAssembly.instantiateStreaming(response);
+              let mimeError = false;
+              try { await WebAssembly.compileStreaming(new Response(bytes)); }
+              catch (error) { mimeError = error instanceof TypeError; }
+              globalThis.webassemblyPromiseChecks = JSON.stringify({
+                module: module instanceof WebAssembly.Module,
+                fromBytes: fromBytes.instance instanceof WebAssembly.Instance,
+                fromModule: fromModule instanceof WebAssembly.Instance,
+                streamed: streamed.instance instanceof WebAssembly.Instance,
+                mimeError,
+              });
+            })();
+            "#,
+        )
+        .unwrap();
+    runtime.run_jobs().unwrap();
+    let value = runtime.eval("webassemblyPromiseChecks").unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        r#"{"module":true,"fromBytes":true,"fromModule":true,"streamed":true,"mimeError":true}"#
+    );
+}
+
+#[test]
+fn webassembly_tag_exception_and_supported_proposals() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let value = runtime
+        .eval(
+            r#"
+            (() => {
+              const tag = new WebAssembly.Tag({ parameters: ["i32", "i64", "f32", "f64"] });
+              const exception = new WebAssembly.Exception(tag, [0xffffffff, 7n, 1.1, 2.5]);
+              const other = new WebAssembly.Tag({ parameters: tag.type().parameters });
+              const simdBytes = Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,6,1,96,1,127,1,127,
+                3,2,1,0,
+                7,8,1,4,115,105,109,100,0,0,
+                10,11,1,9,0,32,0,253,17,253,163,1,11
+              );
+              const referenceBytes = Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,5,1,96,0,1,127,
+                3,2,1,0,
+                7,13,1,9,114,101,102,101,114,101,110,99,101,0,0,
+                10,7,1,5,0,208,111,209,11
+              );
+              let simd, reference;
+              try { simd = new WebAssembly.Instance(new WebAssembly.Module(simdBytes)); }
+              catch (error) { return `simd: ${error.name}: ${error.message}`; }
+              try { reference = new WebAssembly.Instance(new WebAssembly.Module(referenceBytes)); }
+              catch (error) { return `reference: ${error.name}: ${error.message}`; }
+              return JSON.stringify({
+                types: tag.type().parameters.join(","),
+                i32: exception.getArg(tag, 0),
+                i64: String(exception.getArg(tag, 1)),
+                f32: exception.getArg(tag, 2),
+                f64: exception.getArg(tag, 3),
+                same: exception.is(tag),
+                other: exception.is(other),
+                tagBrand: Object.prototype.toString.call(tag),
+                exceptionBrand: Object.prototype.toString.call(exception),
+                simdTrue: simd.exports.simd(1),
+                simdFalse: simd.exports.simd(0),
+                reference: reference.exports.reference(),
+              });
+            })()
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        r#"{"types":"i32,i64,f32,f64","i32":-1,"i64":"7","f32":1.100000023841858,"f64":2.5,"same":true,"other":false,"tagBrand":"[object WebAssembly.Tag]","exceptionBrand":"[object WebAssembly.Exception]","simdTrue":1,"simdFalse":0,"reference":1}"#
+    );
+}
+
+#[test]
+fn webassembly_compilation_obeys_its_distinct_csp_permission() {
+    let bytes = "Uint8Array.of(0,97,115,109,1,0,0,0)";
+    let mut blocked = runtime_at_document_url("https://example.test/");
+    blocked.install_csp_policy(&["script-src 'self'".to_string()]);
+    blocked
+        .eval(
+            "globalThis.wasmViolations = []; document.addEventListener('securitypolicyviolation', event => wasmViolations.push(event.blockedURI));",
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(
+            &mut blocked,
+            &format!(
+                "(() => {{ try {{ new WebAssembly.Module({bytes}); return 'allowed'; }} catch (error) {{ return error.name; }} }})()"
+            ),
+        ),
+        "CompileError"
+    );
+    blocked.run_jobs().unwrap();
+    blocked.run_timers(10, 1, 30);
+    assert_eq!(
+        eval_str(&mut blocked, "wasmViolations.join(',')",),
+        "wasm-eval"
+    );
+
+    let mut wasm_only = runtime_at_document_url("https://example.test/");
+    wasm_only.install_csp_policy(&["script-src 'wasm-unsafe-eval'".to_string()]);
+    assert_eq!(
+        eval_str(
+            &mut wasm_only,
+            &format!("new WebAssembly.Module({bytes}) instanceof WebAssembly.Module"),
+        ),
+        "true"
+    );
+    assert_eq!(
+        eval_str(
+            &mut wasm_only,
+            "(() => { try { eval('1'); return 'allowed'; } catch (error) { return error.name; } })()",
+        ),
+        "EvalError"
+    );
+}
+
+#[test]
+fn webassembly_instances_call_exported_and_imported_functions() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let value = runtime
+        .eval(
+            r#"
+            (() => {
+              const addModule = new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,7,1,96,2,127,127,1,127,
+                3,2,1,0,
+                7,7,1,3,97,100,100,0,0,
+                10,9,1,7,0,32,0,32,1,106,11
+              ));
+              const instance = new WebAssembly.Instance(addModule);
+              const importedModule = new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,6,1,96,1,127,1,127,
+                2,9,1,3,101,110,118,1,102,0,0,
+                7,7,1,3,114,117,110,0,0
+              ));
+              let seen = 0;
+              const imported = new WebAssembly.Instance(importedModule, { env: { f(value) { seen = value; return value + 1; } } });
+              const sentinel = new Error("sentinel");
+              const throwing = new WebAssembly.Instance(importedModule, { env: { f() { throw sentinel; } } });
+              let reentrantModule;
+              try { reentrantModule = new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,6,1,96,1,127,1,127,
+                2,9,1,3,101,110,118,1,102,0,0,
+                3,2,1,0,
+                7,18,2,3,114,117,110,0,0,8,105,100,101,110,116,105,116,121,0,1,
+                10,6,1,4,0,32,0,11
+              )); } catch (error) { return JSON.stringify({ compile: `${error.name}:${error.message}` }); }
+              let reentrant;
+              reentrant = new WebAssembly.Instance(reentrantModule, { env: { f(value) { return reentrant.exports.identity(value) + 1; } } });
+              const numeric = new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,21,4,96,1,126,1,126,96,1,125,1,125,96,1,124,1,124,96,0,2,127,126,
+                3,5,4,0,1,2,3,
+                7,27,4,3,105,54,52,0,0,3,102,51,50,0,1,3,102,54,52,0,2,5,109,117,108,116,105,0,3,
+                10,23,4,4,0,32,0,11,4,0,32,0,11,4,0,32,0,11,6,0,65,7,66,9,11
+              )));
+              const trap = new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,1,4,1,96,0,0,3,2,1,0,7,8,1,4,98,111,111,109,0,0,10,5,1,3,0,0,11
+              )));
+              const spin = new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,1,4,1,96,0,0,3,2,1,0,7,8,1,4,115,112,105,110,0,0,10,9,1,7,0,3,64,12,0,11,11
+              )));
+              return JSON.stringify({
+                sum: instance.exports.add(20, 22),
+                length: instance.exports.add.length,
+                name: instance.exports.add.name,
+                imported: imported.exports.run(8),
+                seen,
+                exception: (() => { try { throwing.exports.run(1); } catch (error) { return error === sentinel; } })(),
+                reentrant: reentrant.exports.run(11),
+                i64: String(numeric.exports.i64(9223372036854775807n)),
+                f32: numeric.exports.f32(1.25),
+                f64: numeric.exports.f64(2.5),
+                multi: numeric.exports.multi().map(String).join(","),
+                trap: (() => { try { trap.exports.boom(); } catch (error) { return error instanceof WebAssembly.RuntimeError; } })(),
+                fuel: (() => { try { spin.exports.spin(); } catch (error) { return error instanceof WebAssembly.RuntimeError; } })(),
+                brand: Object.prototype.toString.call(instance),
+                nullPrototype: Object.getPrototypeOf(instance.exports) === null,
+                stable: instance.exports === instance.exports,
+                immutable: !Object.isExtensible(instance.exports),
+                receiver: (() => { try { return Object.getOwnPropertyDescriptor(WebAssembly.Instance.prototype, "exports").get.call({}); } catch (e) { return e instanceof TypeError; } })(),
+              });
+            })()
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        r#"{"sum":42,"length":2,"name":"0","imported":9,"seen":8,"exception":true,"reentrant":12,"i64":"9223372036854775807","f32":1.25,"f64":2.5,"multi":"7,9","trap":true,"fuel":true,"brand":"[object WebAssembly.Instance]","nullPrototype":true,"stable":true,"immutable":true,"receiver":true}"#
+    );
+}
+
+#[test]
+fn webassembly_memory_and_global_objects_preserve_state() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let value = runtime
+        .eval(
+            r#"
+            (() => {
+              const memory = new WebAssembly.Memory({ initial: 1, maximum: 2 });
+              const old = memory.buffer;
+              new Uint8Array(old)[3] = 42;
+              const same = memory.buffer === old && new Uint8Array(memory.buffer)[3] === 42;
+              const previous = memory.grow(1);
+              const current = memory.buffer;
+              const global = new WebAssembly.Global({ value: "i32", mutable: true }, 7);
+              global.value = 9;
+              const immutable = new WebAssembly.Global({ value: "f64" }, 1.5);
+              let immutableError = false;
+              try { immutable.value = 2; } catch (error) { immutableError = error instanceof TypeError; }
+              const first = { id: 1 };
+              const second = { id: 2 };
+              const table = new WebAssembly.Table({ element: "externref", initial: 2, maximum: 3 }, first);
+              table.set(1, second);
+              const tablePrevious = table.grow(1, first);
+              return JSON.stringify({
+                same, previous, detached: old.byteLength === 0,
+                size: current.byteLength, copied: new Uint8Array(current)[3],
+                global: global.value, valueOf: +global, immutable: immutable.value,
+                immutableError,
+                table: [table.length, tablePrevious, table.get(0) === first, table.get(1) === second, table.get(2) === first],
+                memoryBrand: Object.prototype.toString.call(memory),
+                globalBrand: Object.prototype.toString.call(global),
+                tableBrand: Object.prototype.toString.call(table),
+              });
+            })()
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        r#"{"same":true,"previous":1,"detached":true,"size":131072,"copied":42,"global":9,"valueOf":9,"immutable":1.5,"immutableError":true,"table":[3,2,true,true,true],"memoryBrand":"[object WebAssembly.Memory]","globalBrand":"[object WebAssembly.Global]","tableBrand":"[object WebAssembly.Table]"}"#
+    );
+}
+
+#[test]
 fn native_host_call_identifies_the_immediate_javascript_caller_realm() {
     let mut context = Context::default();
     context
@@ -254,7 +551,8 @@ fn dedicated_worker_uses_separate_global_and_round_trips_messages() {
     runtime
         .eval(
             "globalThis.workerValues = []; \
-                 const worker = new Worker('data:text/javascript,globalThis.onmessage%3De%3D%3EpostMessage(e.data%2B1)'); \
+                 const workerSource = `globalThis.onmessage=e=>postMessage({value:e.data+1,wasm:typeof WebAssembly==='object'&&typeof WebAssembly.compile==='function'&&WebAssembly.validate(Uint8Array.of(0,97,115,109,1,0,0,0))})`; \
+                 const worker = new Worker('data:text/javascript,' + encodeURIComponent(workerSource)); \
                  worker.onmessage = event => workerValues.push(event.data); \
                  worker.postMessage(41); \
                  globalThis.workerDocumentType = typeof worker.document;",
@@ -263,8 +561,12 @@ fn dedicated_worker_uses_separate_global_and_round_trips_messages() {
     boa_gc::force_collect();
     runtime.run_until_idle().unwrap();
     assert_eq!(
-        runtime.eval("workerValues[0]").unwrap().as_number(),
+        runtime.eval("workerValues[0].value").unwrap().as_number(),
         Some(42.0)
+    );
+    assert_eq!(
+        runtime.eval("workerValues[0].wasm").unwrap().as_boolean(),
+        Some(true)
     );
     assert_eq!(
         runtime

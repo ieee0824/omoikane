@@ -1,0 +1,11 @@
+{
+  "tests": [
+    { "path": "wasm/jsapi/constructor/validate.any.js" },
+    { "path": "wasm/jsapi/constructor/toStringTag.any.js" },
+    { "path": "wasm/jsapi/module/constructor.any.js" },
+    { "path": "wasm/jsapi/module/imports.any.js" },
+    { "path": "wasm/jsapi/module/exports.any.js" },
+    { "path": "wasm/jsapi/module/customSections.any.js" },
+    { "path": "wasm/jsapi/module/toString.any.js" }
+  ]
+}

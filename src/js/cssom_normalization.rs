@@ -130,6 +130,9 @@ const VALIDATED_PROPERTIES: &[&str] = &[
 ];
 
 pub(super) fn normalize(property: &str, value: &str) -> Option<String> {
+    if property == "animation-composition" {
+        return crate::css::style::normalize_animation_composition_specified(value);
+    }
     if matches!(
         property,
         "position-area" | "position-try-fallbacks" | "position-visibility"

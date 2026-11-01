@@ -166,6 +166,83 @@ fn animation_composition_is_exposed_through_cssom_validation() {
 }
 
 #[test]
+fn animation_composition_rejects_css_wide_keywords_inside_lists() {
+    let mut runtime = runtime();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "JSON.stringify(['initial', 'inherit', 'unset', 'revert', 'revert-layer']
+              .map(keyword => [
+                CSS.supports('animation-composition', keyword),
+                CSS.supports('animation-composition', 'add, ' + keyword),
+                CSS.supports('animation-composition', keyword + ', add'),
+                CSS.supports('animation-composition', keyword + ', ' + keyword)
+              ]))",
+        ),
+        "[[true,false,false,false],[true,false,false,false],[true,false,false,false],[true,false,false,false],[true,false,false,false]]"
+    );
+}
+
+#[test]
+fn animation_composition_invalid_lists_preserve_cssom_and_cascade() {
+    let mut runtime = runtime();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "(() => {
+              const target = document.getElementById('target');
+              const style = document.createElement('style');
+              style.textContent = '#target { animation-composition: accumulate; animation-composition: initial, add; }';
+              document.head.appendChild(style);
+              const cascaded = getComputedStyle(target).getPropertyValue('animation-composition');
+              target.style.setProperty('animation-composition', 'replace, add');
+              const invalid = ['add, initial', 'initial, add', 'add, inherit',
+                'unset, add', 'add, revert', 'revert-layer, add'];
+              const values = invalid.map(value => {
+                target.style.setProperty('animation-composition', value);
+                return target.style.getPropertyValue('animation-composition');
+              });
+              target.style.cssText = 'animation-composition: add; animation-composition: add, initial';
+              return JSON.stringify([cascaded, values,
+                target.style.getPropertyValue('animation-composition')]);
+            })()",
+        ),
+        "[\"accumulate\",[\"replace, add\",\"replace, add\",\"replace, add\",\"replace, add\",\"replace, add\",\"replace, add\"],\"add\"]"
+    );
+}
+
+#[test]
+fn animation_composition_preserves_valid_lists_and_deferred_variables() {
+    let mut runtime = runtime();
+    assert_eq!(
+        eval_json(
+            &mut runtime,
+            "(() => {
+              const target = document.getElementById('target');
+              const values = ['AdD, AcCuMuLaTe', 'add, add', 'RePlAcE'];
+              const normalized = values.map(value => {
+                target.style.setProperty('animation-composition', value);
+                return [CSS.supports('animation-composition', value),
+                  target.style.getPropertyValue('animation-composition')];
+              });
+              target.style.setProperty('--Composition', 'add, accumulate');
+              target.style.setProperty('animation-composition', 'var(--Composition)');
+              const specified = target.style.getPropertyValue('animation-composition');
+              const supported = CSS.supports('animation-composition', 'var(--Composition)');
+              const computed = getComputedStyle(target);
+              const valid = computed.getPropertyValue('animation-composition');
+              target.style.setProperty('--Composition', 'add, initial');
+              const invalid = computed.getPropertyValue('animation-composition');
+              target.style.setProperty('animation-composition', 'initial');
+              const initial = computed.getPropertyValue('animation-composition');
+              return JSON.stringify([normalized, specified, supported, valid, invalid === initial]);
+            })()",
+        ),
+        "[[[true,\"add, accumulate\"],[true,\"add, add\"],[true,\"replace\"]],\"var(--Composition)\",true,\"add, accumulate\",true]"
+    );
+}
+
+#[test]
 fn scroll_and_view_timelines_derive_progress_from_current_geometry() {
     let mut runtime = runtime();
     assert_eq!(
