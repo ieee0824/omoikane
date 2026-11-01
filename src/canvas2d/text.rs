@@ -328,15 +328,15 @@ pub(crate) struct TextLayout {
 }
 
 /// The text preparation algorithm's characters for shaping: ASCII
-/// whitespace becomes a space, and other control characters, which
-/// browsers render with no advance, are dropped rather than shaped with a
-/// fallback font's missing-glyph box.
+/// whitespace becomes a space, and U+0000, which browsers render with no
+/// advance, is dropped rather than shaped with a fallback font's
+/// missing-glyph box. Other control characters keep their glyphs.
 fn prepare_text(text: &str) -> String {
     text.chars()
         .filter_map(|ch| {
             if ch.is_ascii_whitespace() {
                 Some(' ')
-            } else if ch.is_control() {
+            } else if ch == '\0' {
                 None
             } else {
                 Some(ch)
@@ -503,10 +503,12 @@ mod tests {
     }
 
     #[test]
-    fn text_preparation_turns_whitespace_into_spaces_and_drops_controls() {
+    fn text_preparation_turns_whitespace_into_spaces_and_drops_nul() {
+        // U+000B is not ASCII whitespace, so it keeps a glyph (WPT
+        // 2d.text.draw.space.collapse.nonspace).
         assert_eq!(
-            prepare_text("a\tb\nc\u{0}d\u{b}e\u{85}f\u{200b}"),
-            "a b cdef\u{200b}"
+            prepare_text("a\tb\nc\u{0}d\u{b}e\u{85}f"),
+            "a b cd\u{b}e\u{85}f"
         );
     }
 
