@@ -297,3 +297,183 @@ fn text_is_drawn_as_glyph_outlines_and_measured_from_the_font() {
         "#,
     );
 }
+
+/// Runs `setup`, drains tasks, then checks that `verdict` evaluates to true.
+fn check_after_tasks(setup: &str, verdict: &str) {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.eval(setup).unwrap();
+    runtime.run_timers(100, 1, 100);
+    runtime.run_until_idle().unwrap();
+    let result = runtime.eval(verdict).unwrap();
+    assert!(result.as_boolean() == Some(true), "{}", result.display());
+}
+
+#[test]
+fn to_blob_calls_back_later_with_a_png_or_null() {
+    check_after_tasks(
+        r#"
+        globalThis.log = [];
+        const canvas = document.createElement('canvas');
+        canvas.width = 2; canvas.height = 1;
+        canvas.getContext('2d').fillRect(0, 0, 1, 1);
+        canvas.toBlob(blob => log.push(blob instanceof Blob ? blob.type + ' ' + (blob.size > 0) : String(blob)), 'image/jpeg');
+        const empty = document.createElement('canvas');
+        empty.width = 0;
+        empty.toBlob(blob => log.push(String(blob)));
+        log.push('sync');
+        globalThis.errors = [];
+        for (const call of [() => canvas.toBlob(), () => canvas.toBlob('nope')])
+          try { call(); errors.push('none'); } catch (error) { errors.push(error.name); }
+        globalThis.urls = [canvas.toDataURL().startsWith('data:image/png;base64,'), empty.toDataURL()];
+        "#,
+        r#"
+        log.join('|') === 'sync|image/png true|null' && errors.join() === 'TypeError,TypeError'
+          && urls.join() === 'true,data:,' || JSON.stringify([log, errors, urls])
+        "#,
+    );
+}
+
+#[test]
+fn get_context_ids_are_case_sensitive_and_settings_convert_in_order() {
+    check(
+        1,
+        1,
+        r#"
+        try { canvas.getContext(); return 'missing id'; } catch (error) { if (!(error instanceof TypeError)) return error.name; }
+        if (canvas.getContext('2D') !== null) return 'case';
+        const order = [];
+        const options = {
+          get alpha() { order.push('alpha'); return false; },
+          get colorSpace() { order.push('colorSpace'); return { toString() { order.push('toString'); return 'display-p3'; } }; },
+          get desynchronized() { order.push('desynchronized'); return true; },
+          get willReadFrequently() { order.push('willReadFrequently'); return true; },
+        };
+        const fresh = document.createElement('canvas').getContext('2d', options);
+        if (order.join() !== 'alpha,colorSpace,toString,desynchronized,willReadFrequently') return 'order ' + order;
+        const attributes = fresh.getContextAttributes();
+        if (attributes.alpha !== false || attributes.colorSpace !== 'display-p3' || !attributes.willReadFrequently)
+          return 'attributes ' + JSON.stringify(attributes);
+        try { document.createElement('canvas').getContext('2d', { colorSpace: 'bogus' }); return 'enum'; }
+        catch (error) { if (!(error instanceof TypeError)) return 'enum ' + error.name; }
+        try { new CanvasRenderingContext2D(); return 'constructor'; }
+        catch (error) { if (!(error instanceof TypeError)) return 'constructor ' + error.name; }
+        return ctx.getContextAttributes().alpha === true || 'default attributes';
+        "#,
+    );
+}
+
+#[test]
+fn image_data_validates_sizes_and_wraps_its_buffer() {
+    check(
+        1,
+        1,
+        r#"
+        const name = make => { try { make(); return 'none'; } catch (error) { return error.name; } };
+        const errors = [
+          name(() => new ImageData(0, 1)), name(() => new ImageData(1, 0)),
+          name(() => new ImageData(new Uint8ClampedArray(3), 1)), name(() => new ImageData(new Uint8ClampedArray(16), 3)),
+          name(() => new ImageData(new Uint8ClampedArray(16), 4, 3)), name(() => new ImageData(1)),
+        ].join();
+        if (errors !== 'IndexSizeError,IndexSizeError,InvalidStateError,IndexSizeError,IndexSizeError,TypeError') return errors;
+        const buffer = new Uint8ClampedArray(24), image = new ImageData(buffer, 2);
+        return image.data === buffer && image.height === 3 || 'wrap';
+        "#,
+    );
+}
+
+#[test]
+fn transferred_canvases_show_the_offscreen_canvas_and_reject_other_access() {
+    check(
+        2,
+        1,
+        r#"
+        const placeholder = document.createElement('canvas');
+        placeholder.width = 3; placeholder.height = 2;
+        const offscreen = placeholder.transferControlToOffscreen();
+        if (!(offscreen instanceof OffscreenCanvas) || offscreen.width !== 3 || offscreen.height !== 2) return 'size';
+        const name = call => { try { call(); return 'none'; } catch (error) { return error.name; } };
+        const errors = [
+          name(() => placeholder.getContext('2d')), name(() => placeholder.toDataURL()),
+          name(() => placeholder.toBlob(() => {})), name(() => { placeholder.width = 4; }),
+          name(() => placeholder.transferControlToOffscreen()), name(() => canvas.transferControlToOffscreen()),
+        ].join();
+        if (errors !== 'InvalidStateError,InvalidStateError,InvalidStateError,InvalidStateError,InvalidStateError,InvalidStateError')
+          return errors;
+        const draw = offscreen.getContext('2d');
+        draw.fillStyle = '#00ff00'; draw.fillRect(0, 0, 3, 2);
+        // The placeholder shows the offscreen bitmap, so drawing it copies those pixels.
+        ctx.drawImage(placeholder, 0, 0);
+        return px(1, 0) === '0,255,0,255' || 'shown ' + px(1, 0);
+        "#,
+    );
+}
+
+#[test]
+fn filters_keep_valid_values_and_apply_before_shadows_and_compositing() {
+    check(
+        30,
+        10,
+        r#"
+        if (ctx.filter !== 'none') return 'initial ' + ctx.filter;
+        ctx.filter = 'blur(  5px)';
+        for (const invalid of ['blur(10)', 'blur 10px', 'inherit', 'initial', 'unset', '', null, undefined])
+          { ctx.filter = invalid; if (ctx.filter !== 'blur(  5px)') return 'invalid ' + invalid + ' ' + ctx.filter; }
+        ctx.save(); ctx.filter = 'none'; ctx.restore();
+        if (ctx.filter !== 'blur(  5px)') return 'restore ' + ctx.filter;
+        ctx.filter = 'invert(1)';
+        ctx.fillStyle = '#ff0000';
+        ctx.fillRect(0, 0, 5, 5);
+        if (px(2, 2) !== '0,255,255,255') return 'invert ' + px(2, 2);
+        ctx.filter = 'drop-shadow(10px 0 0 #00ff00)';
+        ctx.fillStyle = '#0000ff';
+        ctx.fillRect(10, 0, 5, 5);
+        if (px(12, 2) !== '0,0,255,255' || px(22, 2) !== '0,255,0,255') return 'drop-shadow ' + px(12, 2) + ' ' + px(22, 2);
+        ctx.filter = 'blur(2px)';
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 8, 2, 2);
+        // The blur spreads alpha beyond the rectangle's edge.
+        return px(4, 8).split(',')[3] !== '0' || 'blur ' + px(4, 8);
+        "#,
+    );
+}
+
+#[test]
+fn capture_stream_returns_a_canvas_video_track_that_follows_the_canvas_size() {
+    check(
+        16,
+        9,
+        r#"
+        const stream = canvas.captureStream();
+        if (!(stream instanceof MediaStream) || !stream.active) return 'stream';
+        const tracks = stream.getTracks();
+        if (tracks.length !== 1 || stream.getVideoTracks().length !== 1) return 'tracks ' + tracks.length;
+        const [track] = tracks;
+        if (!(track instanceof CanvasCaptureMediaStreamTrack) || !(track instanceof MediaStreamTrack)) return 'class';
+        if (track.kind !== 'video' || track.readyState !== 'live' || track.canvas !== canvas) return 'track';
+        if (String(track) !== '[object CanvasCaptureMediaStreamTrack]') return String(track);
+        if (track.requestFrame() !== undefined) return 'requestFrame';
+        if (Object.keys(globalThis).includes('CanvasCaptureMediaStreamTrack') || CanvasCaptureMediaStreamTrack.length !== 0) return 'interface';
+        const enumerable = (object, name) => Object.getOwnPropertyDescriptor(object, name).enumerable;
+        if (!enumerable(CanvasCaptureMediaStreamTrack.prototype, 'canvas') || !enumerable(HTMLCanvasElement.prototype, 'captureStream')) return 'members';
+        let settings = track.getSettings();
+        if (settings.width !== 16 || settings.height !== 9 || 'frameRate' in settings) return JSON.stringify(settings);
+        canvas.width = 20; canvas.height = 10;
+        settings = track.getSettings();
+        if (settings.width !== 20 || settings.height !== 10) return 'resize ' + JSON.stringify(settings);
+        if (canvas.captureStream(30).getTracks()[0].getSettings().frameRate !== 30) return 'frameRate';
+        if (canvas.captureStream().getTracks()[0] === track) return 'new track per call';
+        const copy = track.clone();
+        if (!(copy instanceof CanvasCaptureMediaStreamTrack) || copy.canvas !== canvas || copy.id === track.id) return 'clone';
+        track.stop();
+        if (track.readyState !== 'ended' || stream.active || copy.readyState !== 'live') return 'stop';
+        const name = call => { try { call(); return 'none'; } catch (error) { return error.name; } };
+        const errors = [
+          name(() => canvas.captureStream(-1)), name(() => canvas.captureStream(NaN)),
+          name(() => new CanvasCaptureMediaStreamTrack()),
+          name(() => CanvasCaptureMediaStreamTrack.prototype.requestFrame.call({})),
+          name(() => HTMLCanvasElement.prototype.captureStream.call(null)),
+        ].join();
+        return errors === 'NotSupportedError,TypeError,TypeError,TypeError,TypeError' || errors;
+        "#,
+    );
+}

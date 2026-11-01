@@ -179,6 +179,17 @@ pub use media_session::{
     DeterministicMediaSessionProvider, MediaSessionArtwork, MediaSessionArtworkFetch,
     MediaSessionMetadata, MediaSessionPositionState, MediaSessionProvider, MediaSessionSnapshot,
 };
+mod web_speech;
+pub use web_speech::{
+    DeterministicWebSpeechProvider, SpeechRecognitionFailure, SpeechRecognitionPhrase,
+    SpeechRecognitionRequest, SpeechSynthesisRequest, SpeechVoice, WebSpeechCommand,
+    WebSpeechProvider,
+};
+mod web_codecs;
+pub use web_codecs::{
+    DeterministicWebCodecsProvider, WebCodecConfig, WebCodecError, WebCodecKind, WebCodecOutput,
+    WebCodecPacket, WebCodecsProvider,
+};
 mod automation;
 #[cfg(test)]
 mod cross_origin_focus_tests;
@@ -2409,7 +2420,9 @@ struct HostState {
     geolocation: geolocation::State,
     media_capture: media_capture::State,
     media_source: media_source::State,
+    web_codecs: web_codecs::State,
     media_session: media_session::State,
+    web_speech: web_speech::State,
     compression_streams: compression_stream::Store,
     http_client: Client,
     /// Lazily started HTTP worker for best-effort CSP/Reporting delivery.
@@ -3393,7 +3406,9 @@ impl HostState {
             geolocation: geolocation::State::default(),
             media_capture: media_capture::State::default(),
             media_source: media_source::State::default(),
+            web_codecs: web_codecs::State::default(),
             media_session: media_session::State::default(),
+            web_speech: web_speech::State::default(),
             compression_streams: compression_stream::Store::new(),
             http_client,
             report_delivery: None,
@@ -16630,7 +16645,9 @@ fn register_host_bindings(
     geolocation::register(context, &mut bindings)?;
     media_capture::register(context, &mut bindings)?;
     media_source::register(context, &mut bindings)?;
+    web_codecs::register(context, &mut bindings)?;
     media_session::register(context, &mut bindings)?;
+    web_speech::register(context, &mut bindings)?;
     permissions_policy::register(context, &mut bindings)?;
     broadcast_channel::register(context, &mut bindings)?;
     web_locks::register(context, &mut bindings)?;
@@ -17461,6 +17478,11 @@ fn register_host_bindings(
             js_string!("__omoikane_canvas_parse_color"),
             1,
             NativeFunction::from_copy_closure(canvas2d::parse_color_native),
+        ),
+        (
+            js_string!("__omoikane_canvas_parse_filter"),
+            1,
+            NativeFunction::from_copy_closure(canvas2d::parse_filter_native),
         ),
         (
             js_string!("__omoikane_canvas_parse_font"),

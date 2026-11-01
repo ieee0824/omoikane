@@ -882,6 +882,37 @@ fn worklet_module_count_native(
     })
 }
 
+fn worklet_process_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id = worker_id_argument(args, context)?;
+    let request = string_argument(args.get(1), "{}", context)?;
+    with_host_state(|owner_state| {
+        let document = owner_state
+            .borrow()
+            .csp_document_for_context(context)?
+            .identity();
+        let runtime = owner_state.borrow().worklet.runtime_for_id(id, document);
+        let Some(runtime) = runtime else {
+            return Ok(js_string!(r#"{"ok":false}"#).into());
+        };
+        let expression = format!(
+            "__omoikane_audio_process({})",
+            serde_json::to_string(&request).unwrap_or_else(|_| "\"{}\"".to_string())
+        );
+        let mut runtime = runtime.borrow_mut();
+        let value = runtime.eval(&expression).map_err(|error| {
+            JsNativeError::error().with_message(format!("AudioWorklet processor failed: {error}"))
+        })?;
+        let encoded = value
+            .to_string(&mut runtime.context)?
+            .to_std_string_escaped();
+        Ok(js_string!(encoded).into())
+    })
+}
+
 fn worklet_teardown_native(
     _: &JsValue,
     args: &[JsValue],
@@ -926,6 +957,11 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
             js_string!("__omoikane_worklet_module_count"),
             1,
             NativeFunction::from_copy_closure(worklet_module_count_native),
+        ),
+        (
+            js_string!("__omoikane_worklet_process"),
+            2,
+            NativeFunction::from_copy_closure(worklet_process_native),
         ),
         (
             js_string!("__omoikane_worklet_teardown"),

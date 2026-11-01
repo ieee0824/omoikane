@@ -3296,6 +3296,67 @@ fn canvas_2d_pixels_transform_clip_image_data_draw_image_and_png() {
 }
 
 #[test]
+fn canvas_origin_clean_taints_propagates_and_resets() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut image = crate::paint::Canvas::new(1, 1);
+    image.set_pixel(0, 0, crate::paint::Color::rgb(1, 2, 3));
+    let png = image.encode_png();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 1024];
+        let _ = std::io::Read::read(&mut stream, &mut request);
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            png.len()
+        )
+        .unwrap();
+        std::io::Write::write_all(&mut stream, &png).unwrap();
+    });
+
+    let mut runtime = runtime_at_document_url("http://origin.test/page");
+    let result = eval_str(
+        &mut runtime,
+        &format!(
+            r#"(() => {{
+              const name = call => {{ try {{ call(); return 'none'; }} catch (error) {{ return error.name; }} }};
+              const image = document.createElement('img');
+              image.src = 'http://{address}/image.png';
+              if (image.crossOrigin !== null) return 'crossOrigin default';
+              const source = document.createElement('canvas'); source.width = source.height = 1;
+              const patternBefore = source.getContext('2d').createPattern(source, 'repeat');
+              source.getContext('2d').drawImage(image, 0, 0);
+              const target = document.createElement('canvas'); target.width = target.height = 1;
+              target.getContext('2d').drawImage(source, 0, 0);
+              const errors = [name(() => target.getContext('2d').getImageData(0, 0, 1, 1)),
+                name(() => target.toDataURL()), name(() => target.toBlob(() => {{}})),
+                name(() => target.captureStream())];
+              target.width = 1;
+              errors.push(name(() => target.toDataURL()));
+              const patternTarget = document.createElement('canvas');
+              const patternContext = patternTarget.getContext('2d');
+              patternContext.fillStyle = patternBefore; patternContext.fillRect(0, 0, 1, 1);
+              errors.push(name(() => patternTarget.toDataURL()));
+              const taintedPattern = source.getContext('2d').createPattern(source, 'repeat');
+              const clearTarget = document.createElement('canvas');
+              const clearContext = clearTarget.getContext('2d');
+              clearContext.fillStyle = taintedPattern; clearContext.clearRect(0, 0, 1, 1);
+              errors.push(name(() => clearTarget.toDataURL()));
+              patternContext.fillStyle = taintedPattern; patternContext.fillRect(0, 0, 1, 1);
+              errors.push(name(() => patternTarget.toDataURL()));
+              return errors.join();
+            }})()"#
+        ),
+    );
+    server.join().unwrap();
+    assert_eq!(
+        result,
+        "SecurityError,SecurityError,SecurityError,SecurityError,none,none,none,SecurityError"
+    );
+}
+
+#[test]
 fn canvas_clear_rect_clips_large_untransformed_rectangles() {
     let mut runtime = JsRuntime::new().unwrap();
     let result = eval_str(
@@ -3387,6 +3448,53 @@ fn webgl_canvas_context_state_resources_and_loss_boundary() {
         result,
         "function|true|true|true|255,64,128,255|true|true|1,2,3,4|true|true|12|true|true|true|true|true|true|true|true|true|true"
     );
+}
+
+#[test]
+fn webgl2_extends_the_software_context_with_owned_objects_and_state() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let result = eval_str(
+        &mut runtime,
+        r#"(() => {
+          const canvas = document.createElement('canvas');
+          canvas.width = 2; canvas.height = 1;
+          const gl = canvas.getContext('webgl2', {alpha:false, stencil:true, powerPreference:'low-power'});
+          const shape = gl instanceof WebGL2RenderingContext && gl instanceof WebGLRenderingContext &&
+            gl.getContextAttributes().alpha === false && gl.getContextAttributes().stencil === true &&
+            gl.getContextAttributes().powerPreference === 'low-power' && canvas.getContext('webgl') === null;
+          const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+          const feedback = gl.createTransformFeedback(); gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, feedback);
+          gl.beginTransformFeedback(gl.POINTS); gl.pauseTransformFeedback(); gl.resumeTransformFeedback(); gl.endTransformFeedback();
+          const query = gl.createQuery(); gl.beginQuery(gl.ANY_SAMPLES_PASSED, query);
+          const queryBound = gl.getQuery(gl.ANY_SAMPLES_PASSED, gl.CURRENT_QUERY) === query;
+          gl.endQuery(gl.ANY_SAMPLES_PASSED);
+          const sampler = gl.createSampler(); gl.samplerParameteri(sampler, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE); gl.bindSampler(0, sampler);
+          const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+          const objects = vao instanceof WebGLVertexArrayObject && vao instanceof WebGLObject &&
+            feedback instanceof WebGLTransformFeedback && query instanceof WebGLQuery && sampler instanceof WebGLSampler && sync instanceof WebGLSync;
+          gl.bindTransformFeedback(0xdead, feedback);
+          const invalidEnum = gl.getError() === gl.INVALID_ENUM;
+          const state = gl.getParameter(gl.VERTEX_ARRAY_BINDING) === vao &&
+            gl.getParameter(gl.TRANSFORM_FEEDBACK_BINDING) === feedback && queryBound &&
+            gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE) === true &&
+            gl.getSamplerParameter(sampler, gl.TEXTURE_WRAP_R) === gl.CLAMP_TO_EDGE &&
+            gl.getParameter(gl.SAMPLER_BINDING) === sampler &&
+            gl.getSyncParameter(sync, gl.SYNC_STATUS) === gl.SIGNALED &&
+            gl.clientWaitSync(sync, 0, 0) === gl.ALREADY_SIGNALED;
+          gl.clearBufferfv(gl.COLOR, 0, new Float32Array([0.25, 0.5, 1, 1]));
+          const pixels = new Uint8Array(4); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+          const clear = Array.from(pixels).join(',') === '64,128,255,255';
+          const other = document.createElement('canvas').getContext('webgl2');
+          other.bindVertexArray(vao);
+          const ownership = other.getError() === other.INVALID_OPERATION;
+          gl.deleteVertexArray(vao); gl.deleteTransformFeedback(feedback); gl.deleteQuery(query); gl.deleteSampler(sampler); gl.deleteSync(sync);
+          const deleted = !gl.isVertexArray(vao) && !gl.isTransformFeedback(feedback) && !gl.isQuery(query) && !gl.isSampler(sampler) && !gl.isSync(sync);
+          const offscreen = new OffscreenCanvas(1, 1).getContext('webgl2') instanceof WebGL2RenderingContext;
+          const strings = String(gl) === '[object WebGL2RenderingContext]' && gl.getParameter(gl.VERSION).startsWith('WebGL 2.0');
+          return [shape, objects, invalidEnum, state, clear, ownership, deleted, offscreen, strings].join('|');
+        })()"#,
+    );
+    assert_eq!(result, "true|true|true|true|true|true|true|true|true");
 }
 
 #[test]
@@ -17624,6 +17732,93 @@ fn web_audio_models_context_state_param_automation_and_node_lifecycle() {
 }
 
 #[test]
+fn offline_audio_context_renders_the_existing_graph_deterministically() {
+    let mut runtime = runtime_from_html("<html><body></body></html>");
+    runtime.eval(r#"
+        globalThis.offlineEvents = [];
+        const context = new OfflineAudioContext({numberOfChannels: 2, length: 480, sampleRate: 48000});
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.frequency.value = 1000;
+        gain.gain.value = 0.5;
+        oscillator.connect(gain).connect(context.destination);
+        oscillator.start(0); oscillator.stop(0.005);
+        context.oncomplete = event => offlineEvents.push('complete:' + event.renderedBuffer.length);
+        context.startRendering().then(buffer => {
+          offlineEvents.push('promise:' + context.state + ':' + buffer.numberOfChannels);
+          globalThis.offlineSample = buffer.getChannelData(0)[12];
+          globalThis.offlineSilent = buffer.getChannelData(0)[300];
+        });
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "offlineEvents.join(',')"),
+        "complete:480,promise:closed:2"
+    );
+    assert!((eval_num(&mut runtime, "offlineSample") - 0.5).abs() < 0.0001);
+    assert_eq!(eval_num(&mut runtime, "offlineSilent"), 0.0);
+}
+
+#[test]
+fn offline_audio_context_suspends_on_a_render_quantum_and_decodes_pcm_wave() {
+    let mut runtime = runtime_from_html("<html><body></body></html>");
+    runtime.eval(r#"
+        globalThis.offlineOrder = [];
+        const context = new OfflineAudioContext(1, 384, 48000);
+        context.suspend(129 / 48000).then(() => {
+          offlineOrder.push('suspended:' + context.currentTime + ':' + context.state);
+          return context.resume();
+        }).then(() => offlineOrder.push('resumed'));
+        context.startRendering().then(() => offlineOrder.push('complete:' + context.state));
+
+        const wave = new ArrayBuffer(48);
+        const bytes = new Uint8Array(wave);
+        const view = new DataView(wave);
+        const text = (offset, value) => { for (let index = 0; index < value.length; index++) bytes[offset + index] = value.charCodeAt(index); };
+        text(0, 'RIFF'); view.setUint32(4, 40, true); text(8, 'WAVE'); text(12, 'fmt ');
+        view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+        view.setUint32(24, 8000, true); view.setUint32(28, 16000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+        text(36, 'data'); view.setUint32(40, 4, true); view.setInt16(44, 16384, true); view.setInt16(46, -16384, true);
+        const decoderContext = new OfflineAudioContext(1, 1, 8000);
+        decoderContext.decodeAudioData(wave).then(buffer => globalThis.decodedAudio = [buffer.length, buffer.sampleRate,
+          buffer.getChannelData(0)[0], buffer.getChannelData(0)[1]].join('|'));
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "offlineOrder.join(',')"),
+        "suspended:0.0026666666666666666:suspended,resumed,complete:closed"
+    );
+    assert_eq!(eval_str(&mut runtime, "decodedAudio"), "2|8000|0.5|-0.5");
+}
+
+#[test]
+fn audio_worklet_reuses_the_worklet_runtime_and_registers_nodes() {
+    let mut runtime = runtime_from_html("<html><body></body></html>");
+    runtime.eval(r#"
+        globalThis.workletResult = [];
+        const context = new OfflineAudioContext(1, 128, 48000);
+        const source = encodeURIComponent(`registerProcessor('fixture', class extends AudioWorkletProcessor {
+          process(inputs, outputs) { outputs[0][0].fill(0.25); return true; }
+        })`);
+        context.audioWorklet.addModule('data:text/javascript,' + source)
+          .then(() => {
+            const node = new AudioWorkletNode(context, 'fixture');
+            node.connect(context.destination);
+            workletResult.push(node instanceof AudioNode, node.port instanceof MessagePort,
+              context.audioWorklet.registeredNames.join('|'));
+            return context.startRendering();
+          }).then(buffer => {
+            workletResult.push(buffer.getChannelData(0)[64]);
+          });
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "workletResult.join(',')"),
+        "true,true,fixture,0.25"
+    );
+}
+
+#[test]
 fn notifications_model_permission_and_task_queued_lifecycle() {
     let mut runtime = runtime_from_html("<html><body></body></html>");
     assert_eq!(eval_str(&mut runtime, "Notification.permission"), "default");
@@ -18334,6 +18529,237 @@ fn media_session_actions_use_host_dispatch_and_validate_state_boundaries() {
         !runtime
             .dispatch_media_session_action("seekto", serde_json::json!({"seekTime": 8}))
             .unwrap()
+    );
+}
+
+#[test]
+fn web_speech_synthesis_queues_owned_requests_and_advances_on_host_events() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicWebSpeechProvider::new(vec![SpeechVoice {
+        voice_uri: "urn:omoikane:test-voice".to_string(),
+        name: "Test Voice".to_string(),
+        lang: "en-US".to_string(),
+        local_service: true,
+        default: true,
+    }]));
+    runtime.set_web_speech_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.speechEvents = [];
+               globalThis.firstSpeech = new SpeechSynthesisUtterance('first');
+               globalThis.secondSpeech = new SpeechSynthesisUtterance('second');
+               firstSpeech.voice = speechSynthesis.getVoices()[0];
+               firstSpeech.onstart = () => speechEvents.push('first:start');
+               firstSpeech.onend = () => speechEvents.push('first:end');
+               secondSpeech.onstart = () => speechEvents.push('second:start');
+               speechSynthesis.speak(firstSpeech);
+               speechSynthesis.speak(secondSpeech);"#,
+        )
+        .unwrap();
+    let commands = provider.commands();
+    assert_eq!(commands.len(), 1);
+    let WebSpeechCommand::Speak(first) = &commands[0] else {
+        panic!("expected first synthesis command")
+    };
+    assert_eq!(first.text, "first");
+    assert_eq!(first.voice_uri.as_deref(), Some("urn:omoikane:test-voice"));
+    runtime
+        .dispatch_speech_synthesis_event("start", serde_json::json!({}))
+        .unwrap();
+    runtime
+        .dispatch_speech_synthesis_event("end", serde_json::json!({"elapsedTime": 1.25}))
+        .unwrap();
+    assert_eq!(provider.commands().len(), 2);
+    assert_eq!(
+        eval_str(&mut runtime, "speechEvents.join(',')"),
+        "first:start,first:end"
+    );
+    runtime
+        .dispatch_speech_synthesis_event("start", serde_json::json!({}))
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "speechEvents.join(',')"),
+        "first:start,first:end,second:start"
+    );
+    drop(runtime);
+    assert!(matches!(
+        provider.commands().last(),
+        Some(WebSpeechCommand::Teardown)
+    ));
+}
+
+#[test]
+fn web_speech_recognition_reports_provider_failure_and_owns_configuration() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicWebSpeechProvider::default());
+    runtime.set_web_speech_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.recognitionEvents = [];
+               globalThis.recognition = new SpeechRecognition();
+               recognition.lang = 'ja-JP';
+               recognition.continuous = true;
+               recognition.interimResults = true;
+               recognition.maxAlternatives = 3;
+               recognition.phrases = [new SpeechRecognitionPhrase('omoikane', 2)];
+               recognition.onerror = event => recognitionEvents.push(event.error);
+               recognition.onend = () => recognitionEvents.push('end');
+               recognition.start();"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    let commands = provider.commands();
+    let WebSpeechCommand::StartRecognition(request) = &commands[0] else {
+        panic!("expected recognition request")
+    };
+    assert_eq!(request.lang, "ja-JP");
+    assert!(request.continuous);
+    assert_eq!(request.max_alternatives, 3);
+    assert_eq!(request.phrases[0].phrase, "omoikane");
+    assert_eq!(
+        eval_str(&mut runtime, "recognitionEvents.join(',')"),
+        "not-allowed,end"
+    );
+}
+
+#[test]
+fn web_speech_recognition_delivers_owned_results_and_one_end_event() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicWebSpeechProvider::accepting(Vec::new()));
+    runtime.set_web_speech_provider(provider);
+    runtime
+        .eval(
+            r#"globalThis.acceptedRecognitionEvents = [];
+               globalThis.acceptedRecognition = new SpeechRecognition();
+               acceptedRecognition.onstart = () => acceptedRecognitionEvents.push('start');
+               acceptedRecognition.onresult = event => acceptedRecognitionEvents.push(
+                 event.results[0][0].transcript + ':' + event.results[0].isFinal
+               );
+               acceptedRecognition.onend = () => acceptedRecognitionEvents.push('end');
+               acceptedRecognition.start();"#,
+        )
+        .unwrap();
+    runtime
+        .dispatch_speech_recognition_event(1, "start", serde_json::json!({}))
+        .unwrap();
+    runtime
+        .dispatch_speech_recognition_event(
+            1,
+            "result",
+            serde_json::json!({
+                "resultIndex": 0,
+                "results": [{
+                    "isFinal": true,
+                    "alternatives": [{"transcript": "hello", "confidence": 0.9}]
+                }]
+            }),
+        )
+        .unwrap();
+    runtime
+        .dispatch_speech_recognition_event(1, "end", serde_json::json!({}))
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "acceptedRecognitionEvents.join(',')"),
+        "start,hello:true,end"
+    );
+}
+
+#[test]
+fn web_codecs_chunks_frames_and_audio_own_their_input_bytes() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            r#"globalThis.codecValues = {};
+               const chunkInput = new Uint8Array([1,2,3]);
+               const chunk = new EncodedVideoChunk({type:'key', timestamp:12, duration:4, data:chunkInput});
+               chunkInput[0] = 9;
+               const chunkCopy = new Uint8Array(3); chunk.copyTo(chunkCopy);
+               const frameInput = new Uint8Array([1,2,3,4,5,6,7,8]);
+               const frame = new VideoFrame(frameInput, {format:'RGBA', codedWidth:2, codedHeight:1, timestamp:-2});
+               const frameClone = frame.clone(); frame.close();
+               const audioInput = new Float32Array([0.25,-0.5]);
+               const audio = new AudioData({format:'f32', sampleRate:8000, numberOfFrames:2, numberOfChannels:1, timestamp:7, data:audioInput});
+               audioInput[0] = 1;
+               const audioCopy = new Float32Array(2); audio.copyTo(audioCopy, {planeIndex:0});
+               const clonedChunk = structuredClone(chunk);
+               const clonedChunkCopy = new Uint8Array(3); clonedChunk.copyTo(clonedChunkCopy);
+               const transferredFrame = structuredClone(frameClone, {transfer:[frameClone]});
+               const transferredAudio = structuredClone(audio, {transfer:[audio]});
+               Object.assign(codecValues, {
+                 chunk: Array.from(chunkCopy).join(','), frameClosed: frame.format === null,
+                 clonedChunk: Array.from(clonedChunkCopy).join(','),
+                 transferredWidth: transferredFrame.codedWidth, frameCloneClosed: frameClone.format === null,
+                 audio: Array.from(audioCopy).join(','), audioClosed: audio.format === null,
+                 transferredAudioDuration: transferredAudio.duration,
+                 color: new VideoColorSpace({primaries:'bt709'}).toJSON().primaries
+               });"#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "JSON.stringify(codecValues)"),
+        r#"{"chunk":"1,2,3","frameClosed":true,"clonedChunk":"1,2,3","transferredWidth":2,"frameCloneClosed":true,"audio":"0.25,-0.5","audioClosed":true,"transferredAudioDuration":250,"color":"bt709"}"#
+    );
+}
+
+#[test]
+fn web_codecs_provider_controls_support_queue_output_and_flush() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_web_codecs_provider(Arc::new(DeterministicWebCodecsProvider::new(["raw-test"])));
+    runtime
+        .eval(
+            r#"globalThis.codecEvents = [];
+               globalThis.decoder = new VideoDecoder({
+                 output(frame) { codecEvents.push('output:' + frame.timestamp + ':' + frame.codedWidth); frame.close(); },
+                 error(error) { codecEvents.push('error:' + error.name); }
+               });
+               VideoDecoder.isConfigSupported({codec:'raw-test', codedWidth:2, codedHeight:1}).then(result => codecEvents.push('support:' + result.supported));
+               decoder.ondequeue = () => codecEvents.push('dequeue');
+               decoder.configure({codec:'raw-test', codedWidth:2, codedHeight:1});
+               decoder.decode(new EncodedVideoChunk({type:'key', timestamp:33, data:new Uint8Array([1,2,3,4,5,6,7,8])}));
+               codecEvents.push('queued:' + decoder.decodeQueueSize);
+               decoder.flush().then(() => codecEvents.push('flush'));
+               globalThis.unsupported = new AudioEncoder({output(){}, error(error){codecEvents.push('unsupported:' + error.name)}});
+               unsupported.configure({codec:'missing', sampleRate:48000, numberOfChannels:2});"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "codecEvents.join(',')"),
+        "queued:1,support:true,output:33:2,dequeue,unsupported:NotSupportedError,flush"
+    );
+    assert_eq!(eval_str(&mut runtime, "decoder.state"), "configured");
+    assert_eq!(eval_str(&mut runtime, "unsupported.state"), "closed");
+}
+
+#[test]
+fn web_codecs_image_decoder_uses_provider_capabilities_and_owned_data() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_web_codecs_provider(Arc::new(DeterministicWebCodecsProvider::new([
+        "image/x-omoikane-rgba",
+    ])));
+    runtime
+        .eval(
+            r#"globalThis.imageCodec = [];
+               const source = new Uint8Array([10,20,30,255]);
+               const decoder = new ImageDecoder({type:'image/x-omoikane-rgba', data:source, desiredWidth:1, desiredHeight:1});
+               source[0] = 99;
+               Promise.all([
+                 ImageDecoder.isTypeSupported('image/x-omoikane-rgba'),
+                 ImageDecoder.isTypeSupported('image/png'),
+                 decoder.decode()
+               ]).then(([supported, unsupported, result]) => {
+                 const copy = new Uint8Array(4);
+                 return result.image.copyTo(copy).then(() => {
+                   imageCodec.push(supported, unsupported, decoder.complete, result.complete, copy[0]);
+                   result.image.close(); decoder.close();
+                 });
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "imageCodec.join(',')"),
+        "true,false,true,true,10"
     );
 }
 

@@ -53,10 +53,20 @@ collect_pattern "/picture-in-picture/" "/common/media.js" "/media/movie_5.mp4" "
 collect_pattern "/webvtt/" "/html/semantics/embedded-content/media-elements/track/"
 # Media capture streams and deterministic MediaRecorder behavior (#1612).
 collect_pattern "/mediacapture-streams/" "/mediacapture-record/"
+# Canvas capture streams (#1292).
+collect_pattern "/mediacapture-fromelement/"
+# WebGL 2 IDL and deterministic software-context contracts (#1644).
+collect_pattern "/webgl/"
 # Media Source Extensions state, object URL, and SourceBuffer contracts (#1613).
 collect_pattern "/media-source/"
 # Media Session metadata, playback, position, and action-handler contracts (#1618).
 collect_pattern "/mediasession/"
+# Web Speech synthesis and recognition contracts (#1619).
+collect_pattern "/speech-api/"
+# WebCodecs data containers and provider-independent API contracts (#1616).
+collect_pattern "/webcodecs/"
+# OfflineAudioContext and AudioWorklet graph/runtime contracts (#1617).
+collect_pattern "/webaudio/"
 collect_pattern "/common/performance-timeline-utils.js" "/common/performance-timeline-utils.js.headers"
 collect_pattern "/paint-timing/" "/largest-contentful-paint/" "/server-timing/" "/longtask-timing/" "/event-timing/" "/layout-instability/" "/images/"
 collect_pattern \
@@ -695,6 +705,7 @@ collect_pattern \
   "/navigation-api/navigation-methods/navigate-info-and-state.html"
 # Canvas 2D drawing (#1292).
 collect_pattern "/html/canvas/element/" "/html/canvas/resources/" "/images/" "/fonts/CanvasTest*.ttf" "/fonts/Lato-Medium.ttf" "/fonts/pass.woff" "/fonts/fail.woff"
+collect_pattern "/html/semantics/embedded-content/the-canvas-element/"
 # A pinned revision alone does not prove that newly requested WPT paths exist.
 if [[ "$current_revision" == "$revision" ]] &&
   diff -q <(printf '%s\n' "${patterns[@]}" | LC_ALL=C sort -u) \
