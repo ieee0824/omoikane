@@ -1,0 +1,31 @@
+{
+  "scope": "Original ON binaries; constant_function instruction offset 0xa8",
+  "method": "ADRP page plus LDR immediate gives slot; readelf -rW exact relocation offset; nm -S -C exact addend address (all aliases retained)",
+  "baseline": {
+    "binary_sha256": "6c662da545799eff93ba0cd36db4c1841c1fc698ed1e16d4a30b218d9679c6ac",
+    "adrp_page": "0x147f000",
+    "ldr_immediate": 3008,
+    "slot": "0x147fbc0",
+    "relocation": "000000000147fbc0  0000000000000403 R_AARCH64_RELATIVE                        e0be6c",
+    "target": "0xe0be6c",
+    "target_size": 96,
+    "symbols": ["<u64 as core::fmt::Display>::fmt", "<usize as core::fmt::Display>::fmt"]
+  },
+  "candidate": {
+    "binary_sha256": "1d71fc066c9d2c3f5494550484cd3f1eb8e8f2cbbd24574319a198f50c4d75cd",
+    "adrp_page": "0x147f000",
+    "ldr_immediate": 3016,
+    "slot": "0x147fbc8",
+    "relocation": "000000000147fbc8  0000000000000403 R_AARCH64_RELATIVE                        e0adac",
+    "target": "0xe0adac",
+    "target_size": 96,
+    "symbols": ["<u64 as core::fmt::Display>::fmt", "<usize as core::fmt::Display>::fmt"]
+  },
+  "source": {
+    "revision": "c2bc5b380971ff319af2127d4c8caff7ca07801d",
+    "path": "engine/boa/core/engine/src/vm/code_block.rs",
+    "lines": [318, 323],
+    "panic": "expected function constant at index {index}"
+  },
+  "interpretation": "Formatting-function relocation on the panic path, not an ordinary constant lookup arithmetic change. This does not identify the performance cause or prove every transitive callee identical."
+}
