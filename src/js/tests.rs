@@ -18338,6 +18338,138 @@ fn media_session_actions_use_host_dispatch_and_validate_state_boundaries() {
 }
 
 #[test]
+fn web_speech_synthesis_queues_owned_requests_and_advances_on_host_events() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicWebSpeechProvider::new(vec![SpeechVoice {
+        voice_uri: "urn:omoikane:test-voice".to_string(),
+        name: "Test Voice".to_string(),
+        lang: "en-US".to_string(),
+        local_service: true,
+        default: true,
+    }]));
+    runtime.set_web_speech_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.speechEvents = [];
+               globalThis.firstSpeech = new SpeechSynthesisUtterance('first');
+               globalThis.secondSpeech = new SpeechSynthesisUtterance('second');
+               firstSpeech.voice = speechSynthesis.getVoices()[0];
+               firstSpeech.onstart = () => speechEvents.push('first:start');
+               firstSpeech.onend = () => speechEvents.push('first:end');
+               secondSpeech.onstart = () => speechEvents.push('second:start');
+               speechSynthesis.speak(firstSpeech);
+               speechSynthesis.speak(secondSpeech);"#,
+        )
+        .unwrap();
+    let commands = provider.commands();
+    assert_eq!(commands.len(), 1);
+    let WebSpeechCommand::Speak(first) = &commands[0] else {
+        panic!("expected first synthesis command")
+    };
+    assert_eq!(first.text, "first");
+    assert_eq!(first.voice_uri.as_deref(), Some("urn:omoikane:test-voice"));
+    runtime
+        .dispatch_speech_synthesis_event("start", serde_json::json!({}))
+        .unwrap();
+    runtime
+        .dispatch_speech_synthesis_event("end", serde_json::json!({"elapsedTime": 1.25}))
+        .unwrap();
+    assert_eq!(provider.commands().len(), 2);
+    assert_eq!(
+        eval_str(&mut runtime, "speechEvents.join(',')"),
+        "first:start,first:end"
+    );
+    runtime
+        .dispatch_speech_synthesis_event("start", serde_json::json!({}))
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "speechEvents.join(',')"),
+        "first:start,first:end,second:start"
+    );
+    drop(runtime);
+    assert!(matches!(
+        provider.commands().last(),
+        Some(WebSpeechCommand::Teardown)
+    ));
+}
+
+#[test]
+fn web_speech_recognition_reports_provider_failure_and_owns_configuration() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicWebSpeechProvider::default());
+    runtime.set_web_speech_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.recognitionEvents = [];
+               globalThis.recognition = new SpeechRecognition();
+               recognition.lang = 'ja-JP';
+               recognition.continuous = true;
+               recognition.interimResults = true;
+               recognition.maxAlternatives = 3;
+               recognition.phrases = [new SpeechRecognitionPhrase('omoikane', 2)];
+               recognition.onerror = event => recognitionEvents.push(event.error);
+               recognition.onend = () => recognitionEvents.push('end');
+               recognition.start();"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    let commands = provider.commands();
+    let WebSpeechCommand::StartRecognition(request) = &commands[0] else {
+        panic!("expected recognition request")
+    };
+    assert_eq!(request.lang, "ja-JP");
+    assert!(request.continuous);
+    assert_eq!(request.max_alternatives, 3);
+    assert_eq!(request.phrases[0].phrase, "omoikane");
+    assert_eq!(
+        eval_str(&mut runtime, "recognitionEvents.join(',')"),
+        "not-allowed,end"
+    );
+}
+
+#[test]
+fn web_speech_recognition_delivers_owned_results_and_one_end_event() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicWebSpeechProvider::accepting(Vec::new()));
+    runtime.set_web_speech_provider(provider);
+    runtime
+        .eval(
+            r#"globalThis.acceptedRecognitionEvents = [];
+               globalThis.acceptedRecognition = new SpeechRecognition();
+               acceptedRecognition.onstart = () => acceptedRecognitionEvents.push('start');
+               acceptedRecognition.onresult = event => acceptedRecognitionEvents.push(
+                 event.results[0][0].transcript + ':' + event.results[0].isFinal
+               );
+               acceptedRecognition.onend = () => acceptedRecognitionEvents.push('end');
+               acceptedRecognition.start();"#,
+        )
+        .unwrap();
+    runtime
+        .dispatch_speech_recognition_event(1, "start", serde_json::json!({}))
+        .unwrap();
+    runtime
+        .dispatch_speech_recognition_event(
+            1,
+            "result",
+            serde_json::json!({
+                "resultIndex": 0,
+                "results": [{
+                    "isFinal": true,
+                    "alternatives": [{"transcript": "hello", "confidence": 0.9}]
+                }]
+            }),
+        )
+        .unwrap();
+    runtime
+        .dispatch_speech_recognition_event(1, "end", serde_json::json!({}))
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "acceptedRecognitionEvents.join(',')"),
+        "start,hello:true,end"
+    );
+}
+
+#[test]
 fn match_media_evaluates_current_viewport() {
     let doc = NodeHandle::document();
     let mut runtime = JsRuntime::with_document(doc).unwrap();

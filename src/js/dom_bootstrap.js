@@ -29614,6 +29614,279 @@ let omoikaneUserActivationState;
     }
   }
 
+  const speechUtteranceState = new WeakMap();
+  const speechRecognitionState = new WeakMap();
+  const speechRecognitionSessions = new Map();
+  let nextSpeechUtteranceId = 1;
+  let nextSpeechRecognitionId = 1;
+  const speechErrorCodes = new Set([
+    "canceled", "interrupted", "audio-busy", "audio-hardware", "network",
+    "synthesis-unavailable", "synthesis-failed", "language-unavailable",
+    "voice-unavailable", "text-too-long", "invalid-argument", "not-allowed",
+  ]);
+  const recognitionErrorCodes = new Set([
+    "no-speech", "aborted", "audio-capture", "network", "not-allowed",
+    "service-not-allowed", "bad-grammar", "language-not-supported",
+  ]);
+  function speechEventHandler(prototype, type) {
+    const key = `__on_${type}`;
+    Object.defineProperty(prototype, `on${type}`, {
+      enumerable: true, configurable: true,
+      get() { return this[key] || null; },
+      set(value) {
+        if (this[key]) this.removeEventListener(type, this[key]);
+        this[key] = typeof value === "function" ? value : null;
+        if (this[key]) this.addEventListener(type, this[key]);
+      },
+    });
+  }
+  class SpeechSynthesisVoice {
+    constructor(token, init) {
+      if (token !== speechConstructionToken) throw new TypeError("Illegal constructor");
+      Object.defineProperties(this, {
+        voiceURI: { value: String(init.voiceUri), enumerable: true },
+        name: { value: String(init.name), enumerable: true },
+        lang: { value: String(init.lang), enumerable: true },
+        localService: { value: Boolean(init.localService), enumerable: true },
+        default: { value: Boolean(init.default), enumerable: true },
+      });
+    }
+    get [Symbol.toStringTag]() { return "SpeechSynthesisVoice"; }
+  }
+  const speechConstructionToken = {};
+  class SpeechSynthesisUtterance extends EventTarget {
+    constructor(text = "") {
+      super();
+      speechUtteranceState.set(this, {
+        id: nextSpeechUtteranceId++, text: String(text), lang: "", voice: null,
+        volume: 1, rate: 1, pitch: 1, queued: false,
+      });
+    }
+    __state() { return speechUtteranceState.get(this) || illegalInvocation(); }
+    get text() { return this.__state().text; }
+    set text(value) { this.__state().text = String(value); }
+    get lang() { return this.__state().lang; }
+    set lang(value) { this.__state().lang = String(value); }
+    get voice() { return this.__state().voice; }
+    set voice(value) {
+      if (value !== null && !(value instanceof SpeechSynthesisVoice)) throw new TypeError("Invalid voice");
+      this.__state().voice = value;
+    }
+    get volume() { return this.__state().volume; }
+    set volume(value) { const n = Number(value); if (Number.isFinite(n) && n >= 0 && n <= 1) this.__state().volume = n; }
+    get rate() { return this.__state().rate; }
+    set rate(value) { const n = Number(value); if (Number.isFinite(n) && n >= 0.1 && n <= 10) this.__state().rate = n; }
+    get pitch() { return this.__state().pitch; }
+    set pitch(value) { const n = Number(value); if (Number.isFinite(n) && n >= 0 && n <= 2) this.__state().pitch = n; }
+    get [Symbol.toStringTag]() { return "SpeechSynthesisUtterance"; }
+  }
+  class SpeechSynthesisEvent extends Event {
+    constructor(type, init) {
+      if (arguments.length < 2 || init == null || init.utterance === undefined) throw new TypeError("utterance is required");
+      if (!(init.utterance instanceof SpeechSynthesisUtterance)) throw new TypeError("Invalid utterance");
+      super(String(type), init);
+      this.utterance = init.utterance;
+      this.charIndex = init.charIndex === undefined ? 0 : Number(init.charIndex) >>> 0;
+      this.charLength = init.charLength === undefined ? 0 : Number(init.charLength) >>> 0;
+      this.elapsedTime = init.elapsedTime === undefined ? 0 : Number(init.elapsedTime);
+      this.name = init.name === undefined ? "" : String(init.name);
+    }
+    get [Symbol.toStringTag]() { return "SpeechSynthesisEvent"; }
+  }
+  class SpeechSynthesisErrorEvent extends SpeechSynthesisEvent {
+    constructor(type, init) {
+      if (init == null || init.error === undefined) throw new TypeError("error is required");
+      const error = String(init.error);
+      if (!speechErrorCodes.has(error)) throw new TypeError("Invalid speech synthesis error");
+      super(type, init);
+      this.error = error;
+    }
+    get [Symbol.toStringTag]() { return "SpeechSynthesisErrorEvent"; }
+  }
+  class SpeechGrammar {
+    constructor(token, src, weight) {
+      if (token !== speechConstructionToken) throw new TypeError("Illegal constructor");
+      this.src = src; this.weight = weight;
+    }
+    get [Symbol.toStringTag]() { return "SpeechGrammar"; }
+  }
+  class SpeechGrammarList {
+    constructor() { this.__items = []; }
+    get length() { return this.__items.length; }
+    item(index) { return this.__items[Number(index) >>> 0] || null; }
+    addFromURI(src, weight = 1) { this.__add(String(src), weight); }
+    addFromString(src, weight = 1) { this.__add(String(src), weight); }
+    __add(src, weight) {
+      const n = Number(weight);
+      if (!Number.isFinite(n) || n < 0 || n > 1) throw new TypeError("Invalid grammar weight");
+      const grammar = new SpeechGrammar(speechConstructionToken, src, n);
+      const index = this.__items.length;
+      this.__items.push(grammar);
+      Object.defineProperty(this, index, { value: grammar, enumerable: true, configurable: true });
+    }
+    get [Symbol.toStringTag]() { return "SpeechGrammarList"; }
+  }
+  class SpeechRecognitionPhrase {
+    constructor(phrase, boost = 1) {
+      if (arguments.length < 1) throw new TypeError("phrase is required");
+      this.phrase = String(phrase);
+      this.boost = Number(boost);
+      if (!Number.isFinite(this.boost) || this.boost <= 0) throw new TypeError("Invalid phrase boost");
+    }
+    get [Symbol.toStringTag]() { return "SpeechRecognitionPhrase"; }
+  }
+  class SpeechRecognitionAlternative {
+    constructor(token, transcript, confidence) {
+      if (token !== speechConstructionToken) throw new TypeError("Illegal constructor");
+      this.transcript = transcript; this.confidence = confidence;
+    }
+  }
+  class SpeechRecognitionResult {
+    constructor(token, alternatives, isFinal) {
+      if (token !== speechConstructionToken) throw new TypeError("Illegal constructor");
+      alternatives.forEach((value, index) => Object.defineProperty(this, index, { value, enumerable: true }));
+      this.length = alternatives.length; this.isFinal = isFinal;
+    }
+    item(index) { return this[Number(index) >>> 0] || null; }
+  }
+  class SpeechRecognitionResultList {
+    constructor(token, results) {
+      if (token !== speechConstructionToken) throw new TypeError("Illegal constructor");
+      results.forEach((value, index) => Object.defineProperty(this, index, { value, enumerable: true }));
+      this.length = results.length;
+    }
+    item(index) { return this[Number(index) >>> 0] || null; }
+  }
+  class SpeechRecognitionEvent extends Event {
+    constructor(type, init = {}) {
+      super(String(type), init);
+      this.resultIndex = init.resultIndex === undefined ? 0 : Number(init.resultIndex) >>> 0;
+      this.results = init.results || new SpeechRecognitionResultList(speechConstructionToken, []);
+      this.interpretation = init.interpretation === undefined ? null : init.interpretation;
+      this.emma = init.emma === undefined ? null : init.emma;
+    }
+  }
+  class SpeechRecognitionErrorEvent extends Event {
+    constructor(type, init = {}) {
+      super(String(type), init);
+      const error = init.error === undefined ? "network" : String(init.error);
+      if (!recognitionErrorCodes.has(error)) throw new TypeError("Invalid recognition error");
+      this.error = error; this.message = init.message === undefined ? "" : String(init.message);
+    }
+  }
+  class SpeechRecognition extends EventTarget {
+    constructor() {
+      super();
+      speechRecognitionState.set(this, {
+        id: nextSpeechRecognitionId++, grammars: new SpeechGrammarList(), lang: "",
+        continuous: false, interimResults: false, maxAlternatives: 1,
+        processLocally: false, phrases: [], active: false,
+      });
+    }
+    __state() { return speechRecognitionState.get(this) || illegalInvocation(); }
+    get grammars() { return this.__state().grammars; }
+    set grammars(value) { if (!(value instanceof SpeechGrammarList)) throw new TypeError("Invalid grammars"); this.__state().grammars = value; }
+    get lang() { return this.__state().lang; } set lang(v) { this.__state().lang = String(v); }
+    get continuous() { return this.__state().continuous; } set continuous(v) { this.__state().continuous = Boolean(v); }
+    get interimResults() { return this.__state().interimResults; } set interimResults(v) { this.__state().interimResults = Boolean(v); }
+    get maxAlternatives() { return this.__state().maxAlternatives; }
+    set maxAlternatives(v) { this.__state().maxAlternatives = Number(v) >>> 0; }
+    get processLocally() { return this.__state().processLocally; } set processLocally(v) { this.__state().processLocally = Boolean(v); }
+    get phrases() { return this.__state().phrases; }
+    set phrases(v) { this.__state().phrases = Array.from(v, p => p instanceof SpeechRecognitionPhrase ? p : new SpeechRecognitionPhrase(p.phrase, p.boost)); }
+    start() {
+      const state = this.__state();
+      if (state.active) throw new DOMException("Recognition is already active", "InvalidStateError");
+      state.active = true; speechRecognitionSessions.set(state.id, this);
+      const error = __omoikane_web_speech("command", JSON.stringify({
+        kind: "start-recognition", id: state.id, lang: state.lang, continuous: state.continuous,
+        interimResults: state.interimResults, maxAlternatives: state.maxAlternatives,
+        processLocally: state.processLocally,
+        phrases: state.phrases.map(p => ({ phrase: p.phrase, boost: p.boost })),
+      }));
+      if (error) __omoikane_queue_dom_manipulation_task(() => {
+        if (!state.active) return;
+        this.dispatchEvent(new SpeechRecognitionErrorEvent("error", { error }));
+        this.__finish();
+      });
+    }
+    stop() { const s = this.__state(); if (s.active) __omoikane_web_speech("command", JSON.stringify({kind:"stop-recognition", id:s.id})); }
+    abort() { const s = this.__state(); if (s.active) { __omoikane_web_speech("command", JSON.stringify({kind:"abort-recognition", id:s.id})); this.__finish(); } }
+    __finish(emitEnd = true) { const s = this.__state(); if (!s.active) return; s.active = false; speechRecognitionSessions.delete(s.id); if (emitEnd) this.dispatchEvent(new Event("end")); }
+  }
+  for (const type of ["audiostart", "audioend", "end", "error", "nomatch", "result", "soundstart", "soundend", "speechstart", "speechend", "start"]) speechEventHandler(SpeechRecognition.prototype, type);
+  for (const type of ["boundary", "end", "error", "mark", "pause", "resume", "start"]) speechEventHandler(SpeechSynthesisUtterance.prototype, type);
+
+  const speechSynthesisQueue = [];
+  let speechSynthesisCurrent = null;
+  let speechSynthesisPaused = false;
+  function speechCommand(command) { return __omoikane_web_speech("command", JSON.stringify(command)); }
+  function startNextUtterance() {
+    if (speechSynthesisCurrent || speechSynthesisPaused || !speechSynthesisQueue.length) return;
+    speechSynthesisCurrent = speechSynthesisQueue[0];
+    const state = speechUtteranceState.get(speechSynthesisCurrent);
+    speechCommand({ kind:"speak", id:state.id, text:state.text, lang:state.lang,
+      voiceUri:state.voice ? state.voice.voiceURI : null, volume:state.volume, rate:state.rate, pitch:state.pitch });
+  }
+  const speechSynthesis = new class SpeechSynthesis extends EventTarget {
+    get pending() { return speechSynthesisQueue.length > (speechSynthesisCurrent ? 1 : 0); }
+    get speaking() { return speechSynthesisCurrent !== null; }
+    get paused() { return speechSynthesisPaused; }
+    getVoices() { return JSON.parse(__omoikane_web_speech("voices", "")).map(v => new SpeechSynthesisVoice(speechConstructionToken, v)); }
+    speak(utterance) {
+      const state = speechUtteranceState.get(utterance);
+      if (!state) throw new TypeError("speak requires SpeechSynthesisUtterance");
+      if (state.queued) throw new DOMException("Utterance is already queued", "InvalidStateError");
+      state.queued = true; speechSynthesisQueue.push(utterance); startNextUtterance();
+    }
+    cancel() {
+      speechCommand({kind:"cancel-synthesis"});
+      for (const utterance of speechSynthesisQueue.splice(0)) {
+        speechUtteranceState.get(utterance).queued = false;
+        utterance.dispatchEvent(new SpeechSynthesisErrorEvent("error", {utterance, error:"canceled"}));
+      }
+      speechSynthesisCurrent = null; speechSynthesisPaused = false;
+    }
+    pause() { if (!speechSynthesisPaused) { speechSynthesisPaused = true; speechCommand({kind:"pause-synthesis"}); } }
+    resume() { if (speechSynthesisPaused) { speechSynthesisPaused = false; speechCommand({kind:"resume-synthesis"}); startNextUtterance(); } }
+  }();
+  speechEventHandler(Object.getPrototypeOf(speechSynthesis), "voiceschanged");
+  globalThis.__omoikane_dispatch_speech_synthesis_event = function(type, details = {}) {
+    const utterance = speechSynthesisCurrent;
+    if (!utterance) return false;
+    const event = type === "error"
+      ? new SpeechSynthesisErrorEvent(type, {...details, utterance, error:details.error || "synthesis-failed"})
+      : new SpeechSynthesisEvent(type, {...details, utterance});
+    utterance.dispatchEvent(event);
+    if (type === "pause") speechSynthesisPaused = true;
+    if (type === "resume") speechSynthesisPaused = false;
+    if (type === "end" || type === "error") {
+      speechUtteranceState.get(utterance).queued = false;
+      if (speechSynthesisQueue[0] === utterance) speechSynthesisQueue.shift();
+      speechSynthesisCurrent = null; startNextUtterance();
+    }
+    return true;
+  };
+  globalThis.__omoikane_dispatch_speech_recognition_event = function(id, type, details = {}) {
+    const recognition = speechRecognitionSessions.get(Number(id));
+    if (!recognition) return false;
+    let event;
+    if (type === "error") event = new SpeechRecognitionErrorEvent(type, details);
+    else if (type === "result") {
+      const results = (details.results || []).map(result => new SpeechRecognitionResult(speechConstructionToken,
+        (result.alternatives || []).map(a => new SpeechRecognitionAlternative(speechConstructionToken, String(a.transcript || ""), Number(a.confidence || 0))), Boolean(result.isFinal)));
+      event = new SpeechRecognitionEvent(type, {...details, results:new SpeechRecognitionResultList(speechConstructionToken, results)});
+    } else event = new Event(type);
+    recognition.dispatchEvent(event);
+    if (type === "end") recognition.__finish(false);
+    else if (type === "error") recognition.__finish();
+    return true;
+  };
+  Object.assign(globalThis, { SpeechSynthesisUtterance, SpeechSynthesisEvent, SpeechSynthesisErrorEvent,
+    SpeechSynthesisVoice, SpeechGrammar, SpeechGrammarList, SpeechRecognition, SpeechRecognitionPhrase,
+    SpeechRecognitionEvent, SpeechRecognitionErrorEvent, SpeechRecognitionAlternative,
+    SpeechRecognitionResult, SpeechRecognitionResultList, speechSynthesis });
+
   const textTrackElementObjects = new WeakMap();
   const textTrackListObjects = new WeakMap();
   const cueConstructionToken = {};
