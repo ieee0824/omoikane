@@ -185,6 +185,11 @@ pub use web_speech::{
     SpeechRecognitionRequest, SpeechSynthesisRequest, SpeechVoice, WebSpeechCommand,
     WebSpeechProvider,
 };
+mod web_codecs;
+pub use web_codecs::{
+    DeterministicWebCodecsProvider, WebCodecConfig, WebCodecError, WebCodecKind, WebCodecOutput,
+    WebCodecPacket, WebCodecsProvider,
+};
 mod automation;
 #[cfg(test)]
 mod cross_origin_focus_tests;
@@ -2415,6 +2420,7 @@ struct HostState {
     geolocation: geolocation::State,
     media_capture: media_capture::State,
     media_source: media_source::State,
+    web_codecs: web_codecs::State,
     media_session: media_session::State,
     web_speech: web_speech::State,
     compression_streams: compression_stream::Store,
@@ -3400,6 +3406,7 @@ impl HostState {
             geolocation: geolocation::State::default(),
             media_capture: media_capture::State::default(),
             media_source: media_source::State::default(),
+            web_codecs: web_codecs::State::default(),
             media_session: media_session::State::default(),
             web_speech: web_speech::State::default(),
             compression_streams: compression_stream::Store::new(),
@@ -16638,6 +16645,7 @@ fn register_host_bindings(
     geolocation::register(context, &mut bindings)?;
     media_capture::register(context, &mut bindings)?;
     media_source::register(context, &mut bindings)?;
+    web_codecs::register(context, &mut bindings)?;
     media_session::register(context, &mut bindings)?;
     web_speech::register(context, &mut bindings)?;
     permissions_policy::register(context, &mut bindings)?;

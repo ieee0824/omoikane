@@ -18470,6 +18470,105 @@ fn web_speech_recognition_delivers_owned_results_and_one_end_event() {
 }
 
 #[test]
+fn web_codecs_chunks_frames_and_audio_own_their_input_bytes() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            r#"globalThis.codecValues = {};
+               const chunkInput = new Uint8Array([1,2,3]);
+               const chunk = new EncodedVideoChunk({type:'key', timestamp:12, duration:4, data:chunkInput});
+               chunkInput[0] = 9;
+               const chunkCopy = new Uint8Array(3); chunk.copyTo(chunkCopy);
+               const frameInput = new Uint8Array([1,2,3,4,5,6,7,8]);
+               const frame = new VideoFrame(frameInput, {format:'RGBA', codedWidth:2, codedHeight:1, timestamp:-2});
+               const frameClone = frame.clone(); frame.close();
+               const audioInput = new Float32Array([0.25,-0.5]);
+               const audio = new AudioData({format:'f32', sampleRate:8000, numberOfFrames:2, numberOfChannels:1, timestamp:7, data:audioInput});
+               audioInput[0] = 1;
+               const audioCopy = new Float32Array(2); audio.copyTo(audioCopy, {planeIndex:0});
+               const clonedChunk = structuredClone(chunk);
+               const clonedChunkCopy = new Uint8Array(3); clonedChunk.copyTo(clonedChunkCopy);
+               const transferredFrame = structuredClone(frameClone, {transfer:[frameClone]});
+               const transferredAudio = structuredClone(audio, {transfer:[audio]});
+               Object.assign(codecValues, {
+                 chunk: Array.from(chunkCopy).join(','), frameClosed: frame.format === null,
+                 clonedChunk: Array.from(clonedChunkCopy).join(','),
+                 transferredWidth: transferredFrame.codedWidth, frameCloneClosed: frameClone.format === null,
+                 audio: Array.from(audioCopy).join(','), audioClosed: audio.format === null,
+                 transferredAudioDuration: transferredAudio.duration,
+                 color: new VideoColorSpace({primaries:'bt709'}).toJSON().primaries
+               });"#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "JSON.stringify(codecValues)"),
+        r#"{"chunk":"1,2,3","frameClosed":true,"clonedChunk":"1,2,3","transferredWidth":2,"frameCloneClosed":true,"audio":"0.25,-0.5","audioClosed":true,"transferredAudioDuration":250,"color":"bt709"}"#
+    );
+}
+
+#[test]
+fn web_codecs_provider_controls_support_queue_output_and_flush() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_web_codecs_provider(Arc::new(DeterministicWebCodecsProvider::new(["raw-test"])));
+    runtime
+        .eval(
+            r#"globalThis.codecEvents = [];
+               globalThis.decoder = new VideoDecoder({
+                 output(frame) { codecEvents.push('output:' + frame.timestamp + ':' + frame.codedWidth); frame.close(); },
+                 error(error) { codecEvents.push('error:' + error.name); }
+               });
+               VideoDecoder.isConfigSupported({codec:'raw-test', codedWidth:2, codedHeight:1}).then(result => codecEvents.push('support:' + result.supported));
+               decoder.ondequeue = () => codecEvents.push('dequeue');
+               decoder.configure({codec:'raw-test', codedWidth:2, codedHeight:1});
+               decoder.decode(new EncodedVideoChunk({type:'key', timestamp:33, data:new Uint8Array([1,2,3,4,5,6,7,8])}));
+               codecEvents.push('queued:' + decoder.decodeQueueSize);
+               decoder.flush().then(() => codecEvents.push('flush'));
+               globalThis.unsupported = new AudioEncoder({output(){}, error(error){codecEvents.push('unsupported:' + error.name)}});
+               unsupported.configure({codec:'missing', sampleRate:48000, numberOfChannels:2});"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "codecEvents.join(',')"),
+        "queued:1,support:true,output:33:2,dequeue,unsupported:NotSupportedError,flush"
+    );
+    assert_eq!(eval_str(&mut runtime, "decoder.state"), "configured");
+    assert_eq!(eval_str(&mut runtime, "unsupported.state"), "closed");
+}
+
+#[test]
+fn web_codecs_image_decoder_uses_provider_capabilities_and_owned_data() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_web_codecs_provider(Arc::new(DeterministicWebCodecsProvider::new([
+        "image/x-omoikane-rgba",
+    ])));
+    runtime
+        .eval(
+            r#"globalThis.imageCodec = [];
+               const source = new Uint8Array([10,20,30,255]);
+               const decoder = new ImageDecoder({type:'image/x-omoikane-rgba', data:source, desiredWidth:1, desiredHeight:1});
+               source[0] = 99;
+               Promise.all([
+                 ImageDecoder.isTypeSupported('image/x-omoikane-rgba'),
+                 ImageDecoder.isTypeSupported('image/png'),
+                 decoder.decode()
+               ]).then(([supported, unsupported, result]) => {
+                 const copy = new Uint8Array(4);
+                 return result.image.copyTo(copy).then(() => {
+                   imageCodec.push(supported, unsupported, decoder.complete, result.complete, copy[0]);
+                   result.image.close(); decoder.close();
+                 });
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "imageCodec.join(',')"),
+        "true,false,true,true,10"
+    );
+}
+
+#[test]
 fn match_media_evaluates_current_viewport() {
     let doc = NodeHandle::document();
     let mut runtime = JsRuntime::with_document(doc).unwrap();
