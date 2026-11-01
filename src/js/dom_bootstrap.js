@@ -18587,6 +18587,15 @@ let omoikaneUserActivationState;
     set src(value) {
       this.setAttribute("src", String(value));
     }
+    get crossOrigin() {
+      const value = this.getAttribute("crossorigin");
+      if (value === null) return null;
+      return value.toLowerCase() === "use-credentials" ? "use-credentials" : "anonymous";
+    }
+    set crossOrigin(value) {
+      if (value === null) this.removeAttribute("crossorigin");
+      else this.setAttribute("crossorigin", intrinsicString(value));
+    }
     get height() {
       const attr = this.getAttribute("height");
       if (attr !== null && attr !== "") return Math.max(0, Number.parseInt(attr, 10) || 0);
@@ -18649,7 +18658,7 @@ let omoikaneUserActivationState;
   }
   function initialCanvasState(canvas) {
     const [width,height]=canvasDimensions(canvas);
-    return { width,height,pixels:new Uint8ClampedArray(width*height*4), context:null, webgl:null, contextMode:null,
+    return { width,height,pixels:new Uint8ClampedArray(width*height*4), originClean:true, context:null, webgl:null, contextMode:null,
       style:defaultCanvasStyle(), stack:[], path:newCanvasPath() };
   }
   function canvasState(canvas) {
@@ -19038,6 +19047,7 @@ let omoikaneUserActivationState;
     constructor(token, image, repetition) {
       if (token !== canvasConstructionToken) throw new TypeError("Illegal constructor");
       Object.defineProperty(this, "__image", { value: image });
+      Object.defineProperty(this, "__originClean", { value: image.originClean });
       Object.defineProperty(this, "__repetition", { value: repetition });
       Object.defineProperty(this, "__transform", { value: canvasIdentity.slice(), writable: true });
     }
@@ -19059,7 +19069,7 @@ let omoikaneUserActivationState;
     }
     if (source instanceof ImageBitmap) {
       if (source.__detached) throw new DOMException("The ImageBitmap is detached", "InvalidStateError");
-      return { width: source.width, height: source.height, pixels: source.__pixels };
+      return { width: source.width, height: source.height, pixels: source.__pixels, originClean: source.__originClean };
     }
     const isImage = typeof HTMLImageElement !== "undefined" && source instanceof HTMLImageElement;
     const isSvgImage = typeof SVGImageElement !== "undefined" && source instanceof SVGImageElement;
@@ -19074,7 +19084,20 @@ let omoikaneUserActivationState;
       throw new DOMException("Image source is unavailable", "InvalidStateError");
     }
     const decoded = JSON.parse(raw);
-    return { width: decoded.width, height: decoded.height, pixels: bytesFromBase64(decoded.pixels) };
+    return { width: decoded.width, height: decoded.height, pixels: bytesFromBase64(decoded.pixels),
+      originClean: canvasElementSourceOriginClean(source) };
+  }
+  function canvasElementSourceOriginClean(source) {
+    const raw = source && (source.getAttribute("src") || source.getAttribute("href"));
+    if (!raw || /^(?:data|blob):/i.test(raw)) return true;
+    try {
+      const sourceUrl = new URL(__omoikane_resolve_url(raw));
+      const documentUrl = new URL(source.ownerDocument && source.ownerDocument.URL || globalThis.location.href);
+      if (sourceUrl.origin === documentUrl.origin) return true;
+      return source instanceof HTMLImageElement && source.crossOrigin !== null;
+    } catch (_) {
+      return false;
+    }
   }
   function canvasBytes(pixels) { return new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength); }
   function canvasPaintSpec(style) {
@@ -19087,6 +19110,10 @@ let omoikaneUserActivationState;
   /// Runs one native drawing command on `context`'s bitmap.
   function canvasDraw(context, kind, paths, options = {}) {
     const state = context.__s, style = state.style;
+    const paintStyle = kind === "stroke" ? style.strokeStyle : style.fillStyle;
+    if (kind !== "clear" && paintStyle instanceof CanvasPattern && !paintStyle.__originClean) {
+      state.originClean = false;
+    }
     const command = { kind, paths, rule: options.rule || "nonzero", transform: style.transform,
       alpha: style.globalAlpha, composite: style.globalCompositeOperation, clip: style.clip,
       smoothing: style.imageSmoothingEnabled };
@@ -19239,6 +19266,7 @@ let omoikaneUserActivationState;
     reset() {
       const s = this.__s;
       s.pixels.fill(0);
+      s.originClean = true;
       s.style = defaultCanvasStyle();
       s.stack = [];
       s.path = newCanvasPath();
@@ -19283,7 +19311,7 @@ let omoikaneUserActivationState;
         throw new DOMException("The provided repetition '" + value + "' is not valid.", "SyntaxError");
       }
       if (!source) return null;
-      const snapshot = { width: source.width, height: source.height, pixels: source.pixels.slice() };
+      const snapshot = { width: source.width, height: source.height, pixels: source.pixels.slice(), originClean: source.originClean };
       return new CanvasPattern(canvasConstructionToken, snapshot, mode);
     }
     setLineDash(segments) {
@@ -19342,6 +19370,7 @@ let omoikaneUserActivationState;
       return new ImageData(Math.abs(width), Math.abs(height));
     }
     getImageData(sx, sy, sw, sh) {
+      if (!this.__s.originClean) throw new DOMException("The canvas is not origin-clean.", "SecurityError");
       let [x, y, width, height] = [sx, sy, sw, sh].map(value => Math.trunc(Number(value)) || 0);
       if (!width || !height) throw new DOMException("The source width or height is 0.", "IndexSizeError");
       if (width < 0) { x += width; width = -width; }
@@ -19393,6 +19422,7 @@ let omoikaneUserActivationState;
       const left = Math.max(sx, 0), top = Math.max(sy, 0);
       const right = Math.min(sx + sw, source.width), bottom = Math.min(sy + sh, source.height);
       if (left >= right || top >= bottom) return;
+      if (!source.originClean) this.__s.originClean = false;
       dx += (left - sx) * scaleX; dy += (top - sy) * scaleY;
       dw = (right - left) * scaleX; dh = (bottom - top) * scaleY;
       [sx, sy, sw, sh] = [left, top, right - left, bottom - top];
@@ -20613,6 +20643,7 @@ let omoikaneUserActivationState;
     toDataURL(type = "image/png", quality = undefined){
       canvasRejectPlaceholder(this);
       const s=canvasState(this);
+      if(!s.originClean)throw new DOMException("The canvas is not origin-clean.","SecurityError");
       if(s.width===0||s.height===0)return "data:,";
       return __omoikane_canvas_data_url(this.__id);
     }
@@ -20623,12 +20654,14 @@ let omoikaneUserActivationState;
       if(typeof callback!=="function")throw new TypeError("The toBlob callback is not a function");
       canvasRejectPlaceholder(this);
       const s=canvasState(this);
+      if(!s.originClean)throw new DOMException("The canvas is not origin-clean.","SecurityError");
       const snapshot=s.width&&s.height?canvasSnapshot(this):null;
       setTimeout(()=>callback(snapshot?canvasPngBlob(snapshot):null),0);
     }
     /// Returns a MediaStream with one video track capturing this canvas.
     captureStream(frameRequestRate = undefined){
       if(!(this instanceof HTMLCanvasElement))throw new TypeError("Illegal invocation");
+      if(!canvasState(this).originClean)throw new DOMException("The canvas is not origin-clean.","SecurityError");
       return canvasCaptureStream(this, frameRequestRate);
     }
     /// Hands drawing to an OffscreenCanvas whose frames show in this element.
@@ -20674,7 +20707,7 @@ let omoikaneUserActivationState;
     if (offscreen) return canvasSnapshot(offscreen);
     try {
       const state = canvasStateChecked(canvas);
-      return { width: state.width, height: state.height, pixels: state.pixels.slice() };
+      return { width: state.width, height: state.height, pixels: state.pixels.slice(), originClean: state.originClean };
     } catch (error) {
       if (error instanceof RangeError) {
         throw new DOMException("Canvas dimensions are too large", "IndexSizeError");
@@ -20696,22 +20729,24 @@ let omoikaneUserActivationState;
   function imageBitmapSource(source) {
     if (source instanceof ImageBitmap) {
       if (source.__detached) throw new DOMException("The ImageBitmap is detached", "InvalidStateError");
-      return { width: source.width, height: source.height, pixels: source.__pixels };
+      return { width: source.width, height: source.height, pixels: source.__pixels, originClean: source.__originClean };
     }
     const isHtmlCanvas = typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement;
     if (isHtmlCanvas || source instanceof OffscreenCanvas) return canvasSnapshot(source);
     const raw = source && source.__id != null ? __omoikane_canvas_image_source(source.__id) : null;
     if (raw === null) throw new DOMException("Image source is unavailable", "InvalidStateError");
     const decoded = JSON.parse(raw);
-    return { width: decoded.width, height: decoded.height, pixels: bytesFromBase64(decoded.pixels) };
+    return { width: decoded.width, height: decoded.height, pixels: bytesFromBase64(decoded.pixels),
+      originClean: canvasElementSourceOriginClean(source) };
   }
 
   class ImageBitmap {
-    constructor(token, width, height, pixels) {
+    constructor(token, width, height, pixels, originClean = true) {
       if (token !== imageBitmapConstructionToken) throw new TypeError("Illegal constructor");
       this.__width = width;
       this.__height = height;
       this.__pixels = pixels;
+      this.__originClean = originClean;
       this.__detached = false;
     }
     get width() { return this.__detached ? 0 : this.__width; }
@@ -20773,13 +20808,14 @@ let omoikaneUserActivationState;
     transferToImageBitmap() {
       if (this.__detached) throw new DOMException("The OffscreenCanvas is detached", "InvalidStateError");
       const snapshot = canvasSnapshot(this);
-      return new ImageBitmap(imageBitmapConstructionToken, snapshot.width, snapshot.height, snapshot.pixels);
+      return new ImageBitmap(imageBitmapConstructionToken, snapshot.width, snapshot.height, snapshot.pixels, snapshot.originClean);
     }
     convertToBlob(options = {}) {
       if (this.__detached) return Promise.reject(new DOMException("The OffscreenCanvas is detached", "InvalidStateError"));
       const requested = String(options && options.type || "image/png").toLowerCase();
       const type = requested === "image/png" ? requested : "image/png";
       const snapshot = canvasSnapshot(this);
+      if (!snapshot.originClean) return Promise.reject(new DOMException("The canvas is not origin-clean.", "SecurityError"));
       if (snapshot.width === 0 || snapshot.height === 0) return Promise.resolve(new Blob([], { type }));
       const blob = canvasPngBlob(snapshot);
       return blob ? Promise.resolve(blob) : Promise.reject(new DOMException("Unable to encode canvas", "EncodingError"));
@@ -20802,7 +20838,7 @@ let omoikaneUserActivationState;
         const from = ((cropY + y) * input.width + cropX) * 4;
         pixels.set(input.pixels.slice(from, from + cropWidth * 4), y * cropWidth * 4);
       }
-      return Promise.resolve(new ImageBitmap(imageBitmapConstructionToken, cropWidth, cropHeight, pixels));
+      return Promise.resolve(new ImageBitmap(imageBitmapConstructionToken, cropWidth, cropHeight, pixels, input.originClean));
     } catch (error) {
       return Promise.reject(error instanceof RangeError
         ? new DOMException("Canvas dimensions are too large", "IndexSizeError")
