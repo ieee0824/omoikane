@@ -113,3 +113,77 @@ fn auto_allocate_exposes_a_byob_request_to_pull() {
         "[true,4,[5,6],false]"
     );
 }
+
+#[test]
+fn byob_request_cannot_be_constructed_by_author_code() {
+    let mut runtime = runtime();
+    assert_eq!(
+        json(
+            &mut runtime,
+            r#"JSON.stringify([
+              [undefined, null, Object.create(ReadableByteStreamController.prototype)].every(controller =>
+                [undefined, null, Object.create(Uint8Array.prototype), new Uint8Array(1)].every(view => {
+                  try { new ReadableStreamBYOBRequest(controller, view); return false; }
+                  catch (error) { return error instanceof TypeError; }
+                })
+              )
+            ])"#,
+        ),
+        "[true]"
+    );
+}
+
+#[test]
+fn async_iterator_uses_the_async_iterator_prototype_and_unlocks_synchronously() {
+    let mut runtime = runtime();
+    assert_eq!(
+        json(
+            &mut runtime,
+            r#"(() => {
+              const stream = new ReadableStream();
+              const iterator = stream.values({preventCancel:true});
+              const prototype = Object.getPrototypeOf(iterator);
+              const expectedParent = Object.getPrototypeOf(
+                Object.getPrototypeOf((async function* () {}).prototype)
+              );
+              const methods = Object.getOwnPropertyNames(prototype).sort();
+              const result = [
+                Object.getPrototypeOf(prototype) === expectedParent,
+                JSON.stringify(methods),
+                Object.getOwnPropertyDescriptor(prototype, 'next').enumerable,
+                iterator.next.length,
+                iterator.return.length
+              ];
+              iterator.return();
+              result.push(stream.locked);
+              return JSON.stringify(result);
+            })()"#,
+        ),
+        "[true,\"[\\\"next\\\",\\\"return\\\"]\",true,0,1,false]"
+    );
+}
+
+#[test]
+fn readable_stream_pulls_at_start_and_after_dequeue() {
+    let mut runtime = runtime();
+    runtime
+        .eval(
+            r#"globalThis.result = [];
+               let emptyPulls = 0;
+               new ReadableStream({pull() { emptyPulls += 1; }});
+               let queuedPulls = 0;
+               const queued = new ReadableStream({
+                 start(controller) { controller.enqueue('ready'); },
+                 pull() { queuedPulls += 1; }
+               }, new CountQueuingStrategy({highWaterMark: 1}));
+               queued.getReader().read().then(value => {
+                 result.push(value.value, emptyPulls, queuedPulls);
+               });"#,
+        )
+        .expect("start pull scheduling");
+    runtime.run_jobs().expect("pull jobs");
+    assert_eq!(
+        json(&mut runtime, "JSON.stringify(result)"),
+        "[\"ready\",1,1]"
+    );
+}
