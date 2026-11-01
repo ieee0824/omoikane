@@ -3,8 +3,10 @@
 use super::*;
 use serde::Serialize;
 use std::cell::RefCell;
+use std::rc::Rc;
 use wasmi::{
-    Caller, Config, Engine, ExternType, Func, Instance, Linker, Module, Store, Val, ValType,
+    Caller, Config, Engine, Extern, ExternRef, ExternType, Func, Global, Instance, Linker, Memory,
+    MemoryType, Module, Mutability, Nullable, Ref, RefType, Store, Table, TableType, Val, ValType,
 };
 use wasmparser::{ExternalKind, Parser, Payload, TypeRef};
 
@@ -26,14 +28,25 @@ thread_local! {
 /// types and lifetimes do not leak through the JavaScript API.
 pub(super) struct State {
     engine: Engine,
+    runtime: Rc<RefCell<RealmRuntime>>,
 }
 
 impl Default for State {
     fn default() -> Self {
         let mut config = Config::default();
         config.consume_fuel(true);
+        let engine = Engine::new(&config);
+        let store = Store::new(
+            &engine,
+            StoreData {
+                callbacks: Vec::new(),
+                pending_error: None,
+                instance: None,
+            },
+        );
         Self {
-            engine: Engine::new(&config),
+            engine,
+            runtime: Rc::new(RefCell::new(RealmRuntime { store })),
         }
     }
 }
@@ -66,9 +79,8 @@ struct StoreData {
     instance: Option<Instance>,
 }
 
-struct RuntimeInstance {
+struct RealmRuntime {
     store: Store<StoreData>,
-    instance: Instance,
 }
 
 #[derive(Trace, Finalize, boa_engine::JsData)]
@@ -77,7 +89,149 @@ struct CompiledInstance {
     /// clones in its host state.
     callbacks: Vec<JsObject>,
     #[unsafe_ignore_trace]
-    runtime: RefCell<RuntimeInstance>,
+    reexported_imports: Vec<(String, usize)>,
+    #[unsafe_ignore_trace]
+    instance: Instance,
+    #[unsafe_ignore_trace]
+    runtime: Rc<RefCell<RealmRuntime>>,
+    export_handles: boa_gc::GcRefCell<Vec<JsObject>>,
+}
+
+#[derive(Trace, Finalize, boa_engine::JsData)]
+struct RuntimeMemory {
+    #[unsafe_ignore_trace]
+    runtime: Rc<RefCell<RealmRuntime>>,
+    #[unsafe_ignore_trace]
+    memory: Memory,
+    buffer: boa_gc::GcRefCell<Option<JsArrayBuffer>>,
+}
+
+#[derive(Trace, Finalize, boa_engine::JsData)]
+struct RuntimeGlobal {
+    #[unsafe_ignore_trace]
+    runtime: Rc<RefCell<RealmRuntime>>,
+    #[unsafe_ignore_trace]
+    global: Global,
+}
+
+#[derive(Trace, Finalize, boa_engine::JsData)]
+struct RuntimeTable {
+    #[unsafe_ignore_trace]
+    runtime: Rc<RefCell<RealmRuntime>>,
+    #[unsafe_ignore_trace]
+    table: Table,
+    roots: boa_gc::GcRefCell<Vec<Option<JsValue>>>,
+    values: boa_gc::GcRefCell<Vec<JsValue>>,
+}
+
+#[derive(Trace, Finalize, boa_engine::JsData)]
+struct RuntimeFunc {
+    #[unsafe_ignore_trace]
+    function: Func,
+}
+
+impl RuntimeTable {
+    fn reference(&self, value: JsValue) -> JsResult<Ref> {
+        let mut runtime = self.runtime.borrow_mut();
+        let element = self.table.ty(&runtime.store).element();
+        if element == RefType::Func {
+            if value.is_null() {
+                return Ok(Ref::null(RefType::Func));
+            }
+            if let Some(object) = value.as_object() {
+                if let Some(function) = object.downcast_ref::<RuntimeFunc>() {
+                    return Ok(Ref::Func(Nullable::Val(function.function)));
+                }
+            }
+            return Err(JsNativeError::typ()
+                .with_message("WebAssembly.Table funcref values must be null or Wasm functions")
+                .into());
+        }
+        if value.is_null() {
+            return Ok(Ref::null(RefType::Extern));
+        }
+        let mut roots = self.roots.borrow_mut();
+        let index = roots.len();
+        roots.push(Some(value));
+        let reference = ExternRef::new(&mut runtime.store, index);
+        Ok(Ref::Extern(Nullable::Val(reference)))
+    }
+
+    fn value(&self, reference: Ref) -> JsResult<JsValue> {
+        match reference {
+            Ref::Extern(Nullable::Null) | Ref::Func(Nullable::Null) => Ok(JsValue::null()),
+            Ref::Extern(Nullable::Val(reference)) => {
+                let runtime = self.runtime.borrow();
+                let index = reference
+                    .data(&runtime.store)
+                    .downcast_ref::<usize>()
+                    .copied()
+                    .ok_or_else(|| JsNativeError::error().with_message("Invalid externref root"))?;
+                self.roots
+                    .borrow()
+                    .get(index)
+                    .and_then(Clone::clone)
+                    .ok_or_else(|| {
+                        JsNativeError::error()
+                            .with_message("Missing externref root")
+                            .into()
+                    })
+            }
+            Ref::Func(_) => Err(JsNativeError::typ()
+                .with_message("WebAssembly function table values are not exposed yet")
+                .into()),
+        }
+    }
+}
+
+impl RuntimeMemory {
+    fn buffer(&self, context: &mut Context) -> JsResult<JsArrayBuffer> {
+        if let Some(buffer) = self.buffer.borrow().as_ref().cloned() {
+            return Ok(buffer);
+        }
+        self.copy_store_to_buffer(context)
+    }
+
+    fn copy_buffer_to_store(&self) -> JsResult<()> {
+        let Some(buffer) = self.buffer.borrow().as_ref().cloned() else {
+            return Ok(());
+        };
+        let bytes = buffer
+            .data()
+            .ok_or_else(|| {
+                JsNativeError::typ().with_message("WebAssembly.Memory buffer is detached")
+            })?
+            .to_vec();
+        let mut runtime = self.runtime.try_borrow_mut().map_err(|_| {
+            JsNativeError::error().with_message("WebAssembly realm is already executing")
+        })?;
+        let destination = self.memory.data_mut(&mut runtime.store);
+        if destination.len() == bytes.len() {
+            destination.copy_from_slice(&bytes);
+        }
+        Ok(())
+    }
+
+    fn copy_store_to_buffer(&self, context: &mut Context) -> JsResult<JsArrayBuffer> {
+        let bytes = {
+            let runtime = self.runtime.borrow();
+            self.memory.data(&runtime.store).to_vec()
+        };
+        if let Some(buffer) = self.buffer.borrow().as_ref().cloned() {
+            if buffer.byte_length() == bytes.len() {
+                buffer
+                    .data_mut()
+                    .expect("live WebAssembly buffer must not be detached")
+                    .copy_from_slice(&bytes);
+                return Ok(buffer);
+            }
+            let _ = buffer.detach(&JsValue::undefined());
+        }
+        let block = boa_engine::object::builtins::AlignedVec::from_iter(0, bytes);
+        let buffer = JsArrayBuffer::from_byte_block(block, context)?;
+        *self.buffer.borrow_mut() = Some(buffer.clone());
+        Ok(buffer)
+    }
 }
 
 #[derive(Serialize)]
@@ -85,6 +239,7 @@ struct RuntimeExport {
     name: String,
     kind: &'static str,
     params: usize,
+    element: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -155,6 +310,7 @@ impl ModuleMetadata {
                         metadata.exports.push(ExportDescriptor {
                             name: export.name.to_owned(),
                             kind: external_kind(export.kind),
+                            index: export.index,
                         });
                     }
                 }
@@ -166,6 +322,21 @@ impl ModuleMetadata {
             }
         }
         Ok(metadata)
+    }
+
+    fn reexported_imports(&self) -> Vec<(String, usize)> {
+        self.exports
+            .iter()
+            .filter_map(|export| {
+                let import = self
+                    .imports
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, import)| import.kind == export.kind)
+                    .nth(export.index as usize)?;
+                Some((export.name.clone(), import.0))
+            })
+            .collect()
     }
 }
 
@@ -180,6 +351,8 @@ struct ImportDescriptor {
 struct ExportDescriptor {
     name: String,
     kind: &'static str,
+    #[serde(skip)]
+    index: u32,
 }
 
 struct CustomSection {
@@ -194,6 +367,15 @@ fn import_kind(ty: TypeRef) -> &'static str {
         TypeRef::Memory(_) => "memory",
         TypeRef::Global(_) => "global",
         TypeRef::Tag(_) => "tag",
+    }
+}
+
+fn extern_type_kind(ty: &ExternType) -> &'static str {
+    match ty {
+        ExternType::Func(_) => "function",
+        ExternType::Table(_) => "table",
+        ExternType::Memory(_) => "memory",
+        ExternType::Global(_) => "global",
     }
 }
 
@@ -395,60 +577,121 @@ fn instantiate_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
         .get(1)
         .and_then(JsValue::as_object)
         .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly import list"))?;
-    let module = module_handle
+    let compiled = module_handle
         .downcast_ref::<CompiledModule>()
-        .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Module handle"))?
-        .module
-        .clone();
+        .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Module handle"))?;
+    let module = compiled.module.clone();
+    let reexported_imports = compiled.metadata.reexported_imports();
+    let mut matched_imports = vec![false; compiled.metadata.imports.len()];
+    let wasmi_import_order = module
+        .imports()
+        .map(|import| {
+            compiled
+                .metadata
+                .imports
+                .iter()
+                .enumerate()
+                .find(|(index, descriptor)| {
+                    !matched_imports[*index]
+                        && descriptor.module == import.module()
+                        && descriptor.name == import.name()
+                        && descriptor.kind == extern_type_kind(import.ty())
+                })
+                .map(|(index, _)| {
+                    matched_imports[index] = true;
+                    index
+                })
+                .ok_or_else(|| {
+                    JsError::from(
+                        JsNativeError::error().with_message("WebAssembly import metadata mismatch"),
+                    )
+                })
+        })
+        .collect::<JsResult<Vec<_>>>()?;
 
     let engine = module.engine().clone();
+    let runtime = with_host_state(|host| Ok(host.borrow().webassembly.runtime.clone()))?;
     let mut callbacks = Vec::new();
-    for (index, import) in module.imports().enumerate() {
-        let ExternType::Func(_) = import.ty() else {
-            return Err(JsNativeError::typ()
-                .with_message("WebAssembly non-function imports are not supported yet")
-                .into());
-        };
-        let callback = import_values
+    for (index, import) in compiled.metadata.imports.iter().enumerate() {
+        let value = import_values
             .get(index, context)?
             .as_object()
-            .filter(|object| object.is_callable())
             .ok_or_else(|| {
                 JsNativeError::typ().with_message(format!(
-                    "WebAssembly import {}.{} must be callable",
-                    import.module(),
-                    import.name()
+                    "WebAssembly import {}.{} has an incompatible value",
+                    import.module, import.name
                 ))
             })?;
-        callbacks.push(callback);
+        if import.kind == "function" && !value.is_callable() {
+            return Err(JsNativeError::typ()
+                .with_message(format!(
+                    "WebAssembly import {}.{} must be callable",
+                    import.module, import.name
+                ))
+                .into());
+        }
+        callbacks.push(value);
     }
 
-    let mut store = Store::new(
-        &engine,
-        StoreData {
-            callbacks: callbacks.clone(),
-            pending_error: None,
-            instance: None,
-        },
-    );
+    let mut runtime_ref = runtime.try_borrow_mut().map_err(|_| {
+        JsNativeError::error().with_message("WebAssembly realm is already executing")
+    })?;
+    let store = &mut runtime_ref.store;
+    let callback_offset = store.data().callbacks.len();
+    store.data_mut().callbacks.extend(callbacks.iter().cloned());
     store
         .set_fuel(CALL_FUEL)
         .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
     let mut linker = Linker::new(&engine);
+    let mut externals = Vec::new();
     for (index, import) in module.imports().enumerate() {
-        let ExternType::Func(ty) = import.ty() else {
-            unreachable!("non-function imports were rejected above")
+        let callback_index = wasmi_import_order[index];
+        let value = &callbacks[callback_index];
+        let external = match import.ty() {
+            ExternType::Func(ty) => {
+                imported_function(store, ty.clone(), callback_offset + callback_index).into()
+            }
+            ExternType::Memory(_) => value
+                .downcast_ref::<RuntimeMemory>()
+                .map(|memory| Extern::Memory(memory.memory))
+                .ok_or_else(|| {
+                    JsNativeError::typ().with_message(format!(
+                        "WebAssembly import {}.{} must be a Memory from this realm",
+                        import.module(),
+                        import.name()
+                    ))
+                })?,
+            ExternType::Global(_) => value
+                .downcast_ref::<RuntimeGlobal>()
+                .map(|global| Extern::Global(global.global))
+                .ok_or_else(|| {
+                    JsNativeError::typ().with_message(format!(
+                        "WebAssembly import {}.{} must be a Global from this realm",
+                        import.module(),
+                        import.name()
+                    ))
+                })?,
+            ExternType::Table(_) => value
+                .downcast_ref::<RuntimeTable>()
+                .map(|table| Extern::Table(table.table))
+                .ok_or_else(|| {
+                    JsNativeError::typ().with_message(format!(
+                        "WebAssembly import {}.{} must be a Table from this realm",
+                        import.module(),
+                        import.name(),
+                    ))
+                })?,
         };
-        let function = imported_function(&mut store, ty.clone(), index);
         linker
-            .define(import.module(), import.name(), function)
+            .define(import.module(), import.name(), external)
             .map_err(|error| {
                 JsNativeError::error().with_message(format!("{LINK_ERROR_PREFIX}{error}"))
             })?;
+        externals.push(external);
     }
     let _guard = ContextGuard::enter(context);
     let instance = linker
-        .instantiate_and_start(&mut store, &module)
+        .instantiate_and_start(&mut *store, &module)
         .map_err(|error| {
             store.data_mut().pending_error.take().unwrap_or_else(|| {
                 JsNativeError::error()
@@ -465,11 +708,15 @@ fn instantiate_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
             })
         })?;
     store.data_mut().instance = Some(instance);
+    drop(runtime_ref);
     Ok(JsObject::from_proto_and_data(
         None,
         CompiledInstance {
             callbacks,
-            runtime: RefCell::new(RuntimeInstance { store, instance }),
+            reexported_imports,
+            instance,
+            runtime,
+            export_handles: boa_gc::GcRefCell::new(Vec::new()),
         },
     )
     .into())
@@ -484,7 +731,7 @@ fn exports_native(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<Js
         .downcast_ref::<CompiledInstance>()
         .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Instance handle"))?;
     let runtime = instance.runtime.borrow();
-    let exports = runtime
+    let exports = instance
         .instance
         .exports(&runtime.store)
         .map(|export| {
@@ -498,6 +745,10 @@ fn exports_native(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<Js
                     ExternType::Table(_) => "table",
                 },
                 params: ty.func().map_or(0, |ty| ty.params().len()),
+                element: ty.table().map(|ty| match ty.element() {
+                    RefType::Func => "funcref",
+                    RefType::Extern => "externref",
+                }),
             }
         })
         .collect::<Vec<_>>();
@@ -508,6 +759,36 @@ fn exports_native(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<Js
                 .with_message(error.to_string())
                 .into()
         })
+}
+
+fn instance_memory_handles(instance: &CompiledInstance) -> Vec<JsObject> {
+    instance
+        .callbacks
+        .iter()
+        .cloned()
+        .chain(instance.export_handles.borrow().iter().cloned())
+        .filter(|object| object.downcast_ref::<RuntimeMemory>().is_some())
+        .collect()
+}
+
+fn sync_memories_to_store(instance: &CompiledInstance) -> JsResult<()> {
+    for object in instance_memory_handles(instance) {
+        object
+            .downcast_ref::<RuntimeMemory>()
+            .expect("memory handles were filtered")
+            .copy_buffer_to_store()?;
+    }
+    Ok(())
+}
+
+fn sync_memories_from_store(instance: &CompiledInstance, context: &mut Context) -> JsResult<()> {
+    for object in instance_memory_handles(instance) {
+        object
+            .downcast_ref::<RuntimeMemory>()
+            .expect("memory handles were filtered")
+            .copy_store_to_buffer(context)?;
+    }
+    Ok(())
 }
 
 fn call_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -527,6 +808,7 @@ fn call_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
     let instance = instance_handle
         .downcast_ref::<CompiledInstance>()
         .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Instance handle"))?;
+    sync_memories_to_store(&instance)?;
     let mut runtime = match instance.runtime.try_borrow_mut() {
         Ok(runtime) => runtime,
         Err(_) => {
@@ -541,10 +823,7 @@ fn call_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
                 // callback's Caller is alive on this thread. Nested JS executes
                 // synchronously and cannot retain this private native hook.
                 let caller = unsafe { &mut *pointer.cast::<Caller<'_, StoreData>>() };
-                let active_instance = caller.data().instance.ok_or_else(|| {
-                    JsNativeError::error().with_message("WebAssembly instance is not initialized")
-                })?;
-                let function = active_instance.get_func(&*caller, &name).ok_or_else(|| {
+                let function = instance.instance.get_func(&*caller, &name).ok_or_else(|| {
                     JsNativeError::typ().with_message("Unknown WebAssembly function export")
                 })?;
                 let ty = function.ty(&*caller);
@@ -585,7 +864,8 @@ fn call_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
         .store
         .set_fuel(CALL_FUEL)
         .map_err(|error| JsNativeError::error().with_message(error.to_string()))?;
-    let function = runtime
+    runtime.store.data_mut().instance = Some(instance.instance);
+    let function = instance
         .instance
         .get_func(&runtime.store, &name)
         .ok_or_else(|| JsNativeError::typ().with_message("Unknown WebAssembly function export"))?;
@@ -604,13 +884,18 @@ fn call_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
         .collect::<Vec<_>>();
     let _guard = ContextGuard::enter(context);
     if let Err(error) = function.call(&mut runtime.store, &inputs, &mut outputs) {
-        if let Some(error) = runtime.store.data_mut().pending_error.take() {
+        let pending_error = runtime.store.data_mut().pending_error.take();
+        drop(runtime);
+        sync_memories_from_store(&instance, context)?;
+        if let Some(error) = pending_error {
             return Err(error);
         }
         return Err(JsNativeError::error()
             .with_message(format!("{RUNTIME_ERROR_PREFIX}{error}"))
             .into());
     }
+    drop(runtime);
+    sync_memories_from_store(&instance, context)?;
     match outputs.as_slice() {
         [] => Ok(JsValue::undefined()),
         [value] => wasm_to_js(value),
@@ -622,6 +907,330 @@ fn call_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
             context,
         )
         .into()),
+    }
+}
+
+fn memory_new_native(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    let minimum = args.first().and_then(JsValue::as_number).unwrap_or(0.0) as u32;
+    let maximum = args
+        .get(1)
+        .and_then(JsValue::as_number)
+        .map(|value| value as u32);
+    let runtime = with_host_state(|host| Ok(host.borrow().webassembly.runtime.clone()))?;
+    let memory = {
+        let mut runtime_ref = runtime.borrow_mut();
+        Memory::new(&mut runtime_ref.store, MemoryType::new(minimum, maximum))
+            .map_err(|error| JsNativeError::range().with_message(error.to_string()))?
+    };
+    Ok(JsObject::from_proto_and_data(
+        None,
+        RuntimeMemory {
+            runtime,
+            memory,
+            buffer: boa_gc::GcRefCell::new(None),
+        },
+    )
+    .into())
+}
+
+fn memory_buffer_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let object = args
+        .first()
+        .and_then(JsValue::as_object)
+        .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Memory handle"))?;
+    let handle = object
+        .downcast_ref::<RuntimeMemory>()
+        .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Memory handle"))?;
+    let result = handle.buffer(context).map(Into::into);
+    drop(handle);
+    result
+}
+
+fn memory_grow_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let object = args
+        .first()
+        .and_then(JsValue::as_object)
+        .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Memory handle"))?;
+    let handle = object
+        .downcast_ref::<RuntimeMemory>()
+        .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Memory handle"))?;
+    let delta = args.get(1).and_then(JsValue::as_number).unwrap_or(0.0) as u64;
+    handle.copy_buffer_to_store()?;
+    let previous = {
+        let mut runtime = handle.runtime.borrow_mut();
+        handle
+            .memory
+            .grow(&mut runtime.store, delta)
+            .map_err(|error| JsNativeError::range().with_message(error.to_string()))?
+    };
+    handle.copy_store_to_buffer(context)?;
+    Ok((previous as f64).into())
+}
+
+fn val_type(name: &str) -> JsResult<ValType> {
+    match name {
+        "i32" => Ok(ValType::I32),
+        "i64" => Ok(ValType::I64),
+        "f32" => Ok(ValType::F32),
+        "f64" => Ok(ValType::F64),
+        _ => Err(JsNativeError::typ()
+            .with_message("Unsupported WebAssembly.Global value type")
+            .into()),
+    }
+}
+
+fn global_new_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let type_name = args
+        .first()
+        .unwrap_or(&JsValue::undefined())
+        .to_string(context)?
+        .to_std_string_escaped();
+    let ty = val_type(&type_name)?;
+    let value = js_to_wasm(args.get(1).unwrap_or(&JsValue::undefined()), ty, context)?;
+    let mutable = args.get(2).and_then(JsValue::as_boolean).unwrap_or(false);
+    let runtime = with_host_state(|host| Ok(host.borrow().webassembly.runtime.clone()))?;
+    let global = {
+        let mut runtime_ref = runtime.borrow_mut();
+        Global::new(
+            &mut runtime_ref.store,
+            value,
+            if mutable {
+                Mutability::Var
+            } else {
+                Mutability::Const
+            },
+        )
+    };
+    Ok(JsObject::from_proto_and_data(None, RuntimeGlobal { runtime, global }).into())
+}
+
+fn global_value_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let object = args
+        .first()
+        .and_then(JsValue::as_object)
+        .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Global handle"))?;
+    let handle = object
+        .downcast_ref::<RuntimeGlobal>()
+        .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Global handle"))?;
+    if let Some(value) = args.get(1) {
+        let mut runtime = handle.runtime.borrow_mut();
+        let global_type = handle.global.ty(&runtime.store);
+        if global_type.mutability() == Mutability::Const {
+            return Err(JsNativeError::typ()
+                .with_message("immutable global cannot be changed")
+                .into());
+        }
+        let ty = global_type.content();
+        let value = js_to_wasm(value, ty, context)?;
+        handle
+            .global
+            .set(&mut runtime.store, value)
+            .map_err(|error| JsNativeError::typ().with_message(error.to_string()))?;
+    }
+    let runtime = handle.runtime.borrow();
+    wasm_to_js(&handle.global.get(&runtime.store))
+}
+
+fn export_handle_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let object = args
+        .first()
+        .and_then(JsValue::as_object)
+        .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Instance handle"))?;
+    let instance = object
+        .downcast_ref::<CompiledInstance>()
+        .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Instance handle"))?;
+    let name = args
+        .get(2)
+        .unwrap_or(&JsValue::undefined())
+        .to_string(context)?
+        .to_std_string_escaped();
+    let kind = args
+        .get(3)
+        .unwrap_or(&JsValue::undefined())
+        .to_string(context)?
+        .to_std_string_escaped();
+    let runtime = instance.runtime.borrow();
+    let external = match kind.as_str() {
+        "function" => instance
+            .instance
+            .get_func(&runtime.store, &name)
+            .map(Extern::Func),
+        "global" => instance
+            .instance
+            .get_global(&runtime.store, &name)
+            .map(Extern::Global),
+        "memory" => instance
+            .instance
+            .get_memory(&runtime.store, &name)
+            .map(Extern::Memory),
+        "table" => instance
+            .instance
+            .get_table(&runtime.store, &name)
+            .map(Extern::Table),
+        _ => None,
+    }
+    .ok_or_else(|| JsNativeError::typ().with_message("Unknown WebAssembly export"))?;
+    if let Some(handle) = instance
+        .reexported_imports
+        .iter()
+        .find_map(|(export, import)| (export == &name).then(|| instance.callbacks[*import].clone()))
+    {
+        drop(runtime);
+        instance.export_handles.borrow_mut().push(handle.clone());
+        return Ok(handle.into());
+    }
+    let handle = match external {
+        Extern::Memory(memory) => JsObject::from_proto_and_data(
+            None,
+            RuntimeMemory {
+                runtime: instance.runtime.clone(),
+                memory,
+                buffer: boa_gc::GcRefCell::new(None),
+            },
+        ),
+        Extern::Global(global) => JsObject::from_proto_and_data(
+            None,
+            RuntimeGlobal {
+                runtime: instance.runtime.clone(),
+                global,
+            },
+        ),
+        Extern::Table(table) => {
+            let length = table.size(&runtime.store) as usize;
+            JsObject::from_proto_and_data(
+                None,
+                RuntimeTable {
+                    runtime: instance.runtime.clone(),
+                    table,
+                    roots: boa_gc::GcRefCell::new(Vec::new()),
+                    values: boa_gc::GcRefCell::new(vec![JsValue::null(); length]),
+                },
+            )
+        }
+        Extern::Func(function) => JsObject::from_proto_and_data(None, RuntimeFunc { function }),
+    };
+    drop(runtime);
+    instance.export_handles.borrow_mut().push(handle.clone());
+    Ok(handle.into())
+}
+
+fn table_new_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let element = args
+        .first()
+        .unwrap_or(&JsValue::undefined())
+        .to_string(context)?
+        .to_std_string_escaped();
+    let element = match element.as_str() {
+        "externref" => RefType::Extern,
+        "funcref" | "anyfunc" => RefType::Func,
+        _ => {
+            return Err(JsNativeError::typ()
+                .with_message("Invalid WebAssembly.Table element type")
+                .into());
+        }
+    };
+    let minimum = args.get(1).and_then(JsValue::as_number).unwrap_or(0.0) as u32;
+    let maximum = args
+        .get(2)
+        .and_then(JsValue::as_number)
+        .map(|value| value as u32);
+    let initial = args.get(3).cloned().unwrap_or_else(JsValue::null);
+    let public_initial = args.get(4).cloned().unwrap_or_else(|| initial.clone());
+    let runtime = with_host_state(|host| Ok(host.borrow().webassembly.runtime.clone()))?;
+    let roots = boa_gc::GcRefCell::new(Vec::new());
+    let table = {
+        let mut runtime_ref = runtime.borrow_mut();
+        let init = if element == RefType::Extern && !initial.is_null() {
+            roots.borrow_mut().push(Some(initial.clone()));
+            Ref::Extern(Nullable::Val(ExternRef::new(
+                &mut runtime_ref.store,
+                0usize,
+            )))
+        } else {
+            Ref::null(element)
+        };
+        Table::new(
+            &mut runtime_ref.store,
+            TableType::new(element, minimum, maximum),
+            init,
+        )
+        .map_err(|error| JsNativeError::range().with_message(error.to_string()))?
+    };
+    Ok(JsObject::from_proto_and_data(
+        None,
+        RuntimeTable {
+            runtime,
+            table,
+            roots,
+            values: boa_gc::GcRefCell::new(vec![public_initial; minimum as usize]),
+        },
+    )
+    .into())
+}
+
+fn table_op_native(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    let object = args
+        .first()
+        .and_then(JsValue::as_object)
+        .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Table handle"))?;
+    let handle = object
+        .downcast_ref::<RuntimeTable>()
+        .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Table handle"))?;
+    let operation = args
+        .get(1)
+        .and_then(JsValue::as_string)
+        .map(|value| value.to_std_string_escaped());
+    let index = args.get(2).and_then(JsValue::as_number).unwrap_or(0.0) as u64;
+    match operation.as_deref() {
+        Some("length") => Ok((handle.table.size(&handle.runtime.borrow().store) as f64).into()),
+        Some("get") => {
+            let runtime = handle.runtime.borrow();
+            let reference = handle.table.get(&runtime.store, index).ok_or_else(|| {
+                JsNativeError::range().with_message("WebAssembly.Table index out of bounds")
+            })?;
+            if handle.table.ty(&runtime.store).element() == RefType::Extern {
+                drop(runtime);
+                return handle.value(reference);
+            }
+            handle
+                .values
+                .borrow()
+                .get(index as usize)
+                .cloned()
+                .ok_or_else(|| {
+                    JsNativeError::range()
+                        .with_message("WebAssembly.Table index out of bounds")
+                        .into()
+                })
+        }
+        Some("set") => {
+            let public_value = args.get(3).cloned().unwrap_or_else(JsValue::null);
+            let native_value = args.get(4).cloned().unwrap_or_else(|| public_value.clone());
+            let reference = handle.reference(native_value)?;
+            handle
+                .table
+                .set(&mut handle.runtime.borrow_mut().store, index, reference)
+                .map_err(|error| JsNativeError::range().with_message(error.to_string()))?;
+            handle.values.borrow_mut()[index as usize] = public_value;
+            Ok(JsValue::undefined())
+        }
+        Some("grow") => {
+            let public_value = args.get(3).cloned().unwrap_or_else(JsValue::null);
+            let native_value = args.get(4).cloned().unwrap_or_else(|| public_value.clone());
+            let reference = handle.reference(native_value)?;
+            let previous = handle
+                .table
+                .grow(&mut handle.runtime.borrow_mut().store, index, reference)
+                .map_err(|error| JsNativeError::range().with_message(error.to_string()))?;
+            handle
+                .values
+                .borrow_mut()
+                .extend(std::iter::repeat_n(public_value, index as usize));
+            Ok((previous as f64).into())
+        }
+        _ => Err(JsNativeError::typ()
+            .with_message("Unknown WebAssembly.Table operation")
+            .into()),
     }
 }
 
@@ -657,6 +1266,46 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
             js_string!("__omoikane_wasm_call"),
             3,
             NativeFunction::from_copy_closure(call_native),
+        ),
+        (
+            js_string!("__omoikane_wasm_memory_new"),
+            2,
+            NativeFunction::from_copy_closure(memory_new_native),
+        ),
+        (
+            js_string!("__omoikane_wasm_memory_buffer"),
+            1,
+            NativeFunction::from_copy_closure(memory_buffer_native),
+        ),
+        (
+            js_string!("__omoikane_wasm_memory_grow"),
+            2,
+            NativeFunction::from_copy_closure(memory_grow_native),
+        ),
+        (
+            js_string!("__omoikane_wasm_global_new"),
+            3,
+            NativeFunction::from_copy_closure(global_new_native),
+        ),
+        (
+            js_string!("__omoikane_wasm_global_value"),
+            2,
+            NativeFunction::from_copy_closure(global_value_native),
+        ),
+        (
+            js_string!("__omoikane_wasm_export_handle"),
+            4,
+            NativeFunction::from_copy_closure(export_handle_native),
+        ),
+        (
+            js_string!("__omoikane_wasm_table_new"),
+            5,
+            NativeFunction::from_copy_closure(table_new_native),
+        ),
+        (
+            js_string!("__omoikane_wasm_table_op"),
+            5,
+            NativeFunction::from_copy_closure(table_op_native),
         ),
     ] {
         register_private_builtin_callable(context, bindings, name, length, function)?;
