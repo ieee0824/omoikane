@@ -257,6 +257,8 @@ fn text_is_drawn_as_glyph_outlines_and_measured_from_the_font() {
         if (Math.abs(metrics.emHeightAscent + metrics.emHeightDescent - 20) > 1e-9) return 'em ' + metrics.emHeightAscent;
         if (metrics.alphabeticBaseline !== 0) return 'alphabetic ' + metrics.alphabeticBaseline;
         if (ctx.measureText('Hi Hi').width <= ctx.measureText('HiHi').width) return 'space advance';
+        if (ctx.measureText('\u0000').width !== 0 || ctx.measureText('H\u0000i').width !== ctx.measureText('Hi').width)
+          return 'control characters advance';
         // Proportional glyph advances show the text uses font outlines, not boxes.
         if (!(ctx.measureText('i').width < ctx.measureText('W').width)) return 'proportional advances';
         const plainWidth = ctx.measureText('hello').width;

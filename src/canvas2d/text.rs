@@ -327,6 +327,24 @@ pub(crate) struct TextLayout {
     pub ideographic: f64,
 }
 
+/// The text preparation algorithm's characters for shaping: ASCII
+/// whitespace becomes a space, and other control characters, which
+/// browsers render with no advance, are dropped rather than shaped with a
+/// fallback font's missing-glyph box.
+fn prepare_text(text: &str) -> String {
+    text.chars()
+        .filter_map(|ch| {
+            if ch.is_ascii_whitespace() {
+                Some(' ')
+            } else if ch.is_control() {
+                None
+            } else {
+                Some(ch)
+            }
+        })
+        .collect()
+}
+
 /// Shapes `text` with `fonts` (fallbacks in order, the first being the
 /// first available font) and returns its outlines and metrics. `None`
 /// without fonts or when shaping fails.
@@ -336,11 +354,7 @@ pub(crate) fn layout_text(
     style: &TextStyle<'_>,
 ) -> Option<TextLayout> {
     let primary = fonts.first()?.font;
-    // The text preparation algorithm replaces ASCII whitespace with spaces.
-    let text = text
-        .chars()
-        .map(|ch| if ch.is_ascii_whitespace() { ' ' } else { ch })
-        .collect::<String>();
+    let text = prepare_text(text);
     let direction = if style.rtl {
         ShapingDirection::RightToLeft
     } else {
@@ -486,6 +500,14 @@ mod tests {
         let font = parse_font("bold condensed 12pt Mono", CONTEXT).unwrap();
         assert_eq!(font.serialized, "bold condensed 16px Mono");
         assert_eq!((font.weight.as_str(), font.size), ("bold", 16.0));
+    }
+
+    #[test]
+    fn text_preparation_turns_whitespace_into_spaces_and_drops_controls() {
+        assert_eq!(
+            prepare_text("a\tb\nc\u{0}d\u{b}e\u{85}f\u{200b}"),
+            "a b cdef\u{200b}"
+        );
     }
 
     #[test]
