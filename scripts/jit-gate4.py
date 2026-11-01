@@ -20,8 +20,10 @@ from scripts.acid3_expectations import load_expectation, report_matches_expectat
 
 
 UNIT_SHARDS = 4
-SHARDS = [f"unit-{i}" for i in range(UNIT_SHARDS)] + [
-    "integration", "acid3", "compatibility", "stress",
+INTEGRATION_SHARDS = 2
+INTEGRATION_NAMES = [f"integration-{i}" for i in range(INTEGRATION_SHARDS)]
+SHARDS = [f"unit-{i}" for i in range(UNIT_SHARDS)] + INTEGRATION_NAMES + [
+    "build", "acid3", "compatibility", "stress",
 ]
 FEATURES = "jit-stress,jit-differential"
 # print_page_wpt needs the pinned checkout supplied by the separate WPT CI job.
@@ -32,7 +34,8 @@ TEST_ARGS = ["--include-ignored", "--nocapture", "--test-threads=1"]
 STRESS_MATRIX_TEST = "stress::reproducible_stress_matrix"
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 STEPS = {**{f"unit-{i}": ["list", "unit"] for i in range(UNIT_SHARDS)},
-         "integration": ["integration", "examples-and-bins", "doc", "build"],
+         **{name: ["integration"] for name in INTEGRATION_NAMES},
+         "build": ["examples-and-bins", "doc", "build"],
          "acid3": ["acid3", "embedded-acid3"],
          "compatibility": ["fetch-wpt", "wpt", "web-api", "embedded-web-api"],
          "stress": ["stress"]}
@@ -72,8 +75,10 @@ def prepare(root):
     current = identity()
     write_json(root / "identity.json", current)
     targets = integration_targets_from_metadata()
-    if not targets:
-        raise ValueError("no integration targets found")
+    if not valid_integration_targets(targets) or "jit_native_gate" not in targets:
+        raise ValueError("integration inventory must include the native-policy target exactly once")
+    if any(not integration_partition(targets, index) for index in range(INTEGRATION_SHARDS)):
+        raise ValueError("empty integration partition")
     write_json(root / "integration-targets.json", targets)
     (root / "revision.txt").write_text(current["revision"] + "\n")
     (root / "rustc.txt").write_text(current["rustc"] + "\n")
@@ -84,6 +89,19 @@ def prepare(root):
 def unit_partition(names, index):
     return [name for name in names
             if int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "big") % UNIT_SHARDS == index]
+
+
+def integration_partition(targets, index):
+    """Assign every prepared target to one stable, source-independent batch."""
+    return [name for name in targets
+            if int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "big")
+            % INTEGRATION_SHARDS == index]
+
+
+def valid_integration_targets(targets):
+    return (isinstance(targets, list) and bool(targets)
+            and all(isinstance(name, str) for name in targets)
+            and targets == sorted(set(targets)))
 
 
 def passed_tests(log):
@@ -162,11 +180,26 @@ def stress_command():
                         ["--skip", "acid3::", "--skip", "web_api_surface::"])
 
 
+def build_commands():
+    """Retain the original examples, documentation and build validation."""
+    return [("examples-and-bins", test_command(["--examples", "--bins"])),
+            ("doc", test_command(["--doc"])),
+            ("build", ["cargo", "build", "--locked", "--features", "jit-stress"])]
+
+
+def complete_build_coverage(shard):
+    steps = shard.get("steps") if isinstance(shard, dict) else None
+    expected = build_commands()
+    return (isinstance(steps, list) and len(steps) == len(expected)
+            and not shard.get("error")
+            and all(isinstance(step, dict) and step.get("name") == name
+                    and step.get("command") == command and step.get("exit") == 0
+                    for step, (name, command) in zip(steps, expected)))
+
+
 def integration_log_covers_targets(log, targets):
     """Require every selected binary to pass with only the duplicate matrix filtered."""
-    if (not isinstance(targets, list) or not targets
-            or any(not isinstance(target, str) for target in targets)
-            or targets != sorted(set(targets)) or "jit_native_gate" not in targets):
+    if not valid_integration_targets(targets):
         return False
     seen = {}
     active = None
@@ -188,26 +221,43 @@ def integration_log_covers_targets(log, targets):
         if result and active:
             seen[active]["filtered"] = int(result.group(1))
     return (sorted(seen) == targets
-            and seen["jit_native_gate"]["native_policy"]
+            and ("jit_native_gate" not in targets or seen["jit_native_gate"]["native_policy"])
             and all(row["filtered"] == (1 if name == "jit_native_gate" else 0)
                     for name, row in seen.items()))
 
 
-def complete_integration_coverage(root, shard):
+def complete_integration_shard_coverage(root, name, shard):
+    """Verify this batch's exact prepared selection, command and execution log."""
     expected = read_json(root / "inputs/integration-targets.json")
-    selected = read_json(root / "integration/targets.json")
+    if (not valid_integration_targets(expected) or "jit_native_gate" not in expected
+            or name not in INTEGRATION_NAMES):
+        return False
+    targets = integration_partition(expected, INTEGRATION_NAMES.index(name))
+    selected = read_json(root / name / "targets.json")
     steps = shard.get("steps") if isinstance(shard, dict) else None
-    if (not isinstance(expected, list) or not expected
-            or any(not isinstance(target, str) for target in expected)
-            or selected != expected or not isinstance(steps, list) or not steps
+    if (not targets or selected != targets or not isinstance(steps, list) or len(steps) != 1
             or not isinstance(steps[0], dict)
-            or steps[0].get("command") != integration_command(expected)):
+            or steps[0].get("name") != "integration" or steps[0].get("exit") != 0
+            or steps[0].get("command") != integration_command(targets)):
         return False
     try:
-        log = (root / "integration/integration.log").read_text(errors="replace")
+        log = (root / name / "integration.log").read_text(errors="replace")
     except OSError:
         return False
-    return integration_log_covers_targets(log, expected)
+    return integration_log_covers_targets(log, targets)
+
+
+def complete_integration_coverage(root, shards):
+    """Require the exact full inventory once across all integration batches."""
+    expected = read_json(root / "inputs/integration-targets.json")
+    if not valid_integration_targets(expected) or "jit_native_gate" not in expected:
+        return False
+    covered = []
+    for name in INTEGRATION_NAMES:
+        if not complete_integration_shard_coverage(root, name, shards.get(name)):
+            return False
+        covered.extend(read_json(root / name / "targets.json"))
+    return sorted(covered) == expected and len(set(covered)) == len(covered)
 
 
 def complete_stress_matrix_execution(root, shard):
@@ -225,6 +275,21 @@ def complete_stress_matrix_execution(root, shard):
     return (len(matches) == 1 and len(paths) == 1
             and shard.get("stress_artifacts") == paths[0]
             and isinstance(read_json(root / "stress/stress.json"), dict))
+
+
+def run_integration_batch(shard, root, result, run):
+    """Store the prepared selection, execute it, and verify its retained log."""
+    targets = integration_targets_from_metadata()
+    if (not valid_integration_targets(targets)
+            or targets != read_json(root / "inputs/integration-targets.json")):
+        raise ValueError("integration targets differ from prepared target list")
+    selected = integration_partition(targets, INTEGRATION_NAMES.index(shard))
+    if not selected:
+        raise ValueError("empty integration partition")
+    write_json(root / shard / "targets.json", selected)
+    status, _ = run("integration", integration_command(selected))
+    if status == 0 and not complete_integration_shard_coverage(root, shard, result):
+        raise ValueError("integration target or stress-matrix selection is incomplete")
 
 
 def run_shard(shard, root):
@@ -283,17 +348,11 @@ def run_shard(shard, root):
             status, log = test("unit", ["--lib"], ["--exact", *selected])
             if status == 0 and passed_tests(log) != len(selected):
                 raise ValueError("unit test count does not match the selected partition")
-        elif shard == "integration":
-            targets = integration_targets_from_metadata()
-            write_json(folder / "targets.json", targets)
-            if not targets or targets != read_json(root / "inputs/integration-targets.json"):
-                raise ValueError("integration targets differ from prepared target list")
-            status, _ = run("integration", integration_command(targets))
-            if status == 0 and not complete_integration_coverage(root, result):
-                raise ValueError("integration target or stress-matrix selection is incomplete")
-            test("examples-and-bins", ["--examples", "--bins"])
-            test("doc", ["--doc"])
-            run("build", ["cargo", "build", "--locked", "--features", "jit-stress"])
+        elif shard in INTEGRATION_NAMES:
+            run_integration_batch(shard, root, result, run)
+        elif shard == "build":
+            for label, command in build_commands():
+                run(label, command)
         elif shard == "acid3":
             test("acid3", ["--test", "acid3_harness"])
             result["steps"][-1]["test26_ms"] = acid3_test26_timing(
@@ -352,7 +411,7 @@ def aggregate(root, jobs_succeeded=True):
     wpt = read_json(root / "compatibility/wpt.json")
     web_api = read_json(root / "compatibility/web-api.json")
     stress = read_json(root / "stress/stress.json")
-    integration_coverage = complete_integration_coverage(root, shards.get("integration"))
+    integration_coverage = complete_integration_coverage(root, shards)
     stress_matrix_execution = complete_stress_matrix_execution(root, shards.get("stress"))
     checks = {
         "jobs_succeeded": jobs_succeeded,
@@ -360,8 +419,7 @@ def aggregate(root, jobs_succeeded=True):
         "source_clean": bool(expected) and not expected["source_dirty"],
         "full_suite": complete and complete_unit_coverage(root) and integration_coverage,
         "stress_matrix_once": integration_coverage and stress_matrix_execution,
-        "build": any(s.get("name") == "build" and s.get("exit") == 0
-                     for s in (shards.get("integration") or {}).get("steps", [])),
+        "build": complete_build_coverage(shards.get("build")),
         "acid3_expected_result": report_matches_expectation(acid3, load_expectation()),
         "acid3_test26_reported": has_acid3_test26_timing(shards.get("acid3")),
         "wpt_regression_zero": isinstance(wpt, dict) and wpt.get("summary", {}).get("regression") == 0,
