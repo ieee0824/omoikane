@@ -173,6 +173,11 @@ mod media_source;
 pub use media_source::{
     DeterministicMediaSourceProvider, MediaSourceError, MediaSourceProvider, MediaSourceSegment,
 };
+mod media_session;
+pub use media_session::{
+    DeterministicMediaSessionProvider, MediaSessionArtwork, MediaSessionArtworkFetch,
+    MediaSessionMetadata, MediaSessionPositionState, MediaSessionProvider, MediaSessionSnapshot,
+};
 mod automation;
 #[cfg(test)]
 mod cross_origin_focus_tests;
@@ -2403,6 +2408,7 @@ struct HostState {
     geolocation: geolocation::State,
     media_capture: media_capture::State,
     media_source: media_source::State,
+    media_session: media_session::State,
     compression_streams: compression_stream::Store,
     http_client: Client,
     /// Lazily started HTTP worker for best-effort CSP/Reporting delivery.
@@ -3386,6 +3392,7 @@ impl HostState {
             geolocation: geolocation::State::default(),
             media_capture: media_capture::State::default(),
             media_source: media_source::State::default(),
+            media_session: media_session::State::default(),
             compression_streams: compression_stream::Store::new(),
             http_client,
             report_delivery: None,
@@ -16622,6 +16629,7 @@ fn register_host_bindings(
     geolocation::register(context, &mut bindings)?;
     media_capture::register(context, &mut bindings)?;
     media_source::register(context, &mut bindings)?;
+    media_session::register(context, &mut bindings)?;
     permissions_policy::register(context, &mut bindings)?;
     broadcast_channel::register(context, &mut bindings)?;
     web_locks::register(context, &mut bindings)?;

@@ -1501,6 +1501,10 @@
     {"path": "media-source/URL-createObjectURL-null.html"},
     {"path": "media-source/URL-createObjectURL.html"},
     {"path": "media-source/mediasource-closed.html"},
-    {"path": "media-source/mediasource-endofstream-invaliderror.html"}
+    {"path": "media-source/mediasource-endofstream-invaliderror.html"},
+    {"path": "mediasession/mediametadata.html"},
+    {"path": "mediasession/playbackstate.html"},
+    {"path": "mediasession/positionstate.html"},
+    {"path": "mediasession/setactionhandler.html"}
   ]
 }

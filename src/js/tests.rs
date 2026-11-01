@@ -18240,6 +18240,96 @@ fn media_source_remove_abort_end_and_type_contracts() {
 }
 
 #[test]
+fn media_session_publishes_owned_metadata_position_and_playback_snapshots() {
+    let (port, _server) = spawn_static_http_server("image/png", "Hi");
+    let mut runtime = JsRuntime::with_document_and_url(
+        NodeHandle::document(),
+        &format!("http://127.0.0.1:{port}/player"),
+    )
+    .unwrap();
+    let provider = Arc::new(DeterministicMediaSessionProvider::default());
+    runtime.set_media_session_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.sessionMetadata = new MediaMetadata({
+                 title: 'First', artist: 'Artist', album: 'Album',
+                 artwork: [{src:'/cover.png', sizes:'128x128', type:'image/png'}]
+               });
+               navigator.mediaSession.metadata = sessionMetadata;
+               sessionMetadata.title = 'Updated';
+               navigator.mediaSession.playbackState = 'playing';
+               navigator.mediaSession.setPositionState({duration:60, position:12, playbackRate:1.5});"#,
+        )
+        .unwrap();
+    let snapshot = provider.snapshot();
+    assert_eq!(snapshot.playback_state, "playing");
+    assert_eq!(snapshot.metadata.as_ref().unwrap().title, "Updated");
+    assert_eq!(
+        snapshot.metadata.as_ref().unwrap().artwork[0].src,
+        format!("http://127.0.0.1:{port}/cover.png")
+    );
+    assert_eq!(snapshot.position_state.unwrap().position, 12.0);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "String(Object.isFrozen(sessionMetadata.artwork) && Object.isFrozen(sessionMetadata.artwork[0]))"
+        ),
+        "true"
+    );
+    runtime.request_media_session_artwork(0).unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        provider.artwork_fetches()[0].bytes.as_deref(),
+        Some(&b"Hi"[..])
+    );
+    drop(runtime);
+    assert_eq!(provider.snapshot(), MediaSessionSnapshot::default());
+}
+
+#[test]
+fn media_session_actions_use_host_dispatch_and_validate_state_boundaries() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            r#"globalThis.mediaActions = [];
+               navigator.mediaSession.setActionHandler('seekto', details => mediaActions.push(details.action + ':' + details.seekTime));"#,
+        )
+        .unwrap();
+    assert!(
+        runtime
+            .dispatch_media_session_action("seekto", serde_json::json!({"seekTime": 4.5}))
+            .unwrap()
+    );
+    assert_eq!(
+        eval_str(&mut runtime, "mediaActions.join(',')"),
+        "seekto:4.5"
+    );
+    runtime
+        .eval(
+            r#"globalThis.mediaErrors = [];
+               for (const state of [
+                 {duration:-1}, {duration:10, position:20}, {duration:10, playbackRate:0}
+               ]) {
+                 try { navigator.mediaSession.setPositionState(state); }
+                 catch (error) { mediaErrors.push(error.name); }
+               }
+               try { navigator.mediaSession.setActionHandler('invalid', null); }
+               catch (error) { mediaErrors.push(error.name); }
+               navigator.mediaSession.setActionHandler('seekto', null);"#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "mediaErrors.join(',')"),
+        "TypeError,TypeError,TypeError,TypeError"
+    );
+    assert!(
+        !runtime
+            .dispatch_media_session_action("seekto", serde_json::json!({"seekTime": 8}))
+            .unwrap()
+    );
+}
+
+#[test]
 fn match_media_evaluates_current_viewport() {
     let doc = NodeHandle::document();
     let mut runtime = JsRuntime::with_document(doc).unwrap();
