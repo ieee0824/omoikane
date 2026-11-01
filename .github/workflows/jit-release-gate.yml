@@ -36,6 +36,7 @@ jobs:
           python3 -m unittest discover -s scripts/tests -p test_jit_gate5.py
           python3 -m unittest discover -s scripts/tests -p test_diagnose_gate5_wpt.py
           python3 -m unittest discover -s scripts/tests -p test_refresh_cached_path_deps.py
+          python3 -m unittest discover -s scripts/tests -p test_install_ci_fonts.py
       - name: Resolve one dependency set for all six jobs
         run: python3 scripts/jit-gate5.py prepare .artifacts/jit-gate5/inputs
       - uses: actions/upload-artifact@v4
@@ -138,9 +139,12 @@ jobs:
           key: wpt-${{ hashFiles('tests/wpt/revision.txt') }}
       - name: Install Linux system fonts
         if: runner.os == 'Linux' && matrix.kind == 'suite'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y fonts-dejavu fonts-liberation fonts-noto-core fonts-noto-cjk
+        # Four bounded apt attempts take at most 8m22s including TERM/KILL grace
+        # and retry delays, leaving time for Python startup within this step.
+        timeout-minutes: 10
+        env:
+          GATE_TARGET: ${{ matrix.target }}
+        run: python3 scripts/install-ci-fonts.py ".artifacts/jit-gate5/$GATE_TARGET/font-preparation"
       - name: Run full suite or build and smoke-test the release archive
         env:
           GATE_KIND: ${{ matrix.kind }}
