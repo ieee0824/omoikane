@@ -97,6 +97,7 @@ enum SourceExpression {
     Nonce(String),
     Hash(HashAlgorithm, String),
     UnsafeEval,
+    WasmUnsafeEval,
     TrustedTypesEval,
     ReportSample,
     Any,
@@ -271,6 +272,30 @@ impl CspPolicy {
                     (!allowed).then(|| PolicyViolation {
                         serialized: policy.serialized.clone(),
                         report_sample: sources.contains(&SourceExpression::ReportSample),
+                    })
+                })
+                .collect()
+        };
+        (violations(&self.policies), violations(&self.report_only))
+    }
+
+    /// Returns policies that disallow compiling WebAssembly bytes.
+    pub(crate) fn wasm_compilation_violations(
+        &self,
+    ) -> (Vec<PolicyViolation>, Vec<PolicyViolation>) {
+        let violations = |policies: &[ParsedPolicy]| {
+            policies
+                .iter()
+                .filter_map(|policy| {
+                    let sources = policy
+                        .directives
+                        .get("script-src")
+                        .or_else(|| policy.directives.get("default-src"))?;
+                    let allowed = sources.contains(&SourceExpression::UnsafeEval)
+                        || sources.contains(&SourceExpression::WasmUnsafeEval);
+                    (!allowed).then(|| PolicyViolation {
+                        serialized: policy.serialized.clone(),
+                        report_sample: false,
                     })
                 })
                 .collect()
@@ -749,6 +774,7 @@ impl ParsedPolicy {
             | SourceExpression::Nonce(_)
             | SourceExpression::Hash(..)
             | SourceExpression::UnsafeEval
+            | SourceExpression::WasmUnsafeEval
             | SourceExpression::TrustedTypesEval
             | SourceExpression::ReportSample => false,
             SourceExpression::Any => matches!(url.scheme.as_str(), "http" | "https" | "ws" | "wss"),
@@ -978,6 +1004,7 @@ fn parse_source_expression(token: &str) -> Option<SourceExpression> {
         "'unsafe-hashes'" => return Some(SourceExpression::UnsafeHashes),
         "'strict-dynamic'" => return Some(SourceExpression::StrictDynamic),
         "'unsafe-eval'" => return Some(SourceExpression::UnsafeEval),
+        "'wasm-unsafe-eval'" => return Some(SourceExpression::WasmUnsafeEval),
         "'trusted-types-eval'" => return Some(SourceExpression::TrustedTypesEval),
         "'report-sample'" => {
             // CSP's sample opt-in uses exact source-list membership, unlike
@@ -1241,6 +1268,37 @@ mod tests {
         assert!(blocked.is_empty());
         assert_eq!(reported.len(), 1);
         assert!(reported[0].report_sample);
+    }
+
+    #[test]
+    fn wasm_compilation_accepts_only_wasm_or_general_eval_permissions() {
+        let base = "https://example.test/";
+        assert_eq!(
+            make_policy("script-src 'self'", base)
+                .wasm_compilation_violations()
+                .0
+                .len(),
+            1
+        );
+        assert!(
+            make_policy("script-src 'wasm-unsafe-eval'", base)
+                .wasm_compilation_violations()
+                .0
+                .is_empty()
+        );
+        assert!(
+            make_policy("default-src 'unsafe-eval'", base)
+                .wasm_compilation_violations()
+                .0
+                .is_empty()
+        );
+        assert_eq!(
+            make_policy("script-src 'wasm-unsafe-eval'", base)
+                .script_compilation_violations()
+                .0
+                .len(),
+            1
+        );
     }
 
     #[test]

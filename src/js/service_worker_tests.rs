@@ -15,6 +15,9 @@ const SERVICE_WORKER_SOURCE: &str = r#"
     event.source.postMessage({
       blocked,
       allowed: eval(policy.createScript('7')),
+      webassembly: typeof WebAssembly === 'object' &&
+        typeof WebAssembly.compileStreaming === 'function' &&
+        WebAssembly.validate(Uint8Array.of(0,97,115,109,1,0,0,0)),
       isolated: typeof document === 'undefined' && typeof close === 'undefined' &&
         typeof globalThis.__omoikane_service_worker_lifecycle === 'undefined' &&
         typeof globalThis.__omoikane_service_worker_lifecycle_complete === 'undefined' &&
@@ -463,7 +466,7 @@ fn service_worker_executes_with_response_csp_and_replies_from_client() {
           observed.registration.active?.state === 'activated' &&
           observed.messages.length === 1 && observed.sourceMatches &&
           observed.messages[0].blocked && observed.messages[0].allowed === 7 &&
-          observed.messages[0].isolated"#
+          observed.messages[0].isolated && observed.messages[0].webassembly"#
             )
             .unwrap()
             .as_boolean(),

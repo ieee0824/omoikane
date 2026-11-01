@@ -57,8 +57,8 @@ collect_pattern "/mediacapture-streams/" "/mediacapture-record/"
 collect_pattern "/mediacapture-fromelement/"
 # WebGL 2 IDL and deterministic software-context contracts (#1644).
 collect_pattern "/webgl/"
-# WebAssembly core JavaScript API validation and Module metadata (#1652).
-collect_pattern "/wasm/jsapi/"
+# WebAssembly JavaScript and Web API contracts (#1652, #1655).
+collect_pattern "/wasm/jsapi/" "/wasm/webapi/" "/wasm/incrementer.wasm" "/content-security-policy/wasm-unsafe-eval/"
 # Media Source Extensions state, object URL, and SourceBuffer contracts (#1613).
 collect_pattern "/media-source/"
 # Media Session metadata, playback, position, and action-handler contracts (#1618).

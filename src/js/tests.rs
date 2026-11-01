@@ -92,6 +92,86 @@ fn webassembly_validates_modules_and_exposes_owned_metadata() {
 }
 
 #[test]
+fn webassembly_promise_and_streaming_entry_points() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            r#"
+            globalThis.webassemblyPromiseChecks = undefined;
+            (async () => {
+              const bytes = Uint8Array.of(0,97,115,109,1,0,0,0);
+              const module = await WebAssembly.compile(bytes);
+              const fromBytes = await WebAssembly.instantiate(bytes);
+              const fromModule = await WebAssembly.instantiate(module);
+              const response = new Response(bytes, { headers: { "Content-Type": "APPLICATION/WASM" } });
+              const streamed = await WebAssembly.instantiateStreaming(response);
+              let mimeError = false;
+              try { await WebAssembly.compileStreaming(new Response(bytes)); }
+              catch (error) { mimeError = error instanceof TypeError; }
+              globalThis.webassemblyPromiseChecks = JSON.stringify({
+                module: module instanceof WebAssembly.Module,
+                fromBytes: fromBytes.instance instanceof WebAssembly.Instance,
+                fromModule: fromModule instanceof WebAssembly.Instance,
+                streamed: streamed.instance instanceof WebAssembly.Instance,
+                mimeError,
+              });
+            })();
+            "#,
+        )
+        .unwrap();
+    runtime.run_jobs().unwrap();
+    let value = runtime.eval("webassemblyPromiseChecks").unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        r#"{"module":true,"fromBytes":true,"fromModule":true,"streamed":true,"mimeError":true}"#
+    );
+}
+
+#[test]
+fn webassembly_compilation_obeys_its_distinct_csp_permission() {
+    let bytes = "Uint8Array.of(0,97,115,109,1,0,0,0)";
+    let mut blocked = runtime_at_document_url("https://example.test/");
+    blocked.install_csp_policy(&["script-src 'self'".to_string()]);
+    blocked
+        .eval(
+            "globalThis.wasmViolations = []; document.addEventListener('securitypolicyviolation', event => wasmViolations.push(event.blockedURI));",
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(
+            &mut blocked,
+            &format!(
+                "(() => {{ try {{ new WebAssembly.Module({bytes}); return 'allowed'; }} catch (error) {{ return error.name; }} }})()"
+            ),
+        ),
+        "CompileError"
+    );
+    blocked.run_jobs().unwrap();
+    blocked.run_timers(10, 1, 30);
+    assert_eq!(
+        eval_str(&mut blocked, "wasmViolations.join(',')",),
+        "wasm-eval"
+    );
+
+    let mut wasm_only = runtime_at_document_url("https://example.test/");
+    wasm_only.install_csp_policy(&["script-src 'wasm-unsafe-eval'".to_string()]);
+    assert_eq!(
+        eval_str(
+            &mut wasm_only,
+            &format!("new WebAssembly.Module({bytes}) instanceof WebAssembly.Module"),
+        ),
+        "true"
+    );
+    assert_eq!(
+        eval_str(
+            &mut wasm_only,
+            "(() => { try { eval('1'); return 'allowed'; } catch (error) { return error.name; } })()",
+        ),
+        "EvalError"
+    );
+}
+
+#[test]
 fn webassembly_instances_call_exported_and_imported_functions() {
     let mut runtime = JsRuntime::new().unwrap();
     let value = runtime
@@ -166,7 +246,7 @@ fn webassembly_instances_call_exported_and_imported_functions() {
         .unwrap();
     assert_eq!(
         value.as_string().unwrap().to_std_string_escaped(),
-        r#"{"sum":42,"length":2,"name":"add","imported":9,"seen":8,"exception":true,"reentrant":12,"i64":"9223372036854775807","f32":1.25,"f64":2.5,"multi":"7,9","trap":true,"fuel":true,"brand":"[object WebAssembly.Instance]","nullPrototype":true,"stable":true,"immutable":true,"receiver":true}"#
+        r#"{"sum":42,"length":2,"name":"0","imported":9,"seen":8,"exception":true,"reentrant":12,"i64":"9223372036854775807","f32":1.25,"f64":2.5,"multi":"7,9","trap":true,"fuel":true,"brand":"[object WebAssembly.Instance]","nullPrototype":true,"stable":true,"immutable":true,"receiver":true}"#
     );
 }
 
@@ -418,7 +498,8 @@ fn dedicated_worker_uses_separate_global_and_round_trips_messages() {
     runtime
         .eval(
             "globalThis.workerValues = []; \
-                 const worker = new Worker('data:text/javascript,globalThis.onmessage%3De%3D%3EpostMessage(e.data%2B1)'); \
+                 const workerSource = `globalThis.onmessage=e=>postMessage({value:e.data+1,wasm:typeof WebAssembly==='object'&&typeof WebAssembly.compile==='function'&&WebAssembly.validate(Uint8Array.of(0,97,115,109,1,0,0,0))})`; \
+                 const worker = new Worker('data:text/javascript,' + encodeURIComponent(workerSource)); \
                  worker.onmessage = event => workerValues.push(event.data); \
                  worker.postMessage(41); \
                  globalThis.workerDocumentType = typeof worker.document;",
@@ -427,8 +508,12 @@ fn dedicated_worker_uses_separate_global_and_round_trips_messages() {
     boa_gc::force_collect();
     runtime.run_until_idle().unwrap();
     assert_eq!(
-        runtime.eval("workerValues[0]").unwrap().as_number(),
+        runtime.eval("workerValues[0].value").unwrap().as_number(),
         Some(42.0)
+    );
+    assert_eq!(
+        runtime.eval("workerValues[0].wasm").unwrap().as_boolean(),
+        Some(true)
     );
     assert_eq!(
         runtime
