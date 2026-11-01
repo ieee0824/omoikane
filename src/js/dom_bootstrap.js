@@ -25814,6 +25814,127 @@ let omoikaneUserActivationState;
   }
   for (const type of ["start", "stop", "dataavailable", "pause", "resume", "error"]) defineEventHandler(MediaRecorder.prototype, type);
 
+  const webCodecChunkState = new WeakMap();
+  function ownedBufferSource(value, label = "data") {
+    if (value instanceof ArrayBuffer) return new Uint8Array(value).slice();
+    if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+    throw new TypeError(`${label} must be a BufferSource`);
+  }
+  function copyOwnedBytes(bytes, destination) {
+    let target;
+    if (destination instanceof ArrayBuffer) target = new Uint8Array(destination);
+    else if (ArrayBuffer.isView(destination)) target = new Uint8Array(destination.buffer, destination.byteOffset, destination.byteLength);
+    else throw new TypeError("destination must be a BufferSource");
+    if (target.byteLength < bytes.byteLength) throw new TypeError("destination is not large enough");
+    target.set(bytes);
+  }
+  class EncodedVideoChunk {
+    constructor(init) {
+      const value = Object(init); const type = String(value.type);
+      if (type !== "key" && type !== "delta") throw new TypeError("Invalid encoded video chunk type");
+      if (value.timestamp === undefined || value.data === undefined) throw new TypeError("EncodedVideoChunk requires timestamp and data");
+      webCodecChunkState.set(this, { type, timestamp: Number(value.timestamp), duration: value.duration === undefined ? null : Number(value.duration), bytes: ownedBufferSource(value.data) });
+    }
+    __state() { return webCodecChunkState.get(this) || illegalInvocation(); }
+    get type() { return this.__state().type; } get timestamp() { return this.__state().timestamp; }
+    get duration() { return this.__state().duration; } get byteLength() { return this.__state().bytes.byteLength; }
+    copyTo(destination) { copyOwnedBytes(this.__state().bytes, destination); }
+    get [Symbol.toStringTag]() { return "EncodedVideoChunk"; }
+  }
+  class EncodedAudioChunk {
+    constructor(init) {
+      const value = Object(init); const type = String(value.type);
+      if (type !== "key" && type !== "delta") throw new TypeError("Invalid encoded audio chunk type");
+      if (value.timestamp === undefined || value.data === undefined) throw new TypeError("EncodedAudioChunk requires timestamp and data");
+      webCodecChunkState.set(this, { type, timestamp: Number(value.timestamp), duration: value.duration === undefined ? null : Number(value.duration), bytes: ownedBufferSource(value.data) });
+    }
+    __state() { return webCodecChunkState.get(this) || illegalInvocation(); }
+    get type() { return this.__state().type; } get timestamp() { return this.__state().timestamp; }
+    get duration() { return this.__state().duration; } get byteLength() { return this.__state().bytes.byteLength; }
+    copyTo(destination) { copyOwnedBytes(this.__state().bytes, destination); }
+    get [Symbol.toStringTag]() { return "EncodedAudioChunk"; }
+  }
+  class VideoColorSpace {
+    constructor(init = {}) { const value = Object(init); for (const name of ["primaries", "transfer", "matrix", "fullRange"]) Object.defineProperty(this, name, { enumerable: true, value: value[name] === undefined ? null : value[name] }); }
+    toJSON() { return { primaries: this.primaries, transfer: this.transfer, matrix: this.matrix, fullRange: this.fullRange }; }
+    get [Symbol.toStringTag]() { return "VideoColorSpace"; }
+  }
+  const audioDataState = new WeakMap();
+  const audioFormats = Object.freeze({ u8: [Uint8Array, 1], "u8-planar": [Uint8Array, 1], s16: [Int16Array, 2], "s16-planar": [Int16Array, 2], s32: [Int32Array, 4], "s32-planar": [Int32Array, 4], f32: [Float32Array, 4], "f32-planar": [Float32Array, 4] });
+  class AudioData {
+    constructor(init) {
+      const value = Object(init);
+      for (const name of ["format", "sampleRate", "numberOfFrames", "numberOfChannels", "timestamp", "data"]) if (value[name] === undefined) throw new TypeError(`AudioData requires ${name}`);
+      const format = String(value.format), info = audioFormats[format];
+      const sampleRate = Number(value.sampleRate), numberOfFrames = Number(value.numberOfFrames) >>> 0, numberOfChannels = Number(value.numberOfChannels) >>> 0;
+      if (!info || !(sampleRate > 0) || !numberOfFrames || !numberOfChannels) throw new TypeError("Invalid AudioData initialization");
+      const bytes = ownedBufferSource(value.data); const required = numberOfFrames * numberOfChannels * info[1];
+      if (bytes.byteLength < required) throw new TypeError("AudioDataInit.data is too small");
+      audioDataState.set(this, { format, sampleRate, numberOfFrames, numberOfChannels, timestamp: Number(value.timestamp), duration: numberOfFrames / sampleRate * 1000000, bytes: bytes.slice(0, required), closed: false });
+    }
+    __state() { return audioDataState.get(this) || illegalInvocation(); }
+    get format() { const s=this.__state(); return s.closed ? null : s.format; } get sampleRate() { const s=this.__state(); return s.closed ? 0 : s.sampleRate; }
+    get numberOfFrames() { const s=this.__state(); return s.closed ? 0 : s.numberOfFrames; } get numberOfChannels() { const s=this.__state(); return s.closed ? 0 : s.numberOfChannels; }
+    get duration() { return this.__state().duration; } get timestamp() { return this.__state().timestamp; }
+    allocationSize(options) { const s=this.__state(); if (s.closed) throw new DOMException("AudioData is closed", "InvalidStateError"); const o=Object(options), plane=Number(o.planeIndex)>>>0; const planar=s.format.endsWith("-planar"); if ((!planar && plane) || plane>=s.numberOfChannels) throw new RangeError("Invalid planeIndex"); const offset=Number(o.frameOffset||0)>>>0, count=o.frameCount===undefined?s.numberOfFrames-offset:Number(o.frameCount)>>>0; if(offset+count>s.numberOfFrames) throw new RangeError("Invalid frame range"); return count*(planar?1:s.numberOfChannels)*audioFormats[s.format][1]; }
+    copyTo(destination, options) { const s=this.__state(); const size=this.allocationSize(options); const target=ownedDestination(destination, size); const o=Object(options), plane=Number(o.planeIndex)>>>0, offset=Number(o.frameOffset||0)>>>0, bps=audioFormats[s.format][1], planar=s.format.endsWith("-planar"); const start=(planar?plane*s.numberOfFrames+offset:offset*s.numberOfChannels)*bps; target.set(s.bytes.subarray(start,start+size)); }
+    clone() { const s=this.__state(); if(s.closed) throw new DOMException("AudioData is closed", "InvalidStateError"); return new AudioData({ format:s.format, sampleRate:s.sampleRate, numberOfFrames:s.numberOfFrames, numberOfChannels:s.numberOfChannels, timestamp:s.timestamp, data:s.bytes }); }
+    close() { this.__state().closed=true; } get [Symbol.toStringTag]() { return "AudioData"; }
+  }
+  function ownedDestination(value, minimum) { let out; if(value instanceof ArrayBuffer) out=new Uint8Array(value); else if(ArrayBuffer.isView(value)) out=new Uint8Array(value.buffer,value.byteOffset,value.byteLength); else throw new TypeError("destination must be a BufferSource"); if(out.byteLength<minimum) throw new RangeError("destination is too small"); return out; }
+  const videoFrameState = new WeakMap();
+  function videoFormatSize(format, width, height) { if(format==="RGBA"||format==="RGBX"||format==="BGRA"||format==="BGRX") return width*height*4; if(format==="I420") return width*height+2*Math.ceil(width/2)*Math.ceil(height/2); if(format==="NV12") return width*height+2*Math.ceil(width/2)*Math.ceil(height/2); throw new TypeError("Unsupported VideoFrame format"); }
+  class VideoFrame {
+    constructor(source, init = {}) {
+      if (source instanceof VideoFrame) { const s=source.__state(); if(s.closed) throw new DOMException("VideoFrame is closed", "InvalidStateError"); videoFrameState.set(this,{...s,bytes:s.bytes.slice(),closed:false,timestamp:init.timestamp===undefined?s.timestamp:Number(init.timestamp),duration:init.duration===undefined?s.duration:Number(init.duration)}); return; }
+      const value=Object(init); if(value.format===undefined||value.codedWidth===undefined||value.codedHeight===undefined||value.timestamp===undefined) throw new TypeError("Raw VideoFrame requires format, codedWidth, codedHeight and timestamp");
+      const format=String(value.format), codedWidth=Number(value.codedWidth)>>>0, codedHeight=Number(value.codedHeight)>>>0; if(!codedWidth||!codedHeight) throw new TypeError("Invalid VideoFrame dimensions"); const size=videoFormatSize(format,codedWidth,codedHeight), bytes=ownedBufferSource(source); if(bytes.byteLength<size) throw new TypeError("VideoFrame data is too small");
+      videoFrameState.set(this,{format,codedWidth,codedHeight,displayWidth:value.displayWidth===undefined?codedWidth:Number(value.displayWidth)>>>0,displayHeight:value.displayHeight===undefined?codedHeight:Number(value.displayHeight)>>>0,visibleRect:Object.freeze(value.visibleRect?{...value.visibleRect}:{x:0,y:0,width:codedWidth,height:codedHeight}),timestamp:Number(value.timestamp),duration:value.duration===undefined?null:Number(value.duration),colorSpace:new VideoColorSpace(value.colorSpace),bytes:bytes.slice(0,size),closed:false});
+    }
+    __state(){return videoFrameState.get(this)||illegalInvocation();} get format(){const s=this.__state();return s.closed?null:s.format;} get codedWidth(){const s=this.__state();return s.closed?0:s.codedWidth;} get codedHeight(){const s=this.__state();return s.closed?0:s.codedHeight;} get displayWidth(){const s=this.__state();return s.closed?0:s.displayWidth;} get displayHeight(){const s=this.__state();return s.closed?0:s.displayHeight;} get visibleRect(){const s=this.__state();return s.closed?null:s.visibleRect;} get timestamp(){return this.__state().timestamp;} get duration(){return this.__state().duration;} get colorSpace(){return this.__state().colorSpace;}
+    allocationSize(){const s=this.__state();if(s.closed)throw new DOMException("VideoFrame is closed","InvalidStateError");return s.bytes.byteLength;} copyTo(destination){const s=this.__state();const target=ownedDestination(destination,this.allocationSize());target.set(s.bytes);return Promise.resolve([{offset:0,stride:s.codedWidth*(s.format.startsWith("RGB")||s.format.startsWith("BGR")?4:1)}]);} clone(){return new VideoFrame(this);} close(){this.__state().closed=true;} metadata(){if(this.__state().closed)throw new DOMException("VideoFrame is closed","InvalidStateError");return {};} get [Symbol.toStringTag](){return "VideoFrame";}
+  }
+  const codecState = new WeakMap();
+  function codecConfig(kind, value) { const v=Object(value); if(v.codec===undefined||String(v.codec)==="") throw new TypeError("codec is required"); const out={kind,codec:String(v.codec)}; if(kind.startsWith("video")){ if(kind==="video-encoder"&&(v.width===undefined||v.height===undefined))throw new TypeError("VideoEncoder requires width and height"); out.codedWidth=Number(v.codedWidth===undefined?v.width:v.codedWidth)>>>0||undefined; out.codedHeight=Number(v.codedHeight===undefined?v.height:v.codedHeight)>>>0||undefined; } else { out.sampleRate=Number(v.sampleRate)>>>0||undefined; out.numberOfChannels=Number(v.numberOfChannels)>>>0||undefined; if(kind==="audio-encoder"&&(!out.sampleRate||!out.numberOfChannels))throw new TypeError("AudioEncoder requires sampleRate and numberOfChannels"); } return out; }
+  function codecSupport(kind, config) { let normalized; try{normalized=codecConfig(kind,config);}catch(error){return Promise.reject(error);} const supported=!!__omoikane_web_codecs("supports",JSON.stringify(normalized),"",new Uint8Array()); return Promise.resolve({supported,config:{...Object(config)}}); }
+  class CodecBase extends MediaEventTarget {
+    constructor(kind, init){super();const value=Object(init);if(typeof value.output!=="function"||typeof value.error!=="function")throw new TypeError("Codec requires output and error callbacks");codecState.set(this,{kind,state:"unconfigured",config:null,output:value.output,error:value.error,queue:0,generation:0,flushes:[]});}
+    __state(){return codecState.get(this)||illegalInvocation();} get state(){return this.__state().state;} get decodeQueueSize(){const s=this.__state();if(!s.kind.endsWith("decoder"))return undefined;return s.queue;} get encodeQueueSize(){const s=this.__state();if(!s.kind.endsWith("encoder"))return undefined;return s.queue;}
+    configure(config){const s=this.__state();if(s.state==="closed")throw new DOMException("Codec is closed","InvalidStateError");const normalized=codecConfig(s.kind,config);s.state="configured";s.config=normalized;s.generation++;const generation=s.generation;queueMicrotask(()=>{if(s.generation!==generation||s.state!=="configured")return;if(!__omoikane_web_codecs("supports",JSON.stringify(normalized),"",new Uint8Array()))this.__fail(new DOMException("Unsupported codec configuration","NotSupportedError"));});}
+    __submit(value, requestedKeyFrame=false){const s=this.__state();if(s.state!=="configured")throw new DOMException("Codec is not configured","InvalidStateError");let bytes,timestamp,duration,keyFrame=!!requestedKeyFrame;if(value instanceof EncodedVideoChunk||value instanceof EncodedAudioChunk){const c=webCodecChunkState.get(value);bytes=c.bytes;timestamp=c.timestamp;duration=c.duration;keyFrame=c.type==="key";}else if(value instanceof VideoFrame){const f=videoFrameState.get(value);if(f.closed)throw new DOMException("VideoFrame is closed","InvalidStateError");bytes=f.bytes;timestamp=f.timestamp;duration=f.duration;}else if(value instanceof AudioData){const a=audioDataState.get(value);if(a.closed)throw new DOMException("AudioData is closed","InvalidStateError");bytes=a.bytes;timestamp=a.timestamp;duration=a.duration;}else throw new TypeError("Invalid codec input");s.queue++;const generation=s.generation;queueMicrotask(()=>{if(s.generation!==generation||s.state!=="configured")return;try{const result=JSON.parse(String(__omoikane_web_codecs("process",JSON.stringify(s.config),JSON.stringify({kind:s.kind,codec:s.config.codec,timestamp,duration,keyFrame}),bytes)));let output;if(s.kind==="video-decoder")output=new VideoFrame(new Uint8Array(result.data),{format:"RGBA",codedWidth:s.config.codedWidth||1,codedHeight:s.config.codedHeight||Math.max(1,Math.floor(result.data.length/4)),timestamp:result.timestamp,duration:result.duration});else if(s.kind==="audio-decoder")output=new AudioData({format:"f32",sampleRate:s.config.sampleRate||48000,numberOfChannels:s.config.numberOfChannels||1,numberOfFrames:Math.max(1,Math.floor(result.data.length/4/(s.config.numberOfChannels||1))),timestamp:result.timestamp,data:new Uint8Array(result.data)});else if(s.kind==="video-encoder")output=new EncodedVideoChunk({type:keyFrame?"key":"delta",timestamp:result.timestamp,duration:result.duration,data:new Uint8Array(result.data)});else output=new EncodedAudioChunk({type:"key",timestamp:result.timestamp,duration:result.duration,data:new Uint8Array(result.data)});s.output(output,{});}catch(error){this.__fail(new DOMException(String(error),String(error).includes("NotSupportedError")?"NotSupportedError":"EncodingError"));return;}finally{if(s.queue>0){s.queue--;dispatchMediaEvent(this,"dequeue");}}this.__settleFlushes();});}
+    flush(){const s=this.__state();if(s.state!=="configured")return Promise.reject(new DOMException("Codec is not configured","InvalidStateError"));return new Promise((resolve,reject)=>{s.flushes.push({resolve,reject,generation:s.generation});this.__settleFlushes();});}
+    __settleFlushes(){const s=this.__state();if(s.queue)return;const list=s.flushes.splice(0);queueMicrotask(()=>list.forEach(item=>item.generation===s.generation?item.resolve():item.reject(new DOMException("Flush was reset","AbortError"))));}
+    reset(){const s=this.__state();if(s.state==="closed")throw new DOMException("Codec is closed","InvalidStateError");s.state="unconfigured";s.config=null;s.queue=0;s.generation++;this.__settleFlushes();}
+    close(){const s=this.__state();if(s.state==="closed")return;s.state="closed";s.config=null;s.queue=0;s.generation++;this.__settleFlushes();}
+    __fail(error){const s=this.__state();if(s.state==="closed")return;s.state="closed";s.queue=0;s.generation++;queueMicrotask(()=>s.error(error));this.__settleFlushes();}
+  }
+  defineEventHandler(CodecBase.prototype,"dequeue");
+  class VideoDecoder extends CodecBase{constructor(init){super("video-decoder",init);this.__state().keyRequired=true;}configure(config){super.configure(config);this.__state().keyRequired=true;}decode(chunk){if(!(chunk instanceof EncodedVideoChunk))throw new TypeError("decode requires EncodedVideoChunk");const s=this.__state();if(s.keyRequired&&chunk.type!=="key")throw new DOMException("A key chunk is required","DataError");s.keyRequired=false;this.__submit(chunk);}reset(){super.reset();this.__state().keyRequired=true;}static isConfigSupported(config){return codecSupport("video-decoder",config);}}
+  class VideoEncoder extends CodecBase{constructor(init){super("video-encoder",init);}encode(frame,options={}){if(!(frame instanceof VideoFrame))throw new TypeError("encode requires VideoFrame");this.__submit(frame,!!Object(options).keyFrame);}static isConfigSupported(config){return codecSupport("video-encoder",config);}}
+  class AudioDecoder extends CodecBase{constructor(init){super("audio-decoder",init);}decode(chunk){if(!(chunk instanceof EncodedAudioChunk))throw new TypeError("decode requires EncodedAudioChunk");this.__submit(chunk);}static isConfigSupported(config){return codecSupport("audio-decoder",config);}}
+  class AudioEncoder extends CodecBase{constructor(init){super("audio-encoder",init);}encode(data){if(!(data instanceof AudioData))throw new TypeError("encode requires AudioData");this.__submit(data);}static isConfigSupported(config){return codecSupport("audio-encoder",config);}}
+  const imageDecoderState = new WeakMap();
+  class ImageDecoder {
+    constructor(init) {
+      const value=Object(init); if(value.type===undefined||value.data===undefined)throw new TypeError("ImageDecoder requires type and data");
+      const type=String(value.type); if(type==="")throw new TypeError("ImageDecoder type must not be empty");
+      const data=ownedBufferSource(value.data); const config={kind:"image-decoder",codec:type,codedWidth:Number(value.desiredWidth)>>>0||undefined,codedHeight:Number(value.desiredHeight)>>>0||undefined};
+      const supported=!!__omoikane_web_codecs("supports",JSON.stringify(config),"",new Uint8Array());
+      const track=Object.freeze({animated:false,frameCount:supported?1:0,repetitionCount:0,selected:true});
+      const tracks=Object.freeze({ready:Promise.resolve(),selectedTrack:track,length:1,0:track});
+      imageDecoderState.set(this,{type,data,config,supported,closed:false,complete:true,tracks});
+      this.completed=supported?Promise.resolve():Promise.reject(new DOMException("Unsupported image type","NotSupportedError"));
+      this.completed.catch(()=>{});
+    }
+    __state(){return imageDecoderState.get(this)||illegalInvocation();}
+    get type(){return this.__state().type;} get complete(){return this.__state().complete;} get tracks(){return this.__state().tracks;}
+    decode(options={}){const s=this.__state();if(s.closed)return Promise.reject(new DOMException("ImageDecoder is closed","InvalidStateError"));if(!s.supported)return Promise.reject(new DOMException("Unsupported image type","NotSupportedError"));return Promise.resolve().then(()=>{const result=JSON.parse(String(__omoikane_web_codecs("process",JSON.stringify(s.config),JSON.stringify({kind:"image-decoder",codec:s.type,timestamp:0,duration:null,keyFrame:true}),s.data)));const width=s.config.codedWidth||1,height=s.config.codedHeight||Math.max(1,Math.floor(result.data.length/4));return {image:new VideoFrame(new Uint8Array(result.data),{format:"RGBA",codedWidth:width,codedHeight:height,timestamp:0}),complete:true};});}
+    reset(){const s=this.__state();if(s.closed)throw new DOMException("ImageDecoder is closed","InvalidStateError");}
+    close(){this.__state().closed=true;}
+    static isTypeSupported(type){const codec=String(type);if(codec==="")return Promise.reject(new TypeError("Image type must not be empty"));return Promise.resolve(!!__omoikane_web_codecs("supports",JSON.stringify({kind:"image-decoder",codec}),"",new Uint8Array()));}
+    get [Symbol.toStringTag](){return "ImageDecoder";}
+  }
+
   const mediaSourceToken = {};
   const mediaSourceObjectUrls = new Map();
   const mediaSourceState = new WeakMap();
@@ -26076,6 +26197,16 @@ let omoikaneUserActivationState;
   globalThis.MediaSourceHandle = MediaSourceHandle;
   globalThis.SourceBuffer = SourceBuffer;
   globalThis.SourceBufferList = SourceBufferList;
+  globalThis.EncodedVideoChunk = EncodedVideoChunk;
+  globalThis.EncodedAudioChunk = EncodedAudioChunk;
+  globalThis.VideoColorSpace = VideoColorSpace;
+  globalThis.VideoFrame = VideoFrame;
+  globalThis.AudioData = AudioData;
+  globalThis.VideoDecoder = VideoDecoder;
+  globalThis.VideoEncoder = VideoEncoder;
+  globalThis.AudioDecoder = AudioDecoder;
+  globalThis.AudioEncoder = AudioEncoder;
+  globalThis.ImageDecoder = ImageDecoder;
   globalThis.navigator = new Navigator(navigatorConstructionToken);
   Object.defineProperty(globalThis, "isSecureContext", {
     configurable: true,
@@ -33233,9 +33364,13 @@ let omoikaneUserActivationState;
       const transferable = list[index];
       if (safeWeakMapHas(customStateSetObjects, transferable)) throw dataCloneError();
       const port = transferable instanceof MessagePort;
-      if ((nativeArrayBufferInfo(transferable) === null && !port) ||
+      const media = transferable instanceof VideoFrame || transferable instanceof AudioData;
+      if ((nativeArrayBufferInfo(transferable) === null && !port && !media) ||
           (port && transferable._closed) || hasSetValue(seen, transferable)) {
         throw dataCloneError("The transfer list contains an invalid or duplicate object.");
+      }
+      if (media && transferable.__state().closed) {
+        throw dataCloneError("A closed media resource cannot be transferred.");
       }
       addSetValue(seen, transferable);
     }
@@ -33269,6 +33404,15 @@ let omoikaneUserActivationState;
         throw dataCloneError("A MessagePort must be transferred to be cloned.");
       }
       state.nodes[id] = ["P", value];
+    } else if (value instanceof EncodedVideoChunk || value instanceof EncodedAudioChunk) {
+      const chunk = webCodecChunkState.get(value);
+      state.nodes[id] = ["C", value instanceof EncodedVideoChunk, chunk.type,
+        chunk.timestamp, chunk.duration, chunk.bytes.slice()];
+    } else if (value instanceof VideoFrame || value instanceof AudioData) {
+      const media = value.__state();
+      if (media.closed) throw dataCloneError("A closed media resource cannot be cloned.");
+      state.nodes[id] = [value instanceof VideoFrame ? "F" : "A", value,
+        safeMapHas(state.transferSet, value)];
     } else if (value instanceof IntrinsicDate) {
       state.nodes[id] = ["d", intrinsicDateGetTime(value)];
     } else if (value instanceof IntrinsicRegExp) {
@@ -33347,6 +33491,15 @@ let omoikaneUserActivationState;
         case "x": objects[index] = new IntrinsicRegExp(node[1], node[2]); break;
         case "b": objects[index] = node[2] ? safeMapGet(transferred, node[1]) : node[1]; break;
         case "P": objects[index] = safeMapGet(transferred, node[1]); break;
+        case "C": {
+          const Constructor = node[1] ? EncodedVideoChunk : EncodedAudioChunk;
+          objects[index] = new Constructor({
+            type: node[2], timestamp: node[3], duration: node[4], data: node[5],
+          });
+          break;
+        }
+        case "F": objects[index] = node[2] ? safeMapGet(transferred, node[1]) : node[1].clone(); break;
+        case "A": objects[index] = node[2] ? safeMapGet(transferred, node[1]) : node[1].clone(); break;
         case "m": objects[index] = new IntrinsicMap(); break;
         case "t": objects[index] = new IntrinsicSet(); break;
         case "a": objects[index] = new IntrinsicArray(node[1]); break;
@@ -33417,6 +33570,12 @@ let omoikaneUserActivationState;
         if (transferList[index]._closed) throw dataCloneError("A closed MessagePort cannot be transferred.");
         continue;
       }
+      if (transferList[index] instanceof VideoFrame || transferList[index] instanceof AudioData) {
+        if (transferList[index].__state().closed) {
+          throw dataCloneError("A closed media resource cannot be transferred.");
+        }
+        continue;
+      }
       const info = nativeArrayBufferInfo(transferList[index]);
       if (info === null || info[0]) throw dataCloneError("A detached ArrayBuffer cannot be transferred.");
     }
@@ -33444,6 +33603,9 @@ let omoikaneUserActivationState;
         source._pendingMessages = [];
         source._closed = true;
         if (transferredPorts) transferredPorts.push(target);
+      } else if (source instanceof VideoFrame || source instanceof AudioData) {
+        target = source.clone();
+        source.close();
       } else {
         try { target = nativeTransferArrayBuffer(source); }
         catch (_) { throw dataCloneError("The ArrayBuffer could not be transferred."); }

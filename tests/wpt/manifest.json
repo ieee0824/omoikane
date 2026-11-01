@@ -1568,6 +1568,9 @@
     {"path": "speech-api/SpeechRecognition-onerror.https.html"},
     {"path": "speech-api/SpeechSynthesisErrorEvent-constructor.html"},
     {"path": "speech-api/SpeechSynthesisEvent-constructor.html"},
-    {"path": "speech-api/SpeechSynthesisUtterance-basics.https.html"}
+    {"path": "speech-api/SpeechSynthesisUtterance-basics.https.html"},
+    {"path": "webcodecs/encoded-audio-chunk.any.js"},
+    {"path": "webcodecs/encoded-video-chunk.any.js"},
+    {"path": "webcodecs/videoColorSpace.any.js"}
   ]
 }
