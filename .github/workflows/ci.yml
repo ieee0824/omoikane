@@ -90,6 +90,8 @@ jobs:
         run: |
           mkdir -p .artifacts/normal-test-results
           python3 scripts/select-gate-artifacts.py .artifacts/normal-test-input-attempts .artifacts/normal-test-inputs --prefix normal-test- > .artifacts/normal-test-results/input-${{ matrix.partition }}-selection.json
+      - name: Reclaim only the unused Android SDK on the hosted normal test runner
+        run: python3 scripts/ci-test-partitions.py clean-runner-sdk .artifacts/normal-test-results/space-${{ matrix.partition }}
       - name: Record capacity before cache lookup
         run: python3 scripts/ci-test-partitions.py space .artifacts/normal-test-results/space-${{ matrix.partition }} before-cache
       - name: Bind the empty target before checking the existing Cargo cache

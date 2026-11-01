@@ -246,6 +246,41 @@ def snapshot(output, stage):
                          "lookup_exact_hit": os.environ.get("OMOIKANE_CI_CACHE_HIT")}})
 
 
+ANDROID_SDK = Path("/usr/local/lib/android/sdk")
+
+
+def validate_runner_sdk_environment(environment):
+    """Accept only the disposable Linux hosted runner's documented SDK path."""
+    if environment.get("RUNNER_ENVIRONMENT") != "github-hosted" or environment.get("RUNNER_OS") != "Linux":
+        raise ValueError("SDK cleanup requires a GitHub hosted Linux runner")
+    for name in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+        if environment.get(name) != str(ANDROID_SDK):
+            raise ValueError(f"SDK cleanup requires {name}={ANDROID_SDK}")
+
+
+def clean_runner_sdk(output):
+    """Remove only the unused fixed SDK on normal CI; persist before/after evidence."""
+    validate_runner_sdk_environment(os.environ)
+    if ANDROID_SDK.resolve() != ANDROID_SDK or ANDROID_SDK.is_symlink():
+        raise ValueError("SDK cleanup refuses a redirected path")
+    output.mkdir(parents=True, exist_ok=True)
+    evidence = {"path": str(ANDROID_SDK), "image_version": os.environ.get("ImageVersion"),
+                "environment": {name: os.environ.get(name) for name in
+                                ("RUNNER_ENVIRONMENT", "RUNNER_OS", "ANDROID_HOME", "ANDROID_SDK_ROOT")}}
+    snapshot(output, "before-sdk-cleanup")
+    if ANDROID_SDK.exists():
+        measured = subprocess.run(["du", "-sk", str(ANDROID_SDK)], capture_output=True, text=True, check=True)
+        evidence["sdk_du_before"] = measured.stdout.strip()
+    write_json(output / "sdk-cleanup.json", evidence)
+    # No environment-supplied path is passed to the deletion command.
+    subprocess.run(["sudo", "rm", "-rf", "--", str(ANDROID_SDK)], check=True)
+    if ANDROID_SDK.exists():
+        raise ValueError("SDK cleanup did not remove the fixed SDK")
+    evidence["complete"] = True
+    write_json(output / "sdk-cleanup.json", evidence)
+    snapshot(output, "after-sdk-cleanup")
+
+
 def capacity_limit(value):
     """Local small-fixture tests may tighten, but never enlarge, the CI limit."""
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 < value <= 10:
@@ -438,6 +473,8 @@ def main():
     space = subparsers.add_parser("space")
     space.add_argument("output", type=Path)
     space.add_argument("stage")
+    cleanup = subparsers.add_parser("clean-runner-sdk")
+    cleanup.add_argument("output", type=Path)
     for name in ["save-cache-binding", "restore-cache-binding"]:
         binding = subparsers.add_parser(name)
         binding.add_argument("backup", type=Path)
@@ -450,6 +487,8 @@ def main():
         return aggregate(args.inputs, args.partitions, args.output, args.partition_job_result)
     elif args.command == "space":
         snapshot(args.output, args.stage)
+    elif args.command == "clean-runner-sdk":
+        clean_runner_sdk(args.output)
     elif args.command == "save-cache-binding":
         save_cache_binding(args.backup)
     elif args.command == "restore-cache-binding":

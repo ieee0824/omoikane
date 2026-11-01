@@ -441,6 +441,49 @@ class CacheBindingTests(unittest.TestCase):
         self.assertEqual(destination.read_text(), "preserve")
 
 
+class RunnerCleanupTests(unittest.TestCase):
+    def test_only_documented_hosted_linux_sdk_environment_is_accepted(self):
+        environment = {"RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
+                       "ANDROID_HOME": str(ci.ANDROID_SDK), "ANDROID_SDK_ROOT": str(ci.ANDROID_SDK)}
+        ci.validate_runner_sdk_environment(environment)
+        for name, value in [("RUNNER_ENVIRONMENT", "self-hosted"), ("RUNNER_OS", "macOS"),
+                            ("ANDROID_HOME", "/tmp/sdk"), ("ANDROID_SDK_ROOT", "/")]:
+            with self.subTest(name=name):
+                changed = dict(environment, **{name: value})
+                with self.assertRaises(ValueError):
+                    ci.validate_runner_sdk_environment(changed)
+        for name in environment:
+            with self.subTest(missing=name):
+                changed = dict(environment)
+                del changed[name]
+                with self.assertRaises(ValueError):
+                    ci.validate_runner_sdk_environment(changed)
+
+    def test_cleanup_command_is_fixed_and_retains_capacity_evidence(self):
+        environment = {"RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "Linux",
+                       "ANDROID_HOME": str(ci.ANDROID_SDK), "ANDROID_SDK_ROOT": str(ci.ANDROID_SDK)}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with mock.patch.dict(os.environ, environment, clear=True), \
+                    mock.patch.object(Path, "resolve", return_value=ci.ANDROID_SDK), \
+                    mock.patch.object(Path, "is_symlink", return_value=False), \
+                    mock.patch.object(Path, "exists", side_effect=[True, False]), \
+                    mock.patch.object(ci, "snapshot") as snapshot, \
+                    mock.patch.object(ci.subprocess, "run", return_value=mock.Mock(stdout="123 sdk")) as run:
+                ci.clean_runner_sdk(output)
+            self.assertEqual(run.call_args_list[-1],
+                             mock.call(["sudo", "rm", "-rf", "--", "/usr/local/lib/android/sdk"], check=True))
+            self.assertEqual(snapshot.call_args_list,
+                             [mock.call(output, "before-sdk-cleanup"), mock.call(output, "after-sdk-cleanup")])
+            self.assertTrue(json.loads((output / "sdk-cleanup.json").read_text())["complete"])
+
+    def test_invalid_runner_never_invokes_cleanup(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(ci.subprocess, "run") as run:
+            with self.assertRaises(ValueError):
+                ci.clean_runner_sdk(Path("unused"))
+            run.assert_not_called()
+
+
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
         workflow = SCRIPT.parents[1] / ".github/workflows/ci.yml"

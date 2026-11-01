@@ -94,3 +94,8 @@ python3 scripts/ci-test-partitions.py plan
 
 実際のCargoを含む検証は、worktree専用のext4 targetと共通resource queueで直列化する。
 rootとnested Boa workspaceのtargetは共有しない。
+
+normal partitionの使い捨てGitHub hosted Linux runnerでは、未使用Android SDKの固定パス
+`/usr/local/lib/android/sdk`だけを整理する。両SDK環境変数・runner種別と実パスを照合し、
+一致しなければ削除せず失敗する。実ImageVersion、SDK容量とfilesystem容量の前後を保存する。
+source、Cargo home、Rust toolchain、target、証跡は整理対象にしない。guardの10GiB/空き2GiBは維持する。
