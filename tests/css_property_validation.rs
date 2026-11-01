@@ -3,6 +3,102 @@ use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
 
 #[test]
+fn word_spacing_zero_computes_to_a_length_through_each_declaration_boundary() {
+    let mut runtime = JsRuntime::with_document(
+        TreeBuilder::parse("<style>#target {word-spacing: 0}</style><div id=target></div>")
+            .document(),
+    )
+    .unwrap();
+    let actual = runtime
+        .eval(
+            r#"(() => {
+        const target = document.getElementById('target');
+        const computed = getComputedStyle(target);
+        const values = [computed.wordSpacing];
+        target.setAttribute('style', 'word-spacing:0');
+        values.push(computed.wordSpacing);
+        target.style.setProperty('word-spacing', '0');
+        values.push(computed.wordSpacing);
+        target.style.cssText = 'word-spacing:0';
+        values.push(computed.wordSpacing);
+        return JSON.stringify(values);
+    })()"#,
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(actual, r#"["0px","0px","0px","0px"]"#);
+}
+
+#[test]
+fn cssom_computation_closes_implicit_math_functions_before_declaration_delimiters() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let actual = runtime
+        .eval(
+            r#"(() => {
+        const target = document.body.appendChild(document.createElement('div'));
+        const values = [];
+        for (const [property, input] of [
+            ['word-spacing', 'calc(10px - (5% + 10%)'],
+            ['scale', '2 calc(300% * sign(1em - 1px)']
+        ]) {
+            target.style.setProperty(property, input);
+            values.push(getComputedStyle(target).getPropertyValue(property));
+            target.style.cssText = property + ':' + input;
+            values.push(getComputedStyle(target).getPropertyValue(property));
+        }
+        target.style.content = '"("';
+        values.push(target.style.content);
+        return JSON.stringify(values);
+    })()"#,
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        actual,
+        r#"["calc(-15% + 10px)","calc(-15% + 10px)","2 3","2 3","\"(\""]"#
+    );
+}
+
+#[test]
+fn svg_style_updates_and_namespaced_mutations_discard_stale_computation_sources() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let actual = runtime
+        .eval(
+            r#"(() => {
+        return JSON.stringify([false, true].map(svg => {
+            const target = svg
+                ? document.createElementNS('http://www.w3.org/2000/svg', 'g')
+                : document.createElement('div');
+            document.body.appendChild(target);
+            const computed = getComputedStyle(target);
+            target.style.paintOrder = 'fill stroke';
+            target.style.paintOrder = 'fill markers';
+            const values = [computed.paintOrder];
+            target.style.paintOrder = 'stroke fill';
+            target.setAttributeNS(null, 'style', 'paint-order: markers stroke');
+            values.push(computed.paintOrder);
+            target.style.paintOrder = 'fill stroke';
+            target.removeAttributeNS(null, 'style');
+            values.push(computed.paintOrder);
+            return values;
+        }));
+    })()"#,
+        )
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        actual,
+        r#"[["fill markers","markers stroke","normal"],["fill markers","markers stroke","normal"]]"#
+    );
+}
+
+#[test]
 fn property_rule_cssom_preserves_escaped_literal_identifiers() {
     let mut runtime = JsRuntime::new().unwrap();
     assert_eq!(runtime.eval(r#"(() => {

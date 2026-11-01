@@ -17134,6 +17134,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(set_style_computation_source_native),
         ),
         (
+            js_string!("__omoikane_close_style_value_functions"),
+            1,
+            NativeFunction::from_copy_closure(close_style_value_functions_native),
+        ),
+        (
             js_string!("__omoikane_set_attribute_ns"),
             5,
             NativeFunction::from_copy_closure(set_attribute_ns_native),
@@ -23775,6 +23780,22 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
         }
         Ok(JsValue::undefined())
     })
+}
+
+/// Completes CSSOM component values before they are embedded in a declaration list.
+fn close_style_value_functions_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let value = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_escaped();
+    let completed = crate::css::style::close_unfinished_functions(&value);
+    Ok(js_string!(completed).into())
 }
 
 fn set_style_computation_source_native(

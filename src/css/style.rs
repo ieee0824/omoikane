@@ -13583,7 +13583,8 @@ pub(crate) fn normalize_counter_specified(property: &str, text: &str) -> Option<
     }
 }
 
-fn close_unfinished_functions(value: &str) -> String {
+/// Closes parentheses at EOF without normalizing the original component tokens.
+pub(crate) fn close_unfinished_functions(value: &str) -> String {
     let Ok(tokens) = super::tokenize(value) else {
         return value.to_string();
     };
@@ -14998,7 +14999,8 @@ fn compute_value(value: &Value, property_name: &str, ctx: ResolutionContext) -> 
         }
     }
     if property_name.eq_ignore_ascii_case("word-spacing")
-        && matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("normal"))
+        && (matches!(value, Value::Keyword(keyword) if keyword.eq_ignore_ascii_case("normal"))
+            || matches!(value, Value::Number(number) if *number == 0.0))
     {
         return ComputedValue::Px(0.0);
     }

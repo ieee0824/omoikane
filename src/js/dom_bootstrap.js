@@ -381,6 +381,8 @@ let omoikaneUserActivationState;
   const nativeSetAttributeNS = globalThis.__omoikane_set_attribute_ns;
   const nativeSetStyleComputationSource =
     globalThis.__omoikane_set_style_computation_source;
+  const nativeCloseStyleValueFunctions =
+    globalThis.__omoikane_close_style_value_functions;
   const nativeRemoveAttributeNS = globalThis.__omoikane_remove_attribute_ns;
   const nativeIframeContentDocument = globalThis.__omoikane_iframe_content_document;
   const nativeWindowNamedSnapshot = globalThis.__omoikane_window_named_snapshot;
@@ -480,6 +482,7 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_serialize_xml;
   delete globalThis.__omoikane_set_attribute_ns;
   delete globalThis.__omoikane_set_style_computation_source;
+  delete globalThis.__omoikane_close_style_value_functions;
   delete globalThis.__omoikane_remove_attribute_ns;
   delete globalThis.__omoikane_iframe_content_document;
   delete globalThis.__omoikane_iframe_global;
@@ -1168,6 +1171,11 @@ let omoikaneUserActivationState;
     validatesSpecialStyleProperties.has(name) ||
     (!name.startsWith("--") && numericMathFunctionPattern.test(value)) ||
     (!name.startsWith("--") && /sibling-(?:index|count)\s*\(/i.test(value));
+  // A component value may end with implicitly closed parentheses. Complete it
+  // before adding a declaration's semicolon, preserving unquantized color tokens.
+  const styleComputationValue = value =>
+    safeApply(safeRegExpExec, /\(/, [value]) !== null
+      ? nativeCloseStyleValueFunctions(value) : value;
   const styleShorthandLonghands = Object.freeze({
     "margin-block": ["margin-block-start", "margin-block-end"],
     "margin-inline": ["margin-inline-start", "margin-inline-end"],
@@ -4402,7 +4410,9 @@ let omoikaneUserActivationState;
       const normalizeDecls = (declarations) => {
         const normalized = [];
         for (const declaration of declarations) {
-          const computationValue = declaration.computationValue || declaration.value;
+          const computationValue = styleComputationValue(
+            declaration.computationValue || declaration.value
+          );
           if (needsStyleValueNormalization(declaration.name, declaration.value)) {
             const value = __omoikane_normalize_style_value(
               declaration.name, declaration.value
@@ -4522,7 +4532,7 @@ let omoikaneUserActivationState;
       // retains remove/append precedence for logical and shorthand groups.
       const setValue = (kebab, value, priority) => {
         value = String(value);
-        const computationValue = value;
+        const computationValue = styleComputationValue(value);
         if (needsStyleValueNormalization(kebab, value)) {
           const normalized = __omoikane_normalize_style_value(kebab, value);
           if (normalized === null) return;
