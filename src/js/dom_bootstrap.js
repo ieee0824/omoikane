@@ -25783,6 +25783,149 @@ let omoikaneUserActivationState;
   function attachMediaSource(source, element, loadId) { const state = mediaSourceState.get(source); if (!state || state.readyState !== "closed") { element.__mediaFailure(loadId, MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED, "NotSupportedError", "MediaSource cannot be attached."); return; } state.readyState = "open"; state.element = element; element.__attachedMediaSource = source; queueMediaTask(() => { if (element.__mediaLoadId === loadId) dispatchMediaEvent(source, "sourceopen"); }); }
   function detachMediaSource(source, element) { const state = mediaSourceState.get(source); if (!state || state.element !== element) return; state.readyState = "closed"; state.duration = NaN; state.element = null; element.__attachedMediaSource = null; state.sourceBuffers.__items = []; state.activeSourceBuffers.__items = []; state.sourceBuffers.__sync(); state.activeSourceBuffers.__sync(); queueMediaTask(() => dispatchMediaEvent(source, "sourceclose")); }
 
+  const mediaSessionToken = {};
+  const mediaMetadataState = new WeakMap();
+  const mediaSessionState = new WeakMap();
+  function mediaImageResource(value) {
+    const item = Object(value);
+    if (item.src === undefined) throw new TypeError("MediaImage requires src");
+    return Object.freeze({
+      src: new URL(String(item.src), document.URL).href,
+      sizes: item.sizes === undefined ? "" : String(item.sizes),
+      type: item.type === undefined ? "" : String(item.type),
+    });
+  }
+  function frozenArtwork(value) {
+    if (value === undefined) return Object.freeze([]);
+    return Object.freeze(Array.from(value, mediaImageResource));
+  }
+  function frozenChapters(value) {
+    if (value === undefined) return Object.freeze([]);
+    return Object.freeze(Array.from(value, chapter => {
+      const item = Object(chapter);
+      return Object.freeze({
+        title: item.title === undefined ? "" : String(item.title),
+        startTime: Number(item.startTime),
+        artwork: frozenArtwork(item.artwork),
+      });
+    }));
+  }
+  function publishMediaSession(session) {
+    const state = mediaSessionState.get(session);
+    if (!state) return;
+    const metadataState = state.metadata ? mediaMetadataState.get(state.metadata) : null;
+    const metadata = metadataState ? {
+      title: metadataState.title,
+      artist: metadataState.artist,
+      album: metadataState.album,
+      artwork: metadataState.artwork.map(item => ({ src: item.src, sizes: item.sizes, mediaType: item.type })),
+    } : null;
+    __omoikane_media_session("publish", JSON.stringify({
+      metadata,
+      playbackState: state.playbackState,
+      positionState: state.positionState,
+      handledActions: Array.from(state.handlers.keys()).sort(),
+    }));
+  }
+  function publishMetadataOwners(metadata) {
+    const state = mediaMetadataState.get(metadata);
+    if (state) for (const session of state.owners) publishMediaSession(session);
+  }
+  class MediaMetadata {
+    constructor(init = {}) {
+      if (init === null) init = {};
+      if (typeof init !== "object") throw new TypeError("MediaMetadata init must be a dictionary");
+      mediaMetadataState.set(this, {
+        title: init.title === undefined ? "" : String(init.title),
+        artist: init.artist === undefined ? "" : String(init.artist),
+        album: init.album === undefined ? "" : String(init.album),
+        artwork: frozenArtwork(init.artwork),
+        chapterInfo: frozenChapters(init.chapterInfo),
+        owners: new Set(),
+      });
+    }
+    __state() { return mediaMetadataState.get(this) || illegalInvocation(); }
+    get title() { return this.__state().title; }
+    set title(value) { this.__state().title = String(value); publishMetadataOwners(this); }
+    get artist() { return this.__state().artist; }
+    set artist(value) { this.__state().artist = String(value); publishMetadataOwners(this); }
+    get album() { return this.__state().album; }
+    set album(value) { this.__state().album = String(value); publishMetadataOwners(this); }
+    get artwork() { return this.__state().artwork; }
+    set artwork(value) { this.__state().artwork = frozenArtwork(value); publishMetadataOwners(this); }
+    get chapterInfo() { return this.__state().chapterInfo; }
+    get [Symbol.toStringTag]() { return "MediaMetadata"; }
+  }
+  class MediaSession {
+    constructor(token) {
+      if (token !== mediaSessionToken) throw new TypeError("Illegal constructor");
+      mediaSessionState.set(this, { metadata: null, playbackState: "none", positionState: null, handlers: new Map() });
+    }
+    __state() { return mediaSessionState.get(this) || illegalInvocation(); }
+    get metadata() { return this.__state().metadata; }
+    set metadata(value) {
+      if (value !== null && !(value instanceof MediaMetadata)) throw new TypeError("metadata must be MediaMetadata or null");
+      const state = this.__state();
+      if (state.metadata) mediaMetadataState.get(state.metadata).owners.delete(this);
+      state.metadata = value;
+      if (value) mediaMetadataState.get(value).owners.add(this);
+      publishMediaSession(this);
+    }
+    get playbackState() { return this.__state().playbackState; }
+    set playbackState(value) {
+      const next = String(value);
+      if (!new Set(["none", "paused", "playing"]).has(next)) return;
+      this.__state().playbackState = next;
+      publishMediaSession(this);
+    }
+    setActionHandler(action, handler) {
+      const name = String(action);
+      if (!__omoikane_media_session("supports", name)) throw new TypeError("Unsupported Media Session action");
+      if (handler !== null && typeof handler !== "function") throw new TypeError("handler must be callable or null");
+      const state = this.__state();
+      if (handler === null) state.handlers.delete(name); else state.handlers.set(name, handler);
+      publishMediaSession(this);
+    }
+    setPositionState(value = {}) {
+      const state = this.__state();
+      if (value === null) { state.positionState = null; publishMediaSession(this); return; }
+      const init = Object(value);
+      if (init.duration === undefined && init.position === undefined && init.playbackRate === undefined) { state.positionState = null; publishMediaSession(this); return; }
+      if (init.duration === undefined) throw new TypeError("duration is required");
+      const duration = Number(init.duration);
+      const position = init.position === undefined ? 0 : Number(init.position);
+      const playbackRate = init.playbackRate === undefined ? 1 : Number(init.playbackRate);
+      if (!Number.isFinite(duration) || duration < 0) throw new TypeError("duration must be non-negative and finite");
+      if (!Number.isFinite(position) || position < 0 || position > duration) throw new TypeError("position must be within duration");
+      if (!Number.isFinite(playbackRate) || playbackRate === 0) throw new TypeError("playbackRate must be finite and non-zero");
+      state.positionState = { duration, position, playbackRate };
+      publishMediaSession(this);
+    }
+    get [Symbol.toStringTag]() { return "MediaSession"; }
+  }
+  const mediaSession = new MediaSession(mediaSessionToken);
+  globalThis.__omoikane_dispatch_media_session_action = function(action, details = {}) {
+    const state = mediaSessionState.get(mediaSession);
+    const handler = state.handlers.get(String(action));
+    if (!handler) return false;
+    const event = Object.freeze({ ...Object(details), action: String(action) });
+    __omoikane_call_event_listener(handler, undefined, event);
+    return true;
+  };
+  globalThis.__omoikane_fetch_media_session_artwork = function(index) {
+    const metadata = mediaSessionState.get(mediaSession).metadata;
+    const artwork = metadata && mediaMetadataState.get(metadata).artwork[Number(index)];
+    if (!artwork) throw new RangeError("Media Session artwork index is out of range");
+    Promise.resolve(fetch(artwork.src)).then(response => {
+      if (!response.ok && response.status !== 0) throw new Error(`Artwork fetch failed with status ${response.status}`);
+      return response.arrayBuffer();
+    }).then(buffer => {
+      __omoikane_media_session("artwork-success", artwork.src, new Uint8Array(buffer));
+    }, error => {
+      __omoikane_media_session("artwork-error", artwork.src, String(error));
+    });
+  };
+
   class Navigator {
     constructor(token) {
       if (token !== navigatorConstructionToken) throw new TypeError("Illegal constructor");
@@ -25796,6 +25939,7 @@ let omoikaneUserActivationState;
       this.mimeTypes = new MimeTypeArray(navigatorConstructionToken);
       this.geolocation = new Geolocation(geolocationConstructionToken);
       this.mediaDevices = new MediaDevices(mediaCaptureToken);
+      this.mediaSession = mediaSession;
       this.serviceWorker = new ServiceWorkerContainer(serviceWorkerContainerConstructionToken);
       // The Permissions object is installed after EventTarget is defined
       // below.  Keep the property present while Navigator is constructed so
@@ -25827,6 +25971,8 @@ let omoikaneUserActivationState;
   globalThis.MediaStreamTrackEvent = MediaStreamTrackEvent;
   globalThis.MediaRecorder = MediaRecorder;
   globalThis.BlobEvent = BlobEvent;
+  globalThis.MediaMetadata = MediaMetadata;
+  globalThis.MediaSession = MediaSession;
   globalThis.MediaSource = MediaSource;
   globalThis.ManagedMediaSource = ManagedMediaSource;
   globalThis.MediaSourceHandle = MediaSourceHandle;
