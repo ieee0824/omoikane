@@ -64,7 +64,7 @@ pub(crate) fn layer(source: &Layer, shadow: &Shadow) -> Option<Layer> {
 }
 
 /// Approximates a Gaussian blur with three box blurs per axis.
-fn gaussian_blur(values: &mut [f64], width: usize, height: usize, sigma: f64) {
+pub(super) fn gaussian_blur(values: &mut [f64], width: usize, height: usize, sigma: f64) {
     for radius in box_radii(sigma) {
         box_blur(values, width, height, radius, true);
         box_blur(values, width, height, radius, false);

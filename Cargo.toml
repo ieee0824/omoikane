@@ -88,6 +88,19 @@ unicode-general-category = "1.1.0"
 unicode-segmentation = "1.12"
 # CSS vertical mixed text needs the Unicode UAX #50 orientation table.
 unicode-vo = "0.1.0"
+# WebAssembly uses a deterministic pure-Rust interpreter across every browser
+# target; Omoikane owns the Boa JS API, resource limits, and host integration.
+wasmi = { version = "2.0.0", default-features = false, features = ["std", "validate", "portable-dispatch", "extra-checks", "simd"] }
+# Wasmi groups metadata by external kind, while the JS API must retain binary
+# declaration order and independent custom-section bytes.
+wasmparser = { version = "0.228.0", default-features = false, features = ["std"] }
+# Re-encodes legacy exception-handling modules into the standardized exnref
+# instruction set before the exception runtime compiles them.
+wasm-encoder = { version = "0.228.0", default-features = false, features = ["std", "wasmparser"] }
+# Wasmi does not yet implement the standardized exception-handling proposal.
+# Keep it as the default interpreter and isolate exception modules in Wasmtime
+# until the lightweight runtime can execute tags, throws, and catches itself.
+wasmtime = { version = "50.0.1", default-features = false, features = ["std", "runtime", "cranelift", "gc", "gc-drc"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha1 = "0.10"

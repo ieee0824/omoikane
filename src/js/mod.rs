@@ -87,6 +87,7 @@ mod retained_scroll;
 mod tree_style_invalidation;
 mod url_pattern;
 mod view_transition;
+mod webassembly;
 mod window_members;
 use child_document::{FetchedChildResource, LoadedChildDocument, NavigationRedirect};
 use cross_origin_isolation::{
@@ -178,6 +179,17 @@ mod media_session;
 pub use media_session::{
     DeterministicMediaSessionProvider, MediaSessionArtwork, MediaSessionArtworkFetch,
     MediaSessionMetadata, MediaSessionPositionState, MediaSessionProvider, MediaSessionSnapshot,
+};
+mod web_speech;
+pub use web_speech::{
+    DeterministicWebSpeechProvider, SpeechRecognitionFailure, SpeechRecognitionPhrase,
+    SpeechRecognitionRequest, SpeechSynthesisRequest, SpeechVoice, WebSpeechCommand,
+    WebSpeechProvider,
+};
+mod web_codecs;
+pub use web_codecs::{
+    DeterministicWebCodecsProvider, WebCodecConfig, WebCodecError, WebCodecKind, WebCodecOutput,
+    WebCodecPacket, WebCodecsProvider,
 };
 mod automation;
 #[cfg(test)]
@@ -2409,7 +2421,9 @@ struct HostState {
     geolocation: geolocation::State,
     media_capture: media_capture::State,
     media_source: media_source::State,
+    web_codecs: web_codecs::State,
     media_session: media_session::State,
+    web_speech: web_speech::State,
     compression_streams: compression_stream::Store,
     http_client: Client,
     /// Lazily started HTTP worker for best-effort CSP/Reporting delivery.
@@ -2734,6 +2748,7 @@ struct HostState {
     shared_worker: shared_worker::State,
     broadcast_channel: broadcast_channel::State,
     worklet: worklet::State,
+    webassembly: webassembly::State,
     /// Constructable stylesheets adopted by a Document or ShadowRoot. The
     /// JavaScript wrapper keeps stylesheet objects; this native snapshot lets
     /// the synchronous style resolver include their parsed text without
@@ -3393,8 +3408,11 @@ impl HostState {
             geolocation: geolocation::State::default(),
             media_capture: media_capture::State::default(),
             media_source: media_source::State::default(),
+            web_codecs: web_codecs::State::default(),
             media_session: media_session::State::default(),
+            web_speech: web_speech::State::default(),
             compression_streams: compression_stream::Store::new(),
+            webassembly: webassembly::State::default(),
             http_client,
             report_delivery: None,
             cookie_store,
@@ -16630,11 +16648,14 @@ fn register_host_bindings(
     geolocation::register(context, &mut bindings)?;
     media_capture::register(context, &mut bindings)?;
     media_source::register(context, &mut bindings)?;
+    web_codecs::register(context, &mut bindings)?;
     media_session::register(context, &mut bindings)?;
+    web_speech::register(context, &mut bindings)?;
     permissions_policy::register(context, &mut bindings)?;
     broadcast_channel::register(context, &mut bindings)?;
     web_locks::register(context, &mut bindings)?;
     cache_storage::register(context, &mut bindings)?;
+    webassembly::register(context, &mut bindings)?;
     worklet::register(context, &mut bindings)?;
     shared_worker::register(context, &mut bindings)?;
     let state = host_state.borrow();
@@ -17466,6 +17487,11 @@ fn register_host_bindings(
             js_string!("__omoikane_canvas_parse_color"),
             1,
             NativeFunction::from_copy_closure(canvas2d::parse_color_native),
+        ),
+        (
+            js_string!("__omoikane_canvas_parse_filter"),
+            1,
+            NativeFunction::from_copy_closure(canvas2d::parse_filter_native),
         ),
         (
             js_string!("__omoikane_canvas_parse_font"),

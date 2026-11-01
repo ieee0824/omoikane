@@ -1,0 +1,13 @@
+{
+  "tests": [
+    { "path": "wasm/jsapi/tag/constructor.tentative.any.js" },
+    { "path": "wasm/jsapi/tag/toString.tentative.any.js" },
+    { "path": "wasm/jsapi/tag/type.tentative.any.js" },
+    { "path": "wasm/jsapi/exception/basic.tentative.any.js" },
+    { "path": "wasm/jsapi/exception/constructor.tentative.any.js" },
+    { "path": "wasm/jsapi/exception/getArg.tentative.any.js" },
+    { "path": "wasm/jsapi/exception/identity.tentative.any.js" },
+    { "path": "wasm/jsapi/exception/is.tentative.any.js" },
+    { "path": "wasm/jsapi/exception/toString.tentative.any.js" }
+  ]
+}
