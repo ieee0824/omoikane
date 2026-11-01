@@ -201,6 +201,9 @@ let omoikaneUserActivationState;
   const nativeCompressionWrite = globalThis.__omoikane_compression_write;
   const nativeCompressionFinish = globalThis.__omoikane_compression_finish;
   const nativeCompressionAbort = globalThis.__omoikane_compression_abort;
+  const nativeWasmValidate = globalThis.__omoikane_wasm_validate;
+  const nativeWasmCompile = globalThis.__omoikane_wasm_compile;
+  const nativeWasmModuleMetadata = globalThis.__omoikane_wasm_module_metadata;
   const nativeArrayBufferInfo = globalThis.__omoikane_array_buffer_info;
   const nativeCloneArrayBuffer = globalThis.__omoikane_clone_array_buffer;
   const nativeTransferArrayBuffer = globalThis.__omoikane_transfer_array_buffer;
@@ -40251,6 +40254,63 @@ let omoikaneUserActivationState;
     // Parser-authored attributes precede author scripts in a newly created Realm.
     wireInlineHandlers(globalThis.document);
   };
+  {
+    const moduleHandles = new WeakMap();
+    class CompileError extends Error {
+      constructor(message) { super(message); this.name = "CompileError"; }
+    }
+    class LinkError extends Error {
+      constructor(message) { super(message); this.name = "LinkError"; }
+    }
+    class RuntimeError extends Error {
+      constructor(message) { super(message); this.name = "RuntimeError"; }
+    }
+    class WasmModule {
+      constructor(bytes) {
+        if (arguments.length === 0) throw new TypeError("WebAssembly.Module requires a BufferSource");
+        try { moduleHandles.set(this, nativeWasmCompile(bytes)); }
+        catch (error) {
+          if (error instanceof SyntaxError || error instanceof RangeError) throw new CompileError(error.message);
+          throw error;
+        }
+      }
+      static imports(module) {
+        const handle = moduleHandles.get(module);
+        if (handle === undefined) throw new TypeError("Argument 0 must be a WebAssembly.Module");
+        return JSON.parse(nativeWasmModuleMetadata(handle, "imports", ""));
+      }
+      static exports(module) {
+        const handle = moduleHandles.get(module);
+        if (handle === undefined) throw new TypeError("Argument 0 must be a WebAssembly.Module");
+        return JSON.parse(nativeWasmModuleMetadata(handle, "exports", ""));
+      }
+      static customSections(module, sectionName) {
+        const handle = moduleHandles.get(module);
+        if (handle === undefined) throw new TypeError("Argument 0 must be a WebAssembly.Module");
+        if (arguments.length < 2) throw new TypeError("WebAssembly.Module.customSections requires a section name");
+        const sections = JSON.parse(nativeWasmModuleMetadata(handle, "customSections", String(sectionName)));
+        return sections.map(bytes => Uint8Array.from(bytes).buffer);
+      }
+    }
+    Object.defineProperty(WasmModule, "name", { value: "Module" });
+    for (const name of ["imports", "exports", "customSections"]) {
+      Object.defineProperty(WasmModule, name, { ...Object.getOwnPropertyDescriptor(WasmModule, name), enumerable: true });
+    }
+    Object.defineProperty(WasmModule.prototype, Symbol.toStringTag, { value: "WebAssembly.Module", configurable: true });
+    const WebAssembly = {};
+    Object.defineProperties(WebAssembly, {
+      Module: { value: WasmModule, writable: true, configurable: true },
+      CompileError: { value: CompileError, writable: true, configurable: true },
+      LinkError: { value: LinkError, writable: true, configurable: true },
+      RuntimeError: { value: RuntimeError, writable: true, configurable: true },
+      validate: { value(bytes) {
+        if (arguments.length === 0) throw new TypeError("WebAssembly.validate requires a BufferSource");
+        return nativeWasmValidate(bytes);
+      }, writable: true, enumerable: true, configurable: true },
+      [Symbol.toStringTag]: { value: "WebAssembly", configurable: true },
+    });
+    Object.defineProperty(globalThis, "WebAssembly", { value: WebAssembly, writable: true, configurable: true });
+  }
   // The parser already reset each select's selectedness. Mirror it into the
   // selectedcontent elements before author scripts run.
   for (const selectedcontent of Array.from(globalThis.document.getElementsByTagName("selectedcontent"))) {

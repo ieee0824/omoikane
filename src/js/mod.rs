@@ -87,6 +87,7 @@ mod retained_scroll;
 mod tree_style_invalidation;
 mod url_pattern;
 mod view_transition;
+mod webassembly;
 mod window_members;
 use child_document::{FetchedChildResource, LoadedChildDocument, NavigationRedirect};
 use cross_origin_isolation::{
@@ -2747,6 +2748,7 @@ struct HostState {
     shared_worker: shared_worker::State,
     broadcast_channel: broadcast_channel::State,
     worklet: worklet::State,
+    webassembly: webassembly::State,
     /// Constructable stylesheets adopted by a Document or ShadowRoot. The
     /// JavaScript wrapper keeps stylesheet objects; this native snapshot lets
     /// the synchronous style resolver include their parsed text without
@@ -3410,6 +3412,7 @@ impl HostState {
             media_session: media_session::State::default(),
             web_speech: web_speech::State::default(),
             compression_streams: compression_stream::Store::new(),
+            webassembly: webassembly::State::default(),
             http_client,
             report_delivery: None,
             cookie_store,
@@ -16652,6 +16655,7 @@ fn register_host_bindings(
     broadcast_channel::register(context, &mut bindings)?;
     web_locks::register(context, &mut bindings)?;
     cache_storage::register(context, &mut bindings)?;
+    webassembly::register(context, &mut bindings)?;
     worklet::register(context, &mut bindings)?;
     shared_worker::register(context, &mut bindings)?;
     let state = host_state.borrow();
