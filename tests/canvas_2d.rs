@@ -436,3 +436,44 @@ fn filters_keep_valid_values_and_apply_before_shadows_and_compositing() {
         "#,
     );
 }
+
+#[test]
+fn capture_stream_returns_a_canvas_video_track_that_follows_the_canvas_size() {
+    check(
+        16,
+        9,
+        r#"
+        const stream = canvas.captureStream();
+        if (!(stream instanceof MediaStream) || !stream.active) return 'stream';
+        const tracks = stream.getTracks();
+        if (tracks.length !== 1 || stream.getVideoTracks().length !== 1) return 'tracks ' + tracks.length;
+        const [track] = tracks;
+        if (!(track instanceof CanvasCaptureMediaStreamTrack) || !(track instanceof MediaStreamTrack)) return 'class';
+        if (track.kind !== 'video' || track.readyState !== 'live' || track.canvas !== canvas) return 'track';
+        if (String(track) !== '[object CanvasCaptureMediaStreamTrack]') return String(track);
+        if (track.requestFrame() !== undefined) return 'requestFrame';
+        if (Object.keys(globalThis).includes('CanvasCaptureMediaStreamTrack') || CanvasCaptureMediaStreamTrack.length !== 0) return 'interface';
+        const enumerable = (object, name) => Object.getOwnPropertyDescriptor(object, name).enumerable;
+        if (!enumerable(CanvasCaptureMediaStreamTrack.prototype, 'canvas') || !enumerable(HTMLCanvasElement.prototype, 'captureStream')) return 'members';
+        let settings = track.getSettings();
+        if (settings.width !== 16 || settings.height !== 9 || 'frameRate' in settings) return JSON.stringify(settings);
+        canvas.width = 20; canvas.height = 10;
+        settings = track.getSettings();
+        if (settings.width !== 20 || settings.height !== 10) return 'resize ' + JSON.stringify(settings);
+        if (canvas.captureStream(30).getTracks()[0].getSettings().frameRate !== 30) return 'frameRate';
+        if (canvas.captureStream().getTracks()[0] === track) return 'new track per call';
+        const copy = track.clone();
+        if (!(copy instanceof CanvasCaptureMediaStreamTrack) || copy.canvas !== canvas || copy.id === track.id) return 'clone';
+        track.stop();
+        if (track.readyState !== 'ended' || stream.active || copy.readyState !== 'live') return 'stop';
+        const name = call => { try { call(); return 'none'; } catch (error) { return error.name; } };
+        const errors = [
+          name(() => canvas.captureStream(-1)), name(() => canvas.captureStream(NaN)),
+          name(() => new CanvasCaptureMediaStreamTrack()),
+          name(() => CanvasCaptureMediaStreamTrack.prototype.requestFrame.call({})),
+          name(() => HTMLCanvasElement.prototype.captureStream.call(null)),
+        ].join();
+        return errors === 'NotSupportedError,TypeError,TypeError,TypeError,TypeError' || errors;
+        "#,
+    );
+}

@@ -20198,6 +20198,11 @@ let omoikaneUserActivationState;
       const snapshot=s.width&&s.height?canvasSnapshot(this):null;
       setTimeout(()=>callback(snapshot?canvasPngBlob(snapshot):null),0);
     }
+    /// Returns a MediaStream with one video track capturing this canvas.
+    captureStream(frameRequestRate = undefined){
+      if(!(this instanceof HTMLCanvasElement))throw new TypeError("Illegal invocation");
+      return canvasCaptureStream(this, frameRequestRate);
+    }
     /// Hands drawing to an OffscreenCanvas whose frames show in this element.
     transferControlToOffscreen(){
       const s=canvasState(this);
@@ -25838,6 +25843,44 @@ let omoikaneUserActivationState;
     get [Symbol.toStringTag]() { return "MediaStream"; }
   }
   for (const type of ["addtrack", "removetrack"]) defineEventHandler(MediaStream.prototype, type);
+  const canvasCaptureTrackState = new WeakMap();
+  /// A video track whose frames come from a canvas. Its settings follow the
+  /// canvas's current size; frames are not encoded because no consumer reads
+  /// captured video yet.
+  class CanvasCaptureMediaStreamTrack extends MediaStreamTrack {
+    constructor(token, canvas, frameRate) {
+      if (token !== mediaCaptureToken) throw new TypeError("Illegal constructor");
+      super(token, { kind: "video" });
+      canvasCaptureTrackState.set(this, { canvas, frameRate });
+    }
+    get canvas() { return canvasCaptureTrackState.get(this)?.canvas ?? illegalInvocation(); }
+    requestFrame() { if (!canvasCaptureTrackState.has(this)) illegalInvocation(); }
+    getSettings() {
+      const state = canvasCaptureTrackState.get(this); if (!state) illegalInvocation();
+      const settings = { width: state.canvas.width, height: state.canvas.height };
+      if (state.frameRate !== undefined) settings.frameRate = state.frameRate;
+      return settings;
+    }
+    clone() {
+      const state = canvasCaptureTrackState.get(this); if (!state) illegalInvocation();
+      const track = new CanvasCaptureMediaStreamTrack(mediaCaptureToken, state.canvas, state.frameRate);
+      if (!this.enabled) track.enabled = false;
+      if (this.readyState === "ended") track.stop();
+      return track;
+    }
+    get [Symbol.toStringTag]() { return "CanvasCaptureMediaStreamTrack"; }
+  }
+  /// Implements `HTMLCanvasElement.captureStream(frameRequestRate)`: a new
+  /// stream holding one canvas capture track. A negative rate is rejected.
+  function canvasCaptureStream(canvas, frameRequestRate) {
+    let frameRate;
+    if (frameRequestRate !== undefined) {
+      frameRate = Number(frameRequestRate);
+      if (!Number.isFinite(frameRate)) throw new TypeError("frameRequestRate must be a finite number");
+      if (frameRate < 0) throw new DOMException("frameRequestRate must not be negative", "NotSupportedError");
+    }
+    return new MediaStream([new CanvasCaptureMediaStreamTrack(mediaCaptureToken, canvas, frameRate)]);
+  }
   const mediaCaptureToken = {};
   function mediaSnapshot() { return JSON.parse(String(nativeMediaCaptureSnapshot(__omoikane_document_id))); }
   function requestedDeviceId(value) {
@@ -26279,6 +26322,20 @@ let omoikaneUserActivationState;
   globalThis.MediaDevices = MediaDevices;
   globalThis.MediaStream = MediaStream;
   globalThis.MediaStreamTrack = MediaStreamTrack;
+  // WebIDL shape: a non-enumerable interface object of length 0 with
+  // enumerable members, and an enumerable HTMLCanvasElement operation.
+  Object.defineProperty(CanvasCaptureMediaStreamTrack, "length", { value: 0 });
+  for (const [prototype, member] of [
+    [CanvasCaptureMediaStreamTrack.prototype, "canvas"],
+    [CanvasCaptureMediaStreamTrack.prototype, "requestFrame"],
+    [HTMLCanvasElement.prototype, "captureStream"],
+  ]) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, member);
+    Object.defineProperty(prototype, member, { ...descriptor, enumerable: true });
+  }
+  Object.defineProperty(globalThis, "CanvasCaptureMediaStreamTrack", {
+    configurable: true, enumerable: false, writable: true, value: CanvasCaptureMediaStreamTrack,
+  });
   globalThis.MediaStreamTrackEvent = MediaStreamTrackEvent;
   globalThis.MediaRecorder = MediaRecorder;
   globalThis.BlobEvent = BlobEvent;
@@ -36237,6 +36294,7 @@ let omoikaneUserActivationState;
       "PopStateEvent", "HashChangeEvent", "PageTransitionEvent", "BeforeUnloadEvent", "SubmitEvent", "FormDataEvent", "ClipboardEvent",
       "Touch", "TouchList", "TouchEvent", "ContentVisibilityAutoStateChangeEvent", "DeviceOrientationEvent", "DeviceMotionEvent",
       "DeviceMotionEventAcceleration", "DeviceMotionEventRotationRate", "HTMLFrameSetElement", "event",
+      "CanvasCaptureMediaStreamTrack",
     ]) {
       try { delete globalThis[domName]; } catch (_) { globalThis[domName] = undefined; }
     }
