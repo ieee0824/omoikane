@@ -91,6 +91,8 @@ struct CompiledInstance {
     #[unsafe_ignore_trace]
     reexported_imports: Vec<(String, usize)>,
     #[unsafe_ignore_trace]
+    function_export_names: Vec<(String, String)>,
+    #[unsafe_ignore_trace]
     instance: Instance,
     #[unsafe_ignore_trace]
     runtime: Rc<RefCell<RealmRuntime>>,
@@ -240,6 +242,8 @@ struct RuntimeExport {
     kind: &'static str,
     params: usize,
     element: Option<&'static str>,
+    #[serde(rename = "functionName", skip_serializing_if = "Option::is_none")]
+    function_name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -417,6 +421,41 @@ fn validate_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
 
 fn compile_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let bytes = source_bytes(args, context)?;
+    let realm = context.realm().clone();
+    let source = super::security_reporting::capture_csp_source(context);
+    let (document_id, blocking, reporting) = with_host_state(|host| {
+        let state = host.borrow();
+        let (document_id, policy) = state.dynamic_code_policy_for_realm(&realm)?;
+        let (blocking, reporting) = policy.wasm_compilation_violations();
+        Ok((document_id, blocking, reporting))
+    })?;
+    with_host_state(|host| {
+        let mut state = host.borrow_mut();
+        state.queue_trusted_types_violation(
+            document_id,
+            "script-src",
+            "wasm-eval",
+            blocking.clone(),
+            "enforce",
+            "",
+            source.as_ref(),
+        );
+        state.queue_trusted_types_violation(
+            document_id,
+            "script-src",
+            "wasm-eval",
+            reporting,
+            "report",
+            "",
+            source.as_ref(),
+        );
+        Ok(())
+    })?;
+    if !blocking.is_empty() {
+        return Err(JsNativeError::syntax()
+            .with_message("Content Security Policy blocked WebAssembly compilation")
+            .into());
+    }
     with_host_state(|host| {
         let module = host
             .borrow()
@@ -582,6 +621,13 @@ fn instantiate_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
         .ok_or_else(|| JsNativeError::typ().with_message("Invalid WebAssembly.Module handle"))?;
     let module = compiled.module.clone();
     let reexported_imports = compiled.metadata.reexported_imports();
+    let function_export_names = compiled
+        .metadata
+        .exports
+        .iter()
+        .filter(|export| export.kind == "function")
+        .map(|export| (export.name.clone(), export.index.to_string()))
+        .collect();
     let mut matched_imports = vec![false; compiled.metadata.imports.len()];
     let wasmi_import_order = module
         .imports()
@@ -714,6 +760,7 @@ fn instantiate_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
         CompiledInstance {
             callbacks,
             reexported_imports,
+            function_export_names,
             instance,
             runtime,
             export_handles: boa_gc::GcRefCell::new(Vec::new()),
@@ -748,6 +795,14 @@ fn exports_native(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<Js
                 element: ty.table().map(|ty| match ty.element() {
                     RefType::Func => "funcref",
                     RefType::Extern => "externref",
+                }),
+                function_name: ty.func().and_then(|_| {
+                    instance
+                        .function_export_names
+                        .iter()
+                        .find_map(|(name, function_name)| {
+                            (name == export.name()).then(|| function_name.clone())
+                        })
                 }),
             }
         })

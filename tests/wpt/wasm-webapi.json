@@ -1,0 +1,12 @@
+{
+  "tests": [
+    { "path": "wasm/webapi/invalid-args.any.js" },
+    { "path": "wasm/webapi/contenttype.any.js", "server": "wptserve" },
+    { "path": "wasm/webapi/status.any.js", "server": "wptserve" },
+    { "path": "wasm/webapi/body.any.js" },
+    { "path": "wasm/webapi/empty-body.any.js" },
+    { "path": "wasm/webapi/rejected-arg.any.js" },
+    { "path": "wasm/webapi/invalid-code.any.js" },
+    { "path": "wasm/webapi/instantiateStreaming-bad-imports.any.js" }
+  ]
+}

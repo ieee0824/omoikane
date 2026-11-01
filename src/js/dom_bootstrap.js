@@ -40459,11 +40459,11 @@ let omoikaneUserActivationState;
       constructor(module, imports = undefined) {
         const moduleHandle = moduleHandles.get(module);
         if (moduleHandle === undefined) throw new TypeError("Argument 0 must be a WebAssembly.Module");
-        const descriptors = WasmModule.imports(module);
-        const signatures = JSON.parse(nativeWasmModuleMetadata(moduleHandle, "runtimeImports", ""));
-        if (descriptors.length && (imports === null || (typeof imports !== "object" && typeof imports !== "function"))) {
+        if (imports !== undefined && (imports === null || (typeof imports !== "object" && typeof imports !== "function"))) {
           throw new TypeError("WebAssembly imports argument must be an object");
         }
+        const descriptors = WasmModule.imports(module);
+        const signatures = JSON.parse(nativeWasmModuleMetadata(moduleHandle, "runtimeImports", ""));
         const values = descriptors.map((descriptor, index) => {
           const namespace = imports[descriptor.module];
           if (namespace === null || (typeof namespace !== "object" && typeof namespace !== "function")) {
@@ -40523,7 +40523,7 @@ let omoikaneUserActivationState;
               throw error;
             }
           };
-          Object.defineProperty(fn, "name", { value: descriptor.name, configurable: true });
+          Object.defineProperty(fn, "name", { value: descriptor.functionName, configurable: true });
           Object.defineProperty(fn, "length", { value: descriptor.params, configurable: true });
           wasmFunctionHandles.set(fn, exportedHandle);
           Object.defineProperty(exports, descriptor.name, { value: fn, enumerable: true });
@@ -40540,6 +40540,25 @@ let omoikaneUserActivationState;
     Object.defineProperty(WasmInstance, "name", { value: "Instance" });
     Object.defineProperty(WasmInstance.prototype, Symbol.toStringTag, { value: "WebAssembly.Instance", configurable: true });
     const WebAssembly = {};
+    const compile = bytes => Promise.resolve().then(() => new WasmModule(bytes));
+    const instantiate = (source, imports) => Promise.resolve().then(() => {
+      if (moduleHandles.has(source)) return new WasmInstance(source, imports);
+      const module = new WasmModule(source);
+      return { module, instance: new WasmInstance(module, imports) };
+    });
+    const streamingResponse = source => Promise.resolve(source).then(response => {
+      if (!(response instanceof Response)) throw new TypeError("WebAssembly streaming source must be a Response");
+      if (!response.ok) throw new TypeError("WebAssembly streaming response must have an ok status");
+      const contentType = response.headers.get("content-type");
+      if (contentType === null || contentType.toLowerCase() !== "application/wasm") {
+        throw new TypeError("WebAssembly streaming response must have Content-Type application/wasm");
+      }
+      return response.arrayBuffer();
+    });
+    const compileStreaming = source => streamingResponse(source).then(bytes => new WasmModule(bytes));
+    const instantiateStreaming = (source, imports) => compileStreaming(source).then(module => ({
+      module, instance: new WasmInstance(module, imports),
+    }));
     Object.defineProperties(WebAssembly, {
       Module: { value: WasmModule, writable: true, configurable: true },
       Instance: { value: WasmInstance, writable: true, configurable: true },
@@ -40553,6 +40572,10 @@ let omoikaneUserActivationState;
         if (arguments.length === 0) throw new TypeError("WebAssembly.validate requires a BufferSource");
         return nativeWasmValidate(bytes);
       }, writable: true, enumerable: true, configurable: true },
+      compile: { value: compile, writable: true, enumerable: true, configurable: true },
+      instantiate: { value: instantiate, writable: true, enumerable: true, configurable: true },
+      compileStreaming: { value: compileStreaming, writable: true, enumerable: true, configurable: true },
+      instantiateStreaming: { value: instantiateStreaming, writable: true, enumerable: true, configurable: true },
       [Symbol.toStringTag]: { value: "WebAssembly", configurable: true },
     });
     Object.defineProperty(globalThis, "WebAssembly", { value: WebAssembly, writable: true, configurable: true });
