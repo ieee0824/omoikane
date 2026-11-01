@@ -19495,7 +19495,7 @@ let omoikaneUserActivationState;
 
   const webglContextConstructionToken = {};
   const webglResourceConstructionToken = {};
-  class WebGLResource {
+  class WebGLObject {
     constructor(context, kind, token) {
       if (token !== webglResourceConstructionToken) throw new TypeError("Illegal constructor");
       this.__context = context;
@@ -19504,10 +19504,10 @@ let omoikaneUserActivationState;
     }
     get [Symbol.toStringTag]() { return this.__kind; }
   }
-  class WebGLBuffer extends WebGLResource {
+  class WebGLBuffer extends WebGLObject {
     constructor(context, token) { super(context, "WebGLBuffer", token); this.__size = 0; this.__usage = 0; }
   }
-  class WebGLShader extends WebGLResource {
+  class WebGLShader extends WebGLObject {
     constructor(context, type, token) {
       super(context, "WebGLShader", token);
       this.__type = type;
@@ -19516,7 +19516,7 @@ let omoikaneUserActivationState;
       this.__infoLog = "";
     }
   }
-  class WebGLProgram extends WebGLResource {
+  class WebGLProgram extends WebGLObject {
     constructor(context, token) {
       super(context, "WebGLProgram", token);
       this.__shaders = [];
@@ -19525,6 +19525,21 @@ let omoikaneUserActivationState;
       this.__attributes = new Map();
       this.__uniforms = new Map();
     }
+  }
+  class WebGLQuery extends WebGLObject {
+    constructor(context, token) { super(context, "WebGLQuery", token); this.__target = null; this.__result = 0; this.__available = false; }
+  }
+  class WebGLSampler extends WebGLObject {
+    constructor(context, token) { super(context, "WebGLSampler", token); this.__parameters = new Map(); }
+  }
+  class WebGLSync extends WebGLObject {
+    constructor(context, token) { super(context, "WebGLSync", token); this.__signaled = true; }
+  }
+  class WebGLTransformFeedback extends WebGLObject {
+    constructor(context, token) { super(context, "WebGLTransformFeedback", token); this.__active = false; this.__paused = false; }
+  }
+  class WebGLVertexArrayObject extends WebGLObject {
+    constructor(context, token) { super(context, "WebGLVertexArrayObject", token); }
   }
   class WebGLUniformLocation {
     constructor(program, name, token) {
@@ -19592,6 +19607,115 @@ let omoikaneUserActivationState;
     RENDERER: 0x1F01, VENDOR: 0x1F00, VERSION: 0x1F02,
     SHADING_LANGUAGE_VERSION: 0x8B8C,
   };
+  const WEBGL2_CONSTANTS = {
+    READ_BUFFER: 0x0C02, COLOR: 0x1800, DEPTH: 0x1801, STENCIL: 0x1802, DEPTH_STENCIL: 0x84F9,
+    QUERY_RESULT: 0x8866, QUERY_RESULT_AVAILABLE: 0x8867, CURRENT_QUERY: 0x8865,
+    ANY_SAMPLES_PASSED: 0x8C2F, ANY_SAMPLES_PASSED_CONSERVATIVE: 0x8D6A,
+    TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN: 0x8C88,
+    SAMPLER_BINDING: 0x8919, TEXTURE_MIN_FILTER: 0x2801, TEXTURE_MAG_FILTER: 0x2800,
+    TEXTURE_WRAP_S: 0x2802, TEXTURE_WRAP_T: 0x2803, TEXTURE_WRAP_R: 0x8072,
+    NEAREST: 0x2600, LINEAR: 0x2601, REPEAT: 0x2901, CLAMP_TO_EDGE: 0x812F,
+    MIRRORED_REPEAT: 0x8370, TEXTURE_MIN_LOD: 0x813A, TEXTURE_MAX_LOD: 0x813B,
+    TEXTURE_COMPARE_MODE: 0x884C, TEXTURE_COMPARE_FUNC: 0x884D,
+    VERTEX_ARRAY_BINDING: 0x85B5, TRANSFORM_FEEDBACK: 0x8E22,
+    TRANSFORM_FEEDBACK_BINDING: 0x8E25, TRANSFORM_FEEDBACK_ACTIVE: 0x8E24,
+    TRANSFORM_FEEDBACK_PAUSED: 0x8E23, RASTERIZER_DISCARD: 0x8C89,
+    SYNC_GPU_COMMANDS_COMPLETE: 0x9117, SYNC_STATUS: 0x9114,
+    SYNC_CONDITION: 0x9113, SYNC_FLAGS: 0x9115, OBJECT_TYPE: 0x9112,
+    SIGNALED: 0x9119, UNSIGNALED: 0x9118, SYNC_FENCE: 0x9116,
+    ALREADY_SIGNALED: 0x911A, TIMEOUT_EXPIRED: 0x911B,
+    CONDITION_SATISFIED: 0x911C, WAIT_FAILED: 0x911D,
+    SYNC_FLUSH_COMMANDS_BIT: 1, TIMEOUT_IGNORED: -1,
+    MAX_CLIENT_WAIT_TIMEOUT_WEBGL: 0x9247, MAX_SERVER_WAIT_TIMEOUT: 0x9111,
+    MAX_DRAW_BUFFERS: 0x8824, MAX_COLOR_ATTACHMENTS: 0x8CDF,
+    MAX_3D_TEXTURE_SIZE: 0x8073, MAX_ARRAY_TEXTURE_LAYERS: 0x88FF,
+    MAX_SAMPLES: 0x8D57, MAX_ELEMENT_INDEX: 0x8D6B,
+    DRAW_FRAMEBUFFER: 0x8CA9, READ_FRAMEBUFFER: 0x8CA8,
+  };
+  Object.assign(WEBGL2_CONSTANTS, {
+    UNPACK_ROW_LENGTH:0x0CF2, UNPACK_SKIP_ROWS:0x0CF3, UNPACK_SKIP_PIXELS:0x0CF4,
+    PACK_ROW_LENGTH:0x0D02, PACK_SKIP_ROWS:0x0D03, PACK_SKIP_PIXELS:0x0D04,
+    RED:0x1903, RGB8:0x8051, RGB10_A2:0x8059, TEXTURE_BINDING_3D:0x806A,
+    UNPACK_SKIP_IMAGES:0x806D, UNPACK_IMAGE_HEIGHT:0x806E, TEXTURE_3D:0x806F,
+    UNSIGNED_INT_2_10_10_10_REV:0x8368, MAX_ELEMENTS_VERTICES:0x80E8, MAX_ELEMENTS_INDICES:0x80E9,
+    TEXTURE_BASE_LEVEL:0x813C, TEXTURE_MAX_LEVEL:0x813D, MIN:0x8007, MAX:0x8008,
+    DEPTH_COMPONENT24:0x81A6, MAX_TEXTURE_LOD_BIAS:0x84FD, COMPARE_REF_TO_TEXTURE:0x884E,
+    STREAM_READ:0x88E1, STREAM_COPY:0x88E2, STATIC_READ:0x88E5, STATIC_COPY:0x88E6,
+    DYNAMIC_READ:0x88E9, DYNAMIC_COPY:0x88EA,
+    DRAW_BUFFER0:0x8825, DRAW_BUFFER1:0x8826, DRAW_BUFFER2:0x8827, DRAW_BUFFER3:0x8828,
+    DRAW_BUFFER4:0x8829, DRAW_BUFFER5:0x882A, DRAW_BUFFER6:0x882B, DRAW_BUFFER7:0x882C,
+    DRAW_BUFFER8:0x882D, DRAW_BUFFER9:0x882E, DRAW_BUFFER10:0x882F, DRAW_BUFFER11:0x8830,
+    DRAW_BUFFER12:0x8831, DRAW_BUFFER13:0x8832, DRAW_BUFFER14:0x8833, DRAW_BUFFER15:0x8834,
+    MAX_FRAGMENT_UNIFORM_COMPONENTS:0x8B49, MAX_VERTEX_UNIFORM_COMPONENTS:0x8B4A,
+    SAMPLER_3D:0x8B5F, SAMPLER_2D_SHADOW:0x8B62, FRAGMENT_SHADER_DERIVATIVE_HINT:0x8B8B,
+    PIXEL_PACK_BUFFER:0x88EB, PIXEL_UNPACK_BUFFER:0x88EC,
+    PIXEL_PACK_BUFFER_BINDING:0x88ED, PIXEL_UNPACK_BUFFER_BINDING:0x88EF,
+    FLOAT_MAT2x3:0x8B65, FLOAT_MAT2x4:0x8B66, FLOAT_MAT3x2:0x8B67,
+    FLOAT_MAT3x4:0x8B68, FLOAT_MAT4x2:0x8B69, FLOAT_MAT4x3:0x8B6A,
+    SRGB:0x8C40, SRGB8:0x8C41, SRGB8_ALPHA8:0x8C43,
+    RGBA32F:0x8814, RGB32F:0x8815, RGBA16F:0x881A, RGB16F:0x881B,
+    VERTEX_ATTRIB_ARRAY_INTEGER:0x88FD, MIN_PROGRAM_TEXEL_OFFSET:0x8904,
+    MAX_PROGRAM_TEXEL_OFFSET:0x8905, MAX_VARYING_COMPONENTS:0x8B4B,
+    TEXTURE_2D_ARRAY:0x8C1A, TEXTURE_BINDING_2D_ARRAY:0x8C1D,
+    R11F_G11F_B10F:0x8C3A, UNSIGNED_INT_10F_11F_11F_REV:0x8C3B,
+    RGB9_E5:0x8C3D, UNSIGNED_INT_5_9_9_9_REV:0x8C3E,
+    TRANSFORM_FEEDBACK_BUFFER_MODE:0x8C7F, MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS:0x8C80,
+    TRANSFORM_FEEDBACK_VARYINGS:0x8C83, TRANSFORM_FEEDBACK_BUFFER_START:0x8C84,
+    TRANSFORM_FEEDBACK_BUFFER_SIZE:0x8C85, MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS:0x8C8A,
+    MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS:0x8C8B, INTERLEAVED_ATTRIBS:0x8C8C,
+    SEPARATE_ATTRIBS:0x8C8D, TRANSFORM_FEEDBACK_BUFFER:0x8C8E,
+    TRANSFORM_FEEDBACK_BUFFER_BINDING:0x8C8F,
+    RGBA32UI:0x8D70, RGB32UI:0x8D71, RGBA16UI:0x8D76, RGB16UI:0x8D77,
+    RGBA8UI:0x8D7C, RGB8UI:0x8D7D, RGBA32I:0x8D82, RGB32I:0x8D83,
+    RGBA16I:0x8D88, RGB16I:0x8D89, RGBA8I:0x8D8E, RGB8I:0x8D8F,
+    RED_INTEGER:0x8D94, RGB_INTEGER:0x8D98, RGBA_INTEGER:0x8D99,
+    SAMPLER_2D_ARRAY:0x8DC1, SAMPLER_2D_ARRAY_SHADOW:0x8DC4, SAMPLER_CUBE_SHADOW:0x8DC5,
+    UNSIGNED_INT_VEC2:0x8DC6, UNSIGNED_INT_VEC3:0x8DC7, UNSIGNED_INT_VEC4:0x8DC8,
+    INT_SAMPLER_2D:0x8DCA, INT_SAMPLER_3D:0x8DCB, INT_SAMPLER_CUBE:0x8DCC,
+    INT_SAMPLER_2D_ARRAY:0x8DCF, UNSIGNED_INT_SAMPLER_2D:0x8DD2,
+    UNSIGNED_INT_SAMPLER_3D:0x8DD3, UNSIGNED_INT_SAMPLER_CUBE:0x8DD4,
+    UNSIGNED_INT_SAMPLER_2D_ARRAY:0x8DD7, DEPTH_COMPONENT32F:0x8CAC,
+    DEPTH32F_STENCIL8:0x8CAD, FLOAT_32_UNSIGNED_INT_24_8_REV:0x8DAD,
+    FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:0x8210, FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:0x8211,
+    FRAMEBUFFER_ATTACHMENT_RED_SIZE:0x8212, FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:0x8213,
+    FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:0x8214, FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:0x8215,
+    FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:0x8216, FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:0x8217,
+    FRAMEBUFFER_DEFAULT:0x8218, UNSIGNED_INT_24_8:0x84FA, DEPTH24_STENCIL8:0x88F0,
+    UNSIGNED_NORMALIZED:0x8C17, DRAW_FRAMEBUFFER_BINDING:0x8CA6,
+    READ_FRAMEBUFFER_BINDING:0x8CAA, RENDERBUFFER_SAMPLES:0x8CAB,
+    FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:0x8CD4,
+    COLOR_ATTACHMENT1:0x8CE1, COLOR_ATTACHMENT2:0x8CE2, COLOR_ATTACHMENT3:0x8CE3,
+    COLOR_ATTACHMENT4:0x8CE4, COLOR_ATTACHMENT5:0x8CE5, COLOR_ATTACHMENT6:0x8CE6,
+    COLOR_ATTACHMENT7:0x8CE7, COLOR_ATTACHMENT8:0x8CE8, COLOR_ATTACHMENT9:0x8CE9,
+    COLOR_ATTACHMENT10:0x8CEA, COLOR_ATTACHMENT11:0x8CEB, COLOR_ATTACHMENT12:0x8CEC,
+    COLOR_ATTACHMENT13:0x8CED, COLOR_ATTACHMENT14:0x8CEE, COLOR_ATTACHMENT15:0x8CEF,
+    FRAMEBUFFER_INCOMPLETE_MULTISAMPLE:0x8D56, HALF_FLOAT:0x140B,
+    RG:0x8227, RG_INTEGER:0x8228, R8:0x8229, RG8:0x822B, R16F:0x822D, R32F:0x822E,
+    RG16F:0x822F, RG32F:0x8230, R8I:0x8231, R8UI:0x8232, R16I:0x8233,
+    R16UI:0x8234, R32I:0x8235, R32UI:0x8236, RG8I:0x8237, RG8UI:0x8238,
+    RG16I:0x8239, RG16UI:0x823A, RG32I:0x823B, RG32UI:0x823C,
+    R8_SNORM:0x8F94, RG8_SNORM:0x8F95, RGB8_SNORM:0x8F96, RGBA8_SNORM:0x8F97,
+    SIGNED_NORMALIZED:0x8F9C, COPY_READ_BUFFER:0x8F36, COPY_WRITE_BUFFER:0x8F37,
+    COPY_READ_BUFFER_BINDING:0x8F36, COPY_WRITE_BUFFER_BINDING:0x8F37,
+    UNIFORM_BUFFER:0x8A11, UNIFORM_BUFFER_BINDING:0x8A28, UNIFORM_BUFFER_START:0x8A29,
+    UNIFORM_BUFFER_SIZE:0x8A2A, MAX_VERTEX_UNIFORM_BLOCKS:0x8A2B,
+    MAX_FRAGMENT_UNIFORM_BLOCKS:0x8A2D, MAX_COMBINED_UNIFORM_BLOCKS:0x8A2E,
+    MAX_UNIFORM_BUFFER_BINDINGS:0x8A2F, MAX_UNIFORM_BLOCK_SIZE:0x8A30,
+    MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS:0x8A31,
+    MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS:0x8A33, UNIFORM_BUFFER_OFFSET_ALIGNMENT:0x8A34,
+    ACTIVE_UNIFORM_BLOCKS:0x8A36, UNIFORM_TYPE:0x8A37, UNIFORM_SIZE:0x8A38,
+    UNIFORM_BLOCK_INDEX:0x8A3A, UNIFORM_OFFSET:0x8A3B, UNIFORM_ARRAY_STRIDE:0x8A3C,
+    UNIFORM_MATRIX_STRIDE:0x8A3D, UNIFORM_IS_ROW_MAJOR:0x8A3E,
+    UNIFORM_BLOCK_BINDING:0x8A3F, UNIFORM_BLOCK_DATA_SIZE:0x8A40,
+    UNIFORM_BLOCK_ACTIVE_UNIFORMS:0x8A42, UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES:0x8A43,
+    UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER:0x8A44,
+    UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER:0x8A46, INVALID_INDEX:0xFFFFFFFF,
+    MAX_VERTEX_OUTPUT_COMPONENTS:0x9122, MAX_FRAGMENT_INPUT_COMPONENTS:0x9125,
+    VERTEX_ATTRIB_ARRAY_DIVISOR:0x88FE, RGB10_A2UI:0x906F, INT_2_10_10_10_REV:0x8D9F,
+    TEXTURE_IMMUTABLE_FORMAT:0x912F, TEXTURE_IMMUTABLE_LEVELS:0x82DF,
+  });
+  const WEBGL1_CONSTANT_NAMES = Object.keys(WEBGL_CONSTANTS);
+  Object.assign(WEBGL_CONSTANTS, WEBGL2_CONSTANTS);
 
   const WEBGL_CAPABILITIES = Object.freeze([
     WEBGL_CONSTANTS.BLEND, WEBGL_CONSTANTS.CULL_FACE, WEBGL_CONSTANTS.DEPTH_TEST,
@@ -19637,6 +19761,9 @@ let omoikaneUserActivationState;
     }
     return value;
   }
+  function webglIsResource(context, value, constructor) {
+    return value instanceof constructor && value.__context === context && !value.__deleted;
+  }
   function webglSourceNames(source, keyword) {
     const names = [];
     const seen = new Set();
@@ -19651,11 +19778,32 @@ let omoikaneUserActivationState;
     return names;
   }
 
+  function webglContextAttributes(options) {
+    const init = options === null || options === undefined ? {} : Object(options);
+    const powerPreference = init.powerPreference === undefined ? "default" : String(init.powerPreference);
+    if (!["default", "high-performance", "low-power"].includes(powerPreference)) {
+      throw new TypeError("Invalid WebGL powerPreference");
+    }
+    return {
+      alpha: init.alpha === undefined ? true : !!init.alpha,
+      depth: init.depth === undefined ? true : !!init.depth,
+      stencil: init.stencil === undefined ? false : !!init.stencil,
+      antialias: init.antialias === undefined ? true : !!init.antialias,
+      premultipliedAlpha: init.premultipliedAlpha === undefined ? true : !!init.premultipliedAlpha,
+      preserveDrawingBuffer: init.preserveDrawingBuffer === undefined ? false : !!init.preserveDrawingBuffer,
+      powerPreference,
+      failIfMajorPerformanceCaveat: !!init.failIfMajorPerformanceCaveat,
+      desynchronized: !!init.desynchronized,
+      xrCompatible: !!init.xrCompatible,
+    };
+  }
+
   class WebGLRenderingContext extends WebGLEventTarget {
-    constructor(canvas, token) {
+    constructor(canvas, token, attributes = webglContextAttributes()) {
       if (token !== webglContextConstructionToken) throw new TypeError("Illegal constructor");
       super();
       this.canvas = canvas;
+      this.__attributes = Object.freeze({...attributes});
       this.__state = {
         context: this, lost: false, errors: [], clearColor: [0, 0, 0, 0],
         colorMask: [true, true, true, true], depthMask: true,
@@ -19665,12 +19813,28 @@ let omoikaneUserActivationState;
         enabled: new Set(), buffers: new Set(), shaders: new Set(), programs: new Set(),
         arrayBuffer: null, elementArrayBuffer: null, currentProgram: null,
         activeTexture: WEBGL_CONSTANTS.TEXTURE0,
+        queries: new Set(), samplers: new Set(), syncs: new Set(),
+        transformFeedbacks: new Set(), vertexArrays: new Set(), activeQueries: new Map(),
+        samplerBindings: new Map(), transformFeedback: null, vertexArray: null,
       };
       this.__oncontextlost = null;
       this.__oncontextrestored = null;
     }
     get drawingBufferWidth() { return canvasDimensions(this.canvas)[0]; }
     get drawingBufferHeight() { return canvasDimensions(this.canvas)[1]; }
+    get drawingBufferColorSpace() { return this.__drawingBufferColorSpace || "srgb"; }
+    set drawingBufferColorSpace(value) {
+      const colorSpace = String(value);
+      if (colorSpace !== "srgb" && colorSpace !== "display-p3") throw new TypeError("Invalid PredefinedColorSpace");
+      this.__drawingBufferColorSpace = colorSpace;
+    }
+    get unpackColorSpace() { return this.__unpackColorSpace || "srgb"; }
+    set unpackColorSpace(value) {
+      const colorSpace = String(value);
+      if (colorSpace !== "srgb" && colorSpace !== "display-p3") throw new TypeError("Invalid PredefinedColorSpace");
+      this.__unpackColorSpace = colorSpace;
+    }
+    getContextAttributes() { return {...this.__attributes}; }
     get __s() { return this.__state; }
     __commit() { commitCanvas(this.canvas, canvasState(this.canvas)); }
     __lose() {
@@ -19696,10 +19860,16 @@ let omoikaneUserActivationState;
       this.__state.viewport = [0, 0, this.drawingBufferWidth, this.drawingBufferHeight];
       this.__state.scissor = [0, 0, this.drawingBufferWidth, this.drawingBufferHeight];
       this.__state.enabled.clear();
-      for (const resource of [...this.__state.buffers, ...this.__state.shaders, ...this.__state.programs]) resource.__deleted = true;
+      for (const resource of [...this.__state.buffers, ...this.__state.shaders, ...this.__state.programs,
+        ...this.__state.queries, ...this.__state.samplers, ...this.__state.syncs,
+        ...this.__state.transformFeedbacks, ...this.__state.vertexArrays]) resource.__deleted = true;
       this.__state.buffers.clear();
       this.__state.shaders.clear();
       this.__state.programs.clear();
+      this.__state.queries.clear(); this.__state.samplers.clear(); this.__state.syncs.clear();
+      this.__state.transformFeedbacks.clear(); this.__state.vertexArrays.clear();
+      this.__state.activeQueries.clear(); this.__state.samplerBindings.clear();
+      this.__state.transformFeedback = null; this.__state.vertexArray = null;
       this.__state.arrayBuffer = null;
       this.__state.elementArrayBuffer = null;
       this.__state.currentProgram = null;
@@ -19831,10 +20001,10 @@ let omoikaneUserActivationState;
         case WEBGL_CONSTANTS.MAX_FRAGMENT_UNIFORM_VECTORS: return 16;
         case WEBGL_CONSTANTS.RED_BITS:
         case WEBGL_CONSTANTS.GREEN_BITS:
-        case WEBGL_CONSTANTS.BLUE_BITS:
-        case WEBGL_CONSTANTS.ALPHA_BITS: return 8;
-        case WEBGL_CONSTANTS.DEPTH_BITS: return 24;
-        case WEBGL_CONSTANTS.STENCIL_BITS: return 8;
+        case WEBGL_CONSTANTS.BLUE_BITS: return 8;
+        case WEBGL_CONSTANTS.ALPHA_BITS: return this.__attributes.alpha ? 8 : 0;
+        case WEBGL_CONSTANTS.DEPTH_BITS: return this.__attributes.depth ? 24 : 0;
+        case WEBGL_CONSTANTS.STENCIL_BITS: return this.__attributes.stencil ? 8 : 0;
         case WEBGL_CONSTANTS.SAMPLE_BUFFERS:
         case WEBGL_CONSTANTS.SAMPLES: return 0;
         case WEBGL_CONSTANTS.SUBPIXEL_BITS: return 4;
@@ -20135,9 +20305,262 @@ let omoikaneUserActivationState;
     getExtension() { return null; }
     getSupportedExtensions() { return this.__state.lost ? null : []; }
   }
+  function webgl2CreateResource(context, constructor, collection) {
+    if (!webglActive(context)) return null;
+    const resource = new constructor(context, webglResourceConstructionToken);
+    context.__state[collection].add(resource);
+    return resource;
+  }
+  function webgl2DeleteResource(context, resource, constructor, collection, unbind) {
+    if (resource === null) return;
+    const value = webglDeletable(context, resource, constructor);
+    if (!value || value.__deleted) return;
+    value.__deleted = true;
+    context.__state[collection].delete(value);
+    unbind(value);
+  }
+  class WebGL2RenderingContext extends WebGLRenderingContext {
+    constructor(canvas, token, attributes) { super(canvas, token, attributes); }
+    createVertexArray() { return webgl2CreateResource(this, WebGLVertexArrayObject, "vertexArrays"); }
+    deleteVertexArray(value) { webgl2DeleteResource(this, value, WebGLVertexArrayObject, "vertexArrays", deleted => {
+      if (this.__state.vertexArray === deleted) this.__state.vertexArray = null;
+    }); }
+    isVertexArray(value) { return webglIsResource(this, value, WebGLVertexArrayObject); }
+    bindVertexArray(value) {
+      if (!webglActive(this)) return;
+      if (value !== null && webglOwned(this, value, WebGLVertexArrayObject) === undefined) return;
+      this.__state.vertexArray = value;
+    }
+    createTransformFeedback() { return webgl2CreateResource(this, WebGLTransformFeedback, "transformFeedbacks"); }
+    deleteTransformFeedback(value) { webgl2DeleteResource(this, value, WebGLTransformFeedback, "transformFeedbacks", deleted => {
+      if (this.__state.transformFeedback === deleted) this.__state.transformFeedback = null;
+    }); }
+    isTransformFeedback(value) { return webglIsResource(this, value, WebGLTransformFeedback); }
+    bindTransformFeedback(target, value) {
+      if (!webglActive(this)) return;
+      if (target !== WEBGL_CONSTANTS.TRANSFORM_FEEDBACK) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      if (value !== null && webglOwned(this, value, WebGLTransformFeedback) === undefined) return;
+      if (this.__state.transformFeedback?.__active && !this.__state.transformFeedback.__paused) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return;
+      }
+      this.__state.transformFeedback = value;
+    }
+    beginTransformFeedback(mode) {
+      if (!webglActive(this)) return;
+      if (![WEBGL_CONSTANTS.POINTS, WEBGL_CONSTANTS.LINES, WEBGL_CONSTANTS.TRIANGLES].includes(mode)) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return;
+      }
+      const feedback = this.__state.transformFeedback;
+      if (!feedback || feedback.__active) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return; }
+      feedback.__active = true; feedback.__paused = false;
+    }
+    endTransformFeedback() {
+      const feedback = this.__state.transformFeedback;
+      if (!webglActive(this)) return;
+      if (!feedback?.__active) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return; }
+      feedback.__active = false; feedback.__paused = false;
+    }
+    pauseTransformFeedback() {
+      const feedback = this.__state.transformFeedback;
+      if (!webglActive(this)) return;
+      if (!feedback?.__active || feedback.__paused) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return; }
+      feedback.__paused = true;
+    }
+    resumeTransformFeedback() {
+      const feedback = this.__state.transformFeedback;
+      if (!webglActive(this)) return;
+      if (!feedback?.__active || !feedback.__paused) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return; }
+      feedback.__paused = false;
+    }
+    createQuery() { return webgl2CreateResource(this, WebGLQuery, "queries"); }
+    deleteQuery(value) { webgl2DeleteResource(this, value, WebGLQuery, "queries", deleted => {
+      for (const [target, query] of this.__state.activeQueries) if (query === deleted) this.__state.activeQueries.delete(target);
+    }); }
+    isQuery(value) { return webglIsResource(this, value, WebGLQuery); }
+    beginQuery(target, query) {
+      if (!webglActive(this)) return;
+      if (![WEBGL_CONSTANTS.ANY_SAMPLES_PASSED, WEBGL_CONSTANTS.ANY_SAMPLES_PASSED_CONSERVATIVE,
+        WEBGL_CONSTANTS.TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN].includes(target)) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return;
+      }
+      const value = webglOwned(this, query, WebGLQuery);
+      if (!value) return;
+      if (value.__target !== null || this.__state.activeQueries.has(target)) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return;
+      }
+      value.__target = target; value.__available = false;
+      this.__state.activeQueries.set(target, value);
+    }
+    endQuery(target) {
+      if (!webglActive(this)) return;
+      const query = this.__state.activeQueries.get(target);
+      if (!query) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return; }
+      this.__state.activeQueries.delete(target);
+      query.__target = null; query.__available = true;
+    }
+    getQuery(target, parameter) {
+      if (!webglActive(this)) return null;
+      if (parameter !== WEBGL_CONSTANTS.CURRENT_QUERY) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return null; }
+      if (![WEBGL_CONSTANTS.ANY_SAMPLES_PASSED, WEBGL_CONSTANTS.ANY_SAMPLES_PASSED_CONSERVATIVE,
+        WEBGL_CONSTANTS.TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN].includes(target)) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return null;
+      }
+      return this.__state.activeQueries.get(target) || null;
+    }
+    getQueryParameter(query, parameter) {
+      const value = webglOwned(this, query, WebGLQuery);
+      if (!value) return null;
+      if (parameter === WEBGL_CONSTANTS.QUERY_RESULT) return value.__result;
+      if (parameter === WEBGL_CONSTANTS.QUERY_RESULT_AVAILABLE) return value.__available;
+      webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return null;
+    }
+    createSampler() { return webgl2CreateResource(this, WebGLSampler, "samplers"); }
+    deleteSampler(value) { webgl2DeleteResource(this, value, WebGLSampler, "samplers", deleted => {
+      for (const [unit, sampler] of this.__state.samplerBindings) if (sampler === deleted) this.__state.samplerBindings.delete(unit);
+    }); }
+    isSampler(value) { return webglIsResource(this, value, WebGLSampler); }
+    bindSampler(unit, sampler) {
+      if (!webglActive(this)) return;
+      const index = Number(unit);
+      if (!Number.isInteger(index) || index < 0 || index >= this.getParameter(WEBGL_CONSTANTS.MAX_COMBINED_TEXTURE_IMAGE_UNITS)) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return;
+      }
+      if (sampler !== null && webglOwned(this, sampler, WebGLSampler) === undefined) return;
+      if (sampler === null) this.__state.samplerBindings.delete(index); else this.__state.samplerBindings.set(index, sampler);
+    }
+    samplerParameteri(sampler, parameter, value) { this.__setSamplerParameter(sampler, parameter, Number(value)); }
+    samplerParameterf(sampler, parameter, value) { this.__setSamplerParameter(sampler, parameter, Number(value)); }
+    __setSamplerParameter(sampler, parameter, value) {
+      const target = webglOwned(this, sampler, WebGLSampler);
+      if (!target) return;
+      if (![WEBGL_CONSTANTS.TEXTURE_MIN_FILTER, WEBGL_CONSTANTS.TEXTURE_MAG_FILTER,
+        WEBGL_CONSTANTS.TEXTURE_WRAP_S, WEBGL_CONSTANTS.TEXTURE_WRAP_T, WEBGL_CONSTANTS.TEXTURE_WRAP_R,
+        WEBGL_CONSTANTS.TEXTURE_MIN_LOD, WEBGL_CONSTANTS.TEXTURE_MAX_LOD,
+        WEBGL_CONSTANTS.TEXTURE_COMPARE_MODE, WEBGL_CONSTANTS.TEXTURE_COMPARE_FUNC].includes(parameter)) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return;
+      }
+      if (!Number.isFinite(value)) { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return; }
+      target.__parameters.set(parameter, value);
+    }
+    getSamplerParameter(sampler, parameter) {
+      const value = webglOwned(this, sampler, WebGLSampler);
+      if (!value) return null;
+      const defaults = new Map([
+        [WEBGL_CONSTANTS.TEXTURE_MIN_FILTER, 0x2702], [WEBGL_CONSTANTS.TEXTURE_MAG_FILTER, WEBGL_CONSTANTS.LINEAR],
+        [WEBGL_CONSTANTS.TEXTURE_WRAP_S, WEBGL_CONSTANTS.REPEAT], [WEBGL_CONSTANTS.TEXTURE_WRAP_T, WEBGL_CONSTANTS.REPEAT],
+        [WEBGL_CONSTANTS.TEXTURE_WRAP_R, WEBGL_CONSTANTS.REPEAT], [WEBGL_CONSTANTS.TEXTURE_MIN_LOD, -1000],
+        [WEBGL_CONSTANTS.TEXTURE_MAX_LOD, 1000], [WEBGL_CONSTANTS.TEXTURE_COMPARE_MODE, 0],
+        [WEBGL_CONSTANTS.TEXTURE_COMPARE_FUNC, WEBGL_CONSTANTS.LEQUAL],
+      ]);
+      if (!defaults.has(parameter)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return null; }
+      return value.__parameters.has(parameter) ? value.__parameters.get(parameter) : defaults.get(parameter);
+    }
+    fenceSync(condition, flags) {
+      if (!webglActive(this)) return null;
+      if (condition !== WEBGL_CONSTANTS.SYNC_GPU_COMMANDS_COMPLETE) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return null; }
+      if (flags !== 0) { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return null; }
+      return webgl2CreateResource(this, WebGLSync, "syncs");
+    }
+    deleteSync(value) { webgl2DeleteResource(this, value, WebGLSync, "syncs", () => {}); }
+    isSync(value) { return webglIsResource(this, value, WebGLSync); }
+    clientWaitSync(sync, flags, timeout) {
+      const value = webglOwned(this, sync, WebGLSync);
+      if (!value) return WEBGL_CONSTANTS.WAIT_FAILED;
+      if ((flags & ~WEBGL_CONSTANTS.SYNC_FLUSH_COMMANDS_BIT) || Number(timeout) < 0) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return WEBGL_CONSTANTS.WAIT_FAILED;
+      }
+      return value.__signaled ? WEBGL_CONSTANTS.ALREADY_SIGNALED : WEBGL_CONSTANTS.TIMEOUT_EXPIRED;
+    }
+    waitSync(sync, flags, timeout) {
+      if (!webglOwned(this, sync, WebGLSync)) return;
+      if (flags !== 0 || Number(timeout) !== WEBGL_CONSTANTS.TIMEOUT_IGNORED) webglError(this, WEBGL_CONSTANTS.INVALID_VALUE);
+    }
+    getSyncParameter(sync, parameter) {
+      const value = webglOwned(this, sync, WebGLSync);
+      if (!value) return null;
+      if (parameter === WEBGL_CONSTANTS.OBJECT_TYPE) return WEBGL_CONSTANTS.SYNC_FENCE;
+      if (parameter === WEBGL_CONSTANTS.SYNC_STATUS) return value.__signaled ? WEBGL_CONSTANTS.SIGNALED : WEBGL_CONSTANTS.UNSIGNALED;
+      if (parameter === WEBGL_CONSTANTS.SYNC_CONDITION) return WEBGL_CONSTANTS.SYNC_GPU_COMMANDS_COMPLETE;
+      if (parameter === WEBGL_CONSTANTS.SYNC_FLAGS) return 0;
+      webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return null;
+    }
+    clearBufferfv(buffer, drawbuffer, values, sourceOffset = 0) { this.__clearBuffer(buffer, drawbuffer, values, sourceOffset); }
+    clearBufferiv(buffer, drawbuffer, values, sourceOffset = 0) { this.__clearBuffer(buffer, drawbuffer, values, sourceOffset); }
+    clearBufferuiv(buffer, drawbuffer, values, sourceOffset = 0) { this.__clearBuffer(buffer, drawbuffer, values, sourceOffset); }
+    clearBufferfi(buffer, drawbuffer, depth, stencil) {
+      if (buffer !== WEBGL_CONSTANTS.DEPTH_STENCIL || drawbuffer !== 0) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      this.clearDepth(depth); this.clearStencil(stencil); this.clear(WEBGL_CONSTANTS.DEPTH_BUFFER_BIT | WEBGL_CONSTANTS.STENCIL_BUFFER_BIT);
+    }
+    __clearBuffer(buffer, drawbuffer, values, sourceOffset) {
+      if (drawbuffer !== 0 || ![WEBGL_CONSTANTS.COLOR, WEBGL_CONSTANTS.DEPTH, WEBGL_CONSTANTS.STENCIL].includes(buffer)) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return;
+      }
+      const input = Array.from(values || []).slice(Number(sourceOffset) >>> 0);
+      if (buffer === WEBGL_CONSTANTS.COLOR) {
+        if (input.length < 4) { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return; }
+        this.clearColor(input[0], input[1], input[2], input[3]); this.clear(WEBGL_CONSTANTS.COLOR_BUFFER_BIT);
+      } else if (buffer === WEBGL_CONSTANTS.DEPTH) {
+        if (!input.length) { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return; }
+        this.clearDepth(input[0]); this.clear(WEBGL_CONSTANTS.DEPTH_BUFFER_BIT);
+      } else {
+        if (!input.length) { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return; }
+        this.clearStencil(input[0]); this.clear(WEBGL_CONSTANTS.STENCIL_BUFFER_BIT);
+      }
+    }
+    getParameter(parameter) {
+      parameter = Number(parameter);
+      switch (parameter) {
+        case WEBGL_CONSTANTS.VERTEX_ARRAY_BINDING: return this.__state.vertexArray;
+        case WEBGL_CONSTANTS.TRANSFORM_FEEDBACK_BINDING: return this.__state.transformFeedback;
+        case WEBGL_CONSTANTS.TRANSFORM_FEEDBACK_ACTIVE: return !!this.__state.transformFeedback?.__active;
+        case WEBGL_CONSTANTS.TRANSFORM_FEEDBACK_PAUSED: return !!this.__state.transformFeedback?.__paused;
+        case WEBGL_CONSTANTS.SAMPLER_BINDING:
+          return this.__state.samplerBindings.get(this.__state.activeTexture - WEBGL_CONSTANTS.TEXTURE0) || null;
+        case WEBGL_CONSTANTS.MAX_DRAW_BUFFERS:
+        case WEBGL_CONSTANTS.MAX_COLOR_ATTACHMENTS: return 4;
+        case WEBGL_CONSTANTS.MAX_3D_TEXTURE_SIZE: return 256;
+        case WEBGL_CONSTANTS.MAX_ARRAY_TEXTURE_LAYERS: return 256;
+        case WEBGL_CONSTANTS.MAX_SAMPLES: return 4;
+        case WEBGL_CONSTANTS.MAX_ELEMENT_INDEX: return 0xffffffff;
+        case WEBGL_CONSTANTS.MAX_CLIENT_WAIT_TIMEOUT_WEBGL: return 0;
+        case WEBGL_CONSTANTS.MAX_SERVER_WAIT_TIMEOUT: return 0;
+        case WEBGL_CONSTANTS.VERSION: return "WebGL 2.0 Omoikane";
+        case WEBGL_CONSTANTS.SHADING_LANGUAGE_VERSION: return "WebGL GLSL ES 3.00 Omoikane";
+        default: return super.getParameter(parameter);
+      }
+    }
+    drawElements(mode, count, type, offset) {
+      if (type !== WEBGL_CONSTANTS.UNSIGNED_INT) return super.drawElements(mode, count, type, offset);
+      if (!webglActive(this)) return;
+      if (!WEBGL_DRAW_MODES.includes(mode)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      if (!Number.isInteger(Number(count)) || Number(count) < 0 || !Number.isInteger(Number(offset)) || Number(offset) < 0) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return;
+      }
+      if (!this.__state.currentProgram || !this.__state.elementArrayBuffer) webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION);
+    }
+    get [Symbol.toStringTag]() { return "WebGL2RenderingContext"; }
+  }
+  for (const name of WEBGL1_CONSTANT_NAMES) {
+    const value = WEBGL_CONSTANTS[name];
+    Object.defineProperty(WebGLRenderingContext, name, { value, writable: false, enumerable: true, configurable: false });
+    Object.defineProperty(WebGLRenderingContext.prototype, name, { value, writable: false, enumerable: true, configurable: false });
+  }
   for (const [name, value] of Object.entries(WEBGL_CONSTANTS)) {
-    Object.defineProperty(WebGLRenderingContext, name, { value, writable: false, enumerable: false, configurable: false });
-    Object.defineProperty(WebGLRenderingContext.prototype, name, { value, writable: false, enumerable: false, configurable: false });
+    Object.defineProperty(WebGL2RenderingContext, name, { value, writable: false, enumerable: true, configurable: false });
+    Object.defineProperty(WebGL2RenderingContext.prototype, name, { value, writable: false, enumerable: true, configurable: false });
+  }
+  for (const name of [
+    "drawingBufferColorSpace", "unpackColorSpace", "createVertexArray", "deleteVertexArray",
+    "isVertexArray", "bindVertexArray", "createTransformFeedback", "deleteTransformFeedback",
+    "isTransformFeedback", "bindTransformFeedback", "beginTransformFeedback", "endTransformFeedback",
+    "pauseTransformFeedback", "resumeTransformFeedback", "createQuery", "deleteQuery", "isQuery",
+    "beginQuery", "endQuery", "getQuery", "getQueryParameter", "createSampler", "deleteSampler",
+    "isSampler", "bindSampler", "samplerParameteri", "samplerParameterf", "getSamplerParameter",
+    "fenceSync", "deleteSync", "isSync", "clientWaitSync", "waitSync", "getSyncParameter",
+    "clearBufferfv", "clearBufferiv", "clearBufferuiv", "clearBufferfi", "getParameter", "drawElements",
+  ]) {
+    const descriptor = Object.getOwnPropertyDescriptor(WebGL2RenderingContext.prototype, name);
+    if (descriptor) Object.defineProperty(WebGL2RenderingContext.prototype, name, {...descriptor, enumerable:true});
   }
 
   function resetHtmlCanvasState(canvas) {
@@ -20176,7 +20599,12 @@ let omoikaneUserActivationState;
       if(requested==="webgl"||requested==="experimental-webgl"){
         if(s.contextMode&&s.contextMode!=="webgl")return null;
         s.contextMode="webgl";
-        return s.webgl||(s.webgl=new WebGLRenderingContext(this,webglContextConstructionToken));
+        return s.webgl||(s.webgl=new WebGLRenderingContext(this,webglContextConstructionToken,webglContextAttributes(options)));
+      }
+      if(requested==="webgl2"){
+        if(s.contextMode&&s.contextMode!=="webgl2")return null;
+        s.contextMode="webgl2";
+        return s.webgl||(s.webgl=new WebGL2RenderingContext(this,webglContextConstructionToken,webglContextAttributes(options)));
       }
       return null;
     }
@@ -20325,10 +20753,18 @@ let omoikaneUserActivationState;
     getContext(type, options = undefined) {
       if (this.__detached) throw new DOMException("The OffscreenCanvas is detached", "InvalidStateError");
       const requested = String(type).toLowerCase();
-      if (requested !== "2d") return null;
+      if (requested !== "2d" && requested !== "webgl" && requested !== "webgl2") return null;
       if (this.__contextMode !== null && this.__contextMode !== requested) return null;
       this.__contextMode = requested;
       const state = canvasStateChecked(this);
+      if (requested === "webgl" || requested === "webgl2") {
+        if (!this.__context) {
+          const constructor = requested === "webgl2" ? WebGL2RenderingContext : WebGLRenderingContext;
+          this.__context = new constructor(this, webglContextConstructionToken, webglContextAttributes(options));
+        }
+        state.webgl = this.__context;
+        return this.__context;
+      }
       const settings = canvas2dSettings(options);
       if (!this.__context) this.__context = new OffscreenCanvasRenderingContext2D(canvasConstructionToken, this, settings);
       state.context = this.__context;
@@ -22891,10 +23327,17 @@ let omoikaneUserActivationState;
   globalThis.CanvasPattern = CanvasPattern;
   globalThis.Path2D = Path2D;
   globalThis.WebGLRenderingContext = WebGLRenderingContext;
+  globalThis.WebGL2RenderingContext = WebGL2RenderingContext;
+  globalThis.WebGLObject = WebGLObject;
   globalThis.WebGLBuffer = WebGLBuffer;
   globalThis.WebGLShader = WebGLShader;
   globalThis.WebGLProgram = WebGLProgram;
   globalThis.WebGLUniformLocation = WebGLUniformLocation;
+  globalThis.WebGLQuery = WebGLQuery;
+  globalThis.WebGLSampler = WebGLSampler;
+  globalThis.WebGLSync = WebGLSync;
+  globalThis.WebGLTransformFeedback = WebGLTransformFeedback;
+  globalThis.WebGLVertexArrayObject = WebGLVertexArrayObject;
   globalThis.__omoikane_webgl_lose_context = function(target) {
     const context = target instanceof WebGLRenderingContext ? target
       : target && target instanceof HTMLCanvasElement ? target.getContext("webgl") : null;
