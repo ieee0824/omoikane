@@ -26992,6 +26992,50 @@ let omoikaneUserActivationState;
     }
     get [Symbol.toStringTag]() { return "Navigator"; }
   }
+  let navigatorBadgeContext = "document";
+  function badgeNative(badge) {
+    const result = JSON.parse(String(__omoikane_badging(
+      __omoikane_document_id, navigatorBadgeContext, JSON.stringify(badge))));
+    if (result.error) {
+      throw new DOMException(result.message || "The badge operation failed", result.error);
+    }
+  }
+  function setAppBadge(contents = undefined) {
+    if (!(this instanceof Navigator)) return Promise.reject(new TypeError("Illegal invocation"));
+    try {
+      let badge = "flag";
+      if (contents !== undefined) {
+        if (typeof contents === "object" && contents !== null) {
+          return Promise.reject(new TypeError("Badge contents must be a number"));
+        }
+        const number = Number(contents);
+        if (!Number.isFinite(number) || number < 0 || number > Number.MAX_SAFE_INTEGER) {
+          return Promise.reject(new TypeError("Badge contents are outside the supported range"));
+        }
+        const integer = Math.trunc(number);
+        badge = integer === 0 ? "clear" : integer;
+      }
+      badgeNative(badge);
+      return Promise.resolve(undefined);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+  function clearAppBadge() {
+    if (!(this instanceof Navigator)) return Promise.reject(new TypeError("Illegal invocation"));
+    try {
+      badgeNative("clear");
+      return Promise.resolve(undefined);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+  if (nativeIsSecureContext()) {
+    Object.defineProperties(Navigator.prototype, {
+      setAppBadge: { configurable: true, enumerable: true, writable: true, value: setAppBadge },
+      clearAppBadge: { configurable: true, enumerable: true, writable: true, value: clearAppBadge },
+    });
+  }
   function shareNative(operation, data = {}) {
     const result = JSON.parse(String(nativeWebShare(operation, __omoikane_document_id, JSON.stringify(data))));
     if (result.error) {
@@ -37728,6 +37772,16 @@ let omoikaneUserActivationState;
   globalThis.Worker = Worker;
 
   globalThis.__omoikane_install_worker_global = function(url, workerId) {
+    navigatorBadgeContext = "worker";
+    function WorkerNavigator() { throw new TypeError("Illegal constructor"); }
+    WorkerNavigator.prototype = Object.create(Navigator.prototype, {
+      constructor: { configurable: true, writable: true, value: WorkerNavigator },
+      [Symbol.toStringTag]: { configurable: true, get() { return "WorkerNavigator"; } },
+    });
+    Object.setPrototypeOf(globalThis.navigator, WorkerNavigator.prototype);
+    Object.defineProperty(globalThis, "WorkerNavigator", {
+      configurable: true, enumerable: false, writable: true, value: WorkerNavigator,
+    });
     // A worker inherits EventTarget without the Window interface.
     Object.setPrototypeOf(globalThis, EventTarget.prototype);
     // A worker global is not a Window and cannot reach the page DOM. The
