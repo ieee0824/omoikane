@@ -178,7 +178,7 @@ pub(super) fn loaded_document_referrer(
 fn blocked_url_for_report(reference: &str, base_url: &str) -> String {
     if matches!(
         reference,
-        "trusted-types-sink" | "trusted-types-policy" | "eval"
+        "trusted-types-sink" | "trusted-types-policy" | "eval" | "wasm-eval"
     ) {
         return reference.to_owned();
     }
