@@ -332,19 +332,61 @@ def reset_target(
         target_lock.close()
 
 
-def stop_process_group(process: subprocess.Popen) -> None:
-    if process.poll() is not None:
-        return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-        process.wait(timeout=10)
-    except (ProcessLookupError, subprocess.TimeoutExpired):
-        if process.poll() is None:
+def process_group_has_live_members(group: int) -> bool:
+    """Observe live group members independently of the leader, excluding zombies.
+
+    ps supports these fields on both Linux and macOS. A failed observation raises
+    rather than certifying that cleanup completed.
+    """
+    result = subprocess.run(
+        ["ps", "-ax", "-o", "pgid=", "-o", "stat="],
+        capture_output=True, text=True, timeout=3, check=True,
+    )
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 2 or not fields[0].isdigit():
+            raise RuntimeError("cannot parse process group observation")
+        if int(fields[0]) == group and not fields[1].startswith(("Z", "X")):
+            return True
+    return False
+
+
+def stop_process_group(process: subprocess.Popen, timeout_seconds: float = 10) -> None:
+    """Stop an owned session group, including members whose leader already exited.
+
+    Only use for children created with start_new_session=True. Observe members
+    after TERM and KILL; a surviving member or failed observation raises.
+    """
+    group = process.pid
+    if group == os.getpgrp():
+        raise ValueError("refusing to stop the caller's process group")
+    for number, grace in ((signal.SIGTERM, timeout_seconds), (signal.SIGKILL, 3)):
+        try:
+            os.killpg(group, number)
+        except ProcessLookupError:
+            process.wait(timeout=3)
+            return
+        deadline = time.monotonic() + grace
+        while True:
+            process.poll()  # Reap our own leader; orphan zombies belong to init.
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
+                live = process_group_has_live_members(group)
+            except BaseException:
+                # Observation failure must not leave a writer running. Escalate,
+                # but still raise: signal delivery alone does not prove cleanup.
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait(timeout=3)
+                raise
+            if not live:
+                process.wait(timeout=3)
+                return
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+    raise RuntimeError(f"live processes remain in owned group {group} after SIGKILL")
 
 
 def run_guarded(
