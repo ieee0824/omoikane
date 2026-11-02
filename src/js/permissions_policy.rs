@@ -15,17 +15,23 @@ pub(super) enum PolicyFeature {
     Geolocation,
     Gamepad,
     ScreenWakeLock,
+    WebShare,
+    PublicKeyCredentialsCreate,
+    PublicKeyCredentialsGet,
     CrossOriginIsolated,
     StorageAccess,
     FocusWithoutUserActivation,
 }
 
 impl PolicyFeature {
-    pub(super) const ALL: [Self; 7] = [
+    pub(super) const ALL: [Self; 10] = [
         Self::Fullscreen,
         Self::Geolocation,
         Self::Gamepad,
         Self::ScreenWakeLock,
+        Self::WebShare,
+        Self::PublicKeyCredentialsCreate,
+        Self::PublicKeyCredentialsGet,
         Self::CrossOriginIsolated,
         Self::StorageAccess,
         Self::FocusWithoutUserActivation,
@@ -37,6 +43,9 @@ impl PolicyFeature {
             Self::Geolocation => "geolocation",
             Self::Gamepad => "gamepad",
             Self::ScreenWakeLock => "screen-wake-lock",
+            Self::WebShare => "web-share",
+            Self::PublicKeyCredentialsCreate => "publickey-credentials-create",
+            Self::PublicKeyCredentialsGet => "publickey-credentials-get",
             Self::CrossOriginIsolated => "cross-origin-isolated",
             Self::StorageAccess => "storage-access",
             Self::FocusWithoutUserActivation => "focus-without-user-activation",

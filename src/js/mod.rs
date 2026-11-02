@@ -178,6 +178,33 @@ pub use screen_orientation::{
 };
 mod wake_lock;
 pub use wake_lock::{DeterministicWakeLockProvider, WakeLockError, WakeLockProvider};
+mod web_share;
+pub use web_share::{DeterministicShareProvider, ShareData, ShareError, ShareFile, ShareProvider};
+mod badging;
+pub use badging::{
+    AppBadge, BadgeContext, BadgeDisposition, BadgeError, BadgeProvider, BadgeRequest,
+    DeterministicBadgeProvider,
+};
+mod protocol_handler;
+pub use protocol_handler::{
+    DeterministicProtocolHandlerProvider, ProtocolHandler, ProtocolHandlerDisposition,
+    ProtocolHandlerError, ProtocolHandlerOperation, ProtocolHandlerProvider,
+};
+mod push_api;
+pub use push_api::{
+    DeterministicPushProvider, PushError, PushOwner, PushProvider, PushSubscriptionData,
+    PushSubscriptionOptionsData,
+};
+mod payment_request;
+pub use payment_request::{
+    DeterministicPaymentProvider, PaymentError, PaymentMethodData, PaymentProvider,
+    PaymentRequestData, PaymentSelection,
+};
+mod web_authn;
+pub use web_authn::{
+    DeterministicWebAuthnProvider, WebAuthnAssertionRequest, WebAuthnAssertionResponse,
+    WebAuthnCreationRequest, WebAuthnCreationResponse, WebAuthnError, WebAuthnProvider,
+};
 mod media_capture;
 pub use media_capture::{
     MediaCaptureDevice, MediaCaptureProvider, MediaCaptureSnapshot, MediaDeviceKind,
@@ -2434,6 +2461,12 @@ struct HostState {
     gamepad: gamepad::State,
     screen_orientation: screen_orientation::State,
     wake_lock: wake_lock::State,
+    web_share: web_share::State,
+    badging: badging::State,
+    protocol_handler: protocol_handler::State,
+    push_api: push_api::State,
+    payment_request: payment_request::State,
+    web_authn: web_authn::State,
     media_capture: media_capture::State,
     media_source: media_source::State,
     web_codecs: web_codecs::State,
@@ -3427,6 +3460,12 @@ impl HostState {
             gamepad: gamepad::State::default(),
             screen_orientation: screen_orientation::State::default(),
             wake_lock: wake_lock::State::default(),
+            web_share: web_share::State::default(),
+            badging: badging::State::default(),
+            protocol_handler: protocol_handler::State::default(),
+            push_api: push_api::State::default(),
+            payment_request: payment_request::State::default(),
+            web_authn: web_authn::State::default(),
             media_capture: media_capture::State::default(),
             media_source: media_source::State::default(),
             web_codecs: web_codecs::State::default(),
@@ -6370,6 +6409,11 @@ impl HostState {
         self.auxiliary_opener_updaters.remove(&document_id);
         self.promise_reports.retire_document(document_id);
         self.wake_lock.release_document(document_id);
+        self.web_share.retire_document(document_id);
+        self.payment_request.retire_document(document_id);
+        self.storage_manager
+            .opfs_release_document_locks(document_id);
+        self.web_authn.retire_document(document_id);
         self.pointer_lock.retire_document(document_id);
         self.input_bridge.retire_document(document_id);
         self.form_state.retire_document(document_id);
@@ -6510,6 +6554,12 @@ impl HostState {
             .retire_document(previous.document.identity());
         self.wake_lock
             .release_document(previous.document.identity());
+        self.web_share.retire_document(previous.document.identity());
+        self.payment_request
+            .retire_document(previous.document.identity());
+        self.storage_manager
+            .opfs_release_document_locks(previous.document.identity());
+        self.web_authn.retire_document(previous.document.identity());
         self.pointer_lock
             .retire_document(previous.document.identity());
         self.input_bridge
@@ -16677,6 +16727,12 @@ fn register_host_bindings(
     gamepad::register(context, &mut bindings)?;
     screen_orientation::register(context, &mut bindings)?;
     wake_lock::register(context, &mut bindings)?;
+    web_share::register(context, &mut bindings)?;
+    badging::register(context, &mut bindings)?;
+    protocol_handler::register(context, &mut bindings)?;
+    push_api::register(context, &mut bindings)?;
+    payment_request::register(context, &mut bindings)?;
+    web_authn::register(context, &mut bindings)?;
     media_capture::register(context, &mut bindings)?;
     media_source::register(context, &mut bindings)?;
     web_codecs::register(context, &mut bindings)?;
@@ -16973,6 +17029,11 @@ fn register_host_bindings(
             js_string!("__omoikane_storage_manager"),
             2,
             NativeFunction::from_copy_closure(storage_manager_native),
+        ),
+        (
+            js_string!("__omoikane_opfs"),
+            4,
+            NativeFunction::from_copy_closure(opfs_native),
         ),
         (
             js_string!("__omoikane_get_element_by_id"),
@@ -19443,6 +19504,121 @@ fn storage_manager_native(
                 .into()),
         }
     })
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpfsRequest {
+    #[serde(default)]
+    path: Vec<String>,
+    #[serde(default)]
+    destination: Vec<String>,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    directory: bool,
+    #[serde(default)]
+    create: bool,
+    #[serde(default)]
+    recursive: bool,
+    #[serde(default)]
+    modified: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default, rename = "lockId")]
+    lock_id: u64,
+}
+
+fn opfs_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let operation = string_argument(args.first(), "", context)?;
+    let document_id = parse_node_id(args.get(1), context)?;
+    ensure_same_origin_document(context, document_id)?;
+    let request = string_argument(args.get(2), "{}", context)?;
+    let request: OpfsRequest = serde_json::from_str(&request)
+        .map_err(|_| JsNativeError::typ().with_message("Invalid OPFS request"))?;
+    let bytes = body_bytes_argument(args.get(3), context)?.unwrap_or_default();
+    let (manager, origin) = with_host_state(|host| {
+        let state = host.borrow();
+        if !document_is_secure_context(&state, document_id)
+            || !state.document_is_active(document_id)
+        {
+            return Err(JsNativeError::error()
+                .with_message("OPFS requires an active secure document")
+                .into());
+        }
+        let origin = state
+            .document_origins
+            .get(&document_id)
+            .cloned()
+            .flatten()
+            .ok_or_else(|| JsNativeError::error().with_message("OPFS requires a tuple origin"))?;
+        Ok((state.storage_manager.clone(), origin))
+    })?;
+    let result = match operation.as_str() {
+        "root" => manager.opfs_root(&origin).map(|()| serde_json::json!({})),
+        "handle" => manager
+            .opfs_get_handle(
+                &origin,
+                &request.path,
+                &request.name,
+                request.directory,
+                request.create,
+            )
+            .map(|()| serde_json::json!({})),
+        "list" => manager.opfs_list(&origin, &request.path).map(|entries| {
+            serde_json::json!({"entries": entries.into_iter().map(|entry| serde_json::json!({"name":entry.name,"kind":entry.kind})).collect::<Vec<_>>()})
+        }),
+        "file" => manager.opfs_file(&origin, &request.path).map(|file| {
+            serde_json::json!({"bytes":file.bytes,"modified":file.modified})
+        }),
+        "write" => manager
+            .opfs_write(&origin, &request.path, bytes, request.modified)
+            .map(|()| serde_json::json!({})),
+        "lock" => {
+            use storage::OpfsLockMode;
+            let mode = match request.mode.as_str() {
+                "siloed" => OpfsLockMode::Siloed,
+                "exclusive" | "sync" => OpfsLockMode::Exclusive,
+                _ => return Err(JsNativeError::typ().with_message("Invalid OPFS lock mode").into()),
+            };
+            manager
+                .opfs_acquire_lock(document_id, &origin, &request.path, mode)
+                .map(|lock_id| serde_json::json!({"lockId":lock_id}))
+        }
+        "unlock" => {
+            manager.opfs_release_lock(request.lock_id);
+            Ok(serde_json::json!({}))
+        }
+        "remove" => manager
+            .opfs_remove(
+                &origin,
+                &request.path,
+                &request.name,
+                request.recursive,
+            )
+            .map(|()| serde_json::json!({})),
+        "move" => manager
+            .opfs_move_file(&origin, &request.path, &request.destination, &request.name)
+            .map(|()| serde_json::json!({})),
+        _ => return Err(JsNativeError::typ().with_message("Unknown OPFS operation").into()),
+    };
+    let value = match result {
+        Ok(value) => value,
+        Err(error) => {
+            use storage::OpfsError;
+            let name = match error {
+                OpfsError::InvalidName => "TypeError",
+                OpfsError::NotFound => "NotFoundError",
+                OpfsError::TypeMismatch => "TypeMismatchError",
+                OpfsError::NotEmpty => "InvalidModificationError",
+                OpfsError::QuotaExceeded => "QuotaExceededError",
+                OpfsError::Io => "UnknownError",
+                OpfsError::Locked => "NoModificationAllowedError",
+            };
+            serde_json::json!({"error":name})
+        }
+    };
+    Ok(js_string!(value.to_string()).into())
 }
 
 // ---------------------------------------------------------------------------
@@ -25559,6 +25735,9 @@ fn initialize_dedicated_worker(
     {
         let owner = owner_state.borrow();
         let mut state = worker_runtime.host_state.borrow_mut();
+        state.badging.provider = Arc::clone(&owner.badging.provider);
+        state.push_api.provider = Arc::clone(&owner.push_api.provider);
+        state.notification_permission = owner.notification_permission.clone();
         state.inherit_worker_cookie_session(&owner, creator.document_id);
         state.inherit_resource_loading(&owner);
         let document_id = state.document.identity();
