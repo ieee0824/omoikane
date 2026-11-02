@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run the fixed Issue1506 pair sequentially on one native Apple Silicon host.
 
-Never retries failures. All worktrees, target caches, raw logs and partial
-results are retained in the allocation directory for artifact collection.
+Never retries failures. Worktrees, raw logs and partial results are retained
+for artifact collection. Completed target caches are cleaned with the guard.
 """
 import argparse
 import datetime
