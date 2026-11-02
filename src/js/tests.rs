@@ -50,6 +50,303 @@ fn sample_document() -> NodeHandle {
 }
 
 #[test]
+fn webassembly_validates_modules_and_exposes_owned_metadata() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let value = runtime
+        .eval(
+            r#"
+            (() => {
+              const empty = Uint8Array.of(0,97,115,109,1,0,0,0);
+              const described = Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,4,1,96,0,0,
+                2,9,1,3,101,110,118,1,102,0,0,
+                7,7,1,3,114,117,110,0,0,
+                0,4,1,120,1,2
+              );
+              const module = new WebAssembly.Module(described);
+              const custom = WebAssembly.Module.customSections(module, "x");
+              const detached = custom[0];
+              new Uint8Array(detached)[0] = 9;
+              return JSON.stringify({
+                namespace: Object.prototype.toString.call(WebAssembly),
+                moduleBrand: Object.prototype.toString.call(module),
+                valid: WebAssembly.validate(empty),
+                invalid: WebAssembly.validate(Uint8Array.of(0,1,2)),
+                imports: WebAssembly.Module.imports(module),
+                exports: WebAssembly.Module.exports(module),
+                custom: Array.from(new Uint8Array(WebAssembly.Module.customSections(module, "x")[0])),
+                owned: Array.from(new Uint8Array(detached)),
+                compileError: (() => { try { new WebAssembly.Module(Uint8Array.of(0)); } catch (e) { return e instanceof WebAssembly.CompileError && e.name; } })(),
+                sourceTypeError: (() => { try { WebAssembly.validate({}); } catch (e) { return e instanceof TypeError; } })(),
+                brandTypeError: (() => { try { WebAssembly.Module.exports({}); } catch (e) { return e instanceof TypeError; } })(),
+              });
+            })()
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        r#"{"namespace":"[object WebAssembly]","moduleBrand":"[object WebAssembly.Module]","valid":true,"invalid":false,"imports":[{"module":"env","name":"f","kind":"function"}],"exports":[{"name":"run","kind":"function"}],"custom":[1,2],"owned":[9,2],"compileError":"CompileError","sourceTypeError":true,"brandTypeError":true}"#
+    );
+}
+
+#[test]
+fn webassembly_promise_and_streaming_entry_points() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            r#"
+            globalThis.webassemblyPromiseChecks = undefined;
+            (async () => {
+              const bytes = Uint8Array.of(0,97,115,109,1,0,0,0);
+              const module = await WebAssembly.compile(bytes);
+              const fromBytes = await WebAssembly.instantiate(bytes);
+              const fromModule = await WebAssembly.instantiate(module);
+              const response = new Response(bytes, { headers: { "Content-Type": "APPLICATION/WASM" } });
+              const streamed = await WebAssembly.instantiateStreaming(response);
+              let mimeError = false;
+              try { await WebAssembly.compileStreaming(new Response(bytes)); }
+              catch (error) { mimeError = error instanceof TypeError; }
+              globalThis.webassemblyPromiseChecks = JSON.stringify({
+                module: module instanceof WebAssembly.Module,
+                fromBytes: fromBytes.instance instanceof WebAssembly.Instance,
+                fromModule: fromModule instanceof WebAssembly.Instance,
+                streamed: streamed.instance instanceof WebAssembly.Instance,
+                mimeError,
+              });
+            })();
+            "#,
+        )
+        .unwrap();
+    runtime.run_jobs().unwrap();
+    let value = runtime.eval("webassemblyPromiseChecks").unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        r#"{"module":true,"fromBytes":true,"fromModule":true,"streamed":true,"mimeError":true}"#
+    );
+}
+
+#[test]
+fn webassembly_tag_exception_and_supported_proposals() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let value = runtime
+        .eval(
+            r#"
+            (() => {
+              const tag = new WebAssembly.Tag({ parameters: ["i32", "i64", "f32", "f64"] });
+              const exception = new WebAssembly.Exception(tag, [0xffffffff, 7n, 1.1, 2.5]);
+              const other = new WebAssembly.Tag({ parameters: tag.type().parameters });
+              const simdBytes = Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,6,1,96,1,127,1,127,
+                3,2,1,0,
+                7,8,1,4,115,105,109,100,0,0,
+                10,11,1,9,0,32,0,253,17,253,163,1,11
+              );
+              const referenceBytes = Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,5,1,96,0,1,127,
+                3,2,1,0,
+                7,13,1,9,114,101,102,101,114,101,110,99,101,0,0,
+                10,7,1,5,0,208,111,209,11
+              );
+              let simd, reference;
+              try { simd = new WebAssembly.Instance(new WebAssembly.Module(simdBytes)); }
+              catch (error) { return `simd: ${error.name}: ${error.message}`; }
+              try { reference = new WebAssembly.Instance(new WebAssembly.Module(referenceBytes)); }
+              catch (error) { return `reference: ${error.name}: ${error.message}`; }
+              return JSON.stringify({
+                types: tag.type().parameters.join(","),
+                i32: exception.getArg(tag, 0),
+                i64: String(exception.getArg(tag, 1)),
+                f32: exception.getArg(tag, 2),
+                f64: exception.getArg(tag, 3),
+                same: exception.is(tag),
+                other: exception.is(other),
+                tagBrand: Object.prototype.toString.call(tag),
+                exceptionBrand: Object.prototype.toString.call(exception),
+                simdTrue: simd.exports.simd(1),
+                simdFalse: simd.exports.simd(0),
+                reference: reference.exports.reference(),
+              });
+            })()
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        r#"{"types":"i32,i64,f32,f64","i32":-1,"i64":"7","f32":1.100000023841858,"f64":2.5,"same":true,"other":false,"tagBrand":"[object WebAssembly.Tag]","exceptionBrand":"[object WebAssembly.Exception]","simdTrue":1,"simdFalse":0,"reference":1}"#
+    );
+}
+
+#[test]
+fn webassembly_compilation_obeys_its_distinct_csp_permission() {
+    let bytes = "Uint8Array.of(0,97,115,109,1,0,0,0)";
+    let mut blocked = runtime_at_document_url("https://example.test/");
+    blocked.install_csp_policy(&["script-src 'self'".to_string()]);
+    blocked
+        .eval(
+            "globalThis.wasmViolations = []; document.addEventListener('securitypolicyviolation', event => wasmViolations.push(event.blockedURI));",
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(
+            &mut blocked,
+            &format!(
+                "(() => {{ try {{ new WebAssembly.Module({bytes}); return 'allowed'; }} catch (error) {{ return error.name; }} }})()"
+            ),
+        ),
+        "CompileError"
+    );
+    blocked.run_jobs().unwrap();
+    blocked.run_timers(10, 1, 30);
+    assert_eq!(
+        eval_str(&mut blocked, "wasmViolations.join(',')",),
+        "wasm-eval"
+    );
+
+    let mut wasm_only = runtime_at_document_url("https://example.test/");
+    wasm_only.install_csp_policy(&["script-src 'wasm-unsafe-eval'".to_string()]);
+    assert_eq!(
+        eval_str(
+            &mut wasm_only,
+            &format!("new WebAssembly.Module({bytes}) instanceof WebAssembly.Module"),
+        ),
+        "true"
+    );
+    assert_eq!(
+        eval_str(
+            &mut wasm_only,
+            "(() => { try { eval('1'); return 'allowed'; } catch (error) { return error.name; } })()",
+        ),
+        "EvalError"
+    );
+}
+
+#[test]
+fn webassembly_instances_call_exported_and_imported_functions() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let value = runtime
+        .eval(
+            r#"
+            (() => {
+              const addModule = new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,7,1,96,2,127,127,1,127,
+                3,2,1,0,
+                7,7,1,3,97,100,100,0,0,
+                10,9,1,7,0,32,0,32,1,106,11
+              ));
+              const instance = new WebAssembly.Instance(addModule);
+              const importedModule = new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,6,1,96,1,127,1,127,
+                2,9,1,3,101,110,118,1,102,0,0,
+                7,7,1,3,114,117,110,0,0
+              ));
+              let seen = 0;
+              const imported = new WebAssembly.Instance(importedModule, { env: { f(value) { seen = value; return value + 1; } } });
+              const sentinel = new Error("sentinel");
+              const throwing = new WebAssembly.Instance(importedModule, { env: { f() { throw sentinel; } } });
+              let reentrantModule;
+              try { reentrantModule = new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,6,1,96,1,127,1,127,
+                2,9,1,3,101,110,118,1,102,0,0,
+                3,2,1,0,
+                7,18,2,3,114,117,110,0,0,8,105,100,101,110,116,105,116,121,0,1,
+                10,6,1,4,0,32,0,11
+              )); } catch (error) { return JSON.stringify({ compile: `${error.name}:${error.message}` }); }
+              let reentrant;
+              reentrant = new WebAssembly.Instance(reentrantModule, { env: { f(value) { return reentrant.exports.identity(value) + 1; } } });
+              const numeric = new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,
+                1,21,4,96,1,126,1,126,96,1,125,1,125,96,1,124,1,124,96,0,2,127,126,
+                3,5,4,0,1,2,3,
+                7,27,4,3,105,54,52,0,0,3,102,51,50,0,1,3,102,54,52,0,2,5,109,117,108,116,105,0,3,
+                10,23,4,4,0,32,0,11,4,0,32,0,11,4,0,32,0,11,6,0,65,7,66,9,11
+              )));
+              const trap = new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,1,4,1,96,0,0,3,2,1,0,7,8,1,4,98,111,111,109,0,0,10,5,1,3,0,0,11
+              )));
+              const spin = new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.of(
+                0,97,115,109,1,0,0,0,1,4,1,96,0,0,3,2,1,0,7,8,1,4,115,112,105,110,0,0,10,9,1,7,0,3,64,12,0,11,11
+              )));
+              return JSON.stringify({
+                sum: instance.exports.add(20, 22),
+                length: instance.exports.add.length,
+                name: instance.exports.add.name,
+                imported: imported.exports.run(8),
+                seen,
+                exception: (() => { try { throwing.exports.run(1); } catch (error) { return error === sentinel; } })(),
+                reentrant: reentrant.exports.run(11),
+                i64: String(numeric.exports.i64(9223372036854775807n)),
+                f32: numeric.exports.f32(1.25),
+                f64: numeric.exports.f64(2.5),
+                multi: numeric.exports.multi().map(String).join(","),
+                trap: (() => { try { trap.exports.boom(); } catch (error) { return error instanceof WebAssembly.RuntimeError; } })(),
+                fuel: (() => { try { spin.exports.spin(); } catch (error) { return error instanceof WebAssembly.RuntimeError; } })(),
+                brand: Object.prototype.toString.call(instance),
+                nullPrototype: Object.getPrototypeOf(instance.exports) === null,
+                stable: instance.exports === instance.exports,
+                immutable: !Object.isExtensible(instance.exports),
+                receiver: (() => { try { return Object.getOwnPropertyDescriptor(WebAssembly.Instance.prototype, "exports").get.call({}); } catch (e) { return e instanceof TypeError; } })(),
+              });
+            })()
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        r#"{"sum":42,"length":2,"name":"0","imported":9,"seen":8,"exception":true,"reentrant":12,"i64":"9223372036854775807","f32":1.25,"f64":2.5,"multi":"7,9","trap":true,"fuel":true,"brand":"[object WebAssembly.Instance]","nullPrototype":true,"stable":true,"immutable":true,"receiver":true}"#
+    );
+}
+
+#[test]
+fn webassembly_memory_and_global_objects_preserve_state() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let value = runtime
+        .eval(
+            r#"
+            (() => {
+              const memory = new WebAssembly.Memory({ initial: 1, maximum: 2 });
+              const old = memory.buffer;
+              new Uint8Array(old)[3] = 42;
+              const same = memory.buffer === old && new Uint8Array(memory.buffer)[3] === 42;
+              const previous = memory.grow(1);
+              const current = memory.buffer;
+              const global = new WebAssembly.Global({ value: "i32", mutable: true }, 7);
+              global.value = 9;
+              const immutable = new WebAssembly.Global({ value: "f64" }, 1.5);
+              let immutableError = false;
+              try { immutable.value = 2; } catch (error) { immutableError = error instanceof TypeError; }
+              const first = { id: 1 };
+              const second = { id: 2 };
+              const table = new WebAssembly.Table({ element: "externref", initial: 2, maximum: 3 }, first);
+              table.set(1, second);
+              const tablePrevious = table.grow(1, first);
+              return JSON.stringify({
+                same, previous, detached: old.byteLength === 0,
+                size: current.byteLength, copied: new Uint8Array(current)[3],
+                global: global.value, valueOf: +global, immutable: immutable.value,
+                immutableError,
+                table: [table.length, tablePrevious, table.get(0) === first, table.get(1) === second, table.get(2) === first],
+                memoryBrand: Object.prototype.toString.call(memory),
+                globalBrand: Object.prototype.toString.call(global),
+                tableBrand: Object.prototype.toString.call(table),
+              });
+            })()
+            "#,
+        )
+        .unwrap();
+    assert_eq!(
+        value.as_string().unwrap().to_std_string_escaped(),
+        r#"{"same":true,"previous":1,"detached":true,"size":131072,"copied":42,"global":9,"valueOf":9,"immutable":1.5,"immutableError":true,"table":[3,2,true,true,true],"memoryBrand":"[object WebAssembly.Memory]","globalBrand":"[object WebAssembly.Global]","tableBrand":"[object WebAssembly.Table]"}"#
+    );
+}
+
+#[test]
 fn native_host_call_identifies_the_immediate_javascript_caller_realm() {
     let mut context = Context::default();
     context
@@ -254,7 +551,8 @@ fn dedicated_worker_uses_separate_global_and_round_trips_messages() {
     runtime
         .eval(
             "globalThis.workerValues = []; \
-                 const worker = new Worker('data:text/javascript,globalThis.onmessage%3De%3D%3EpostMessage(e.data%2B1)'); \
+                 const workerSource = `globalThis.onmessage=e=>postMessage({value:e.data+1,wasm:typeof WebAssembly==='object'&&typeof WebAssembly.compile==='function'&&WebAssembly.validate(Uint8Array.of(0,97,115,109,1,0,0,0))})`; \
+                 const worker = new Worker('data:text/javascript,' + encodeURIComponent(workerSource)); \
                  worker.onmessage = event => workerValues.push(event.data); \
                  worker.postMessage(41); \
                  globalThis.workerDocumentType = typeof worker.document;",
@@ -263,8 +561,12 @@ fn dedicated_worker_uses_separate_global_and_round_trips_messages() {
     boa_gc::force_collect();
     runtime.run_until_idle().unwrap();
     assert_eq!(
-        runtime.eval("workerValues[0]").unwrap().as_number(),
+        runtime.eval("workerValues[0].value").unwrap().as_number(),
         Some(42.0)
+    );
+    assert_eq!(
+        runtime.eval("workerValues[0].wasm").unwrap().as_boolean(),
+        Some(true)
     );
     assert_eq!(
         runtime
@@ -3296,6 +3598,67 @@ fn canvas_2d_pixels_transform_clip_image_data_draw_image_and_png() {
 }
 
 #[test]
+fn canvas_origin_clean_taints_propagates_and_resets() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut image = crate::paint::Canvas::new(1, 1);
+    image.set_pixel(0, 0, crate::paint::Color::rgb(1, 2, 3));
+    let png = image.encode_png();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 1024];
+        let _ = std::io::Read::read(&mut stream, &mut request);
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            png.len()
+        )
+        .unwrap();
+        std::io::Write::write_all(&mut stream, &png).unwrap();
+    });
+
+    let mut runtime = runtime_at_document_url("http://origin.test/page");
+    let result = eval_str(
+        &mut runtime,
+        &format!(
+            r#"(() => {{
+              const name = call => {{ try {{ call(); return 'none'; }} catch (error) {{ return error.name; }} }};
+              const image = document.createElement('img');
+              image.src = 'http://{address}/image.png';
+              if (image.crossOrigin !== null) return 'crossOrigin default';
+              const source = document.createElement('canvas'); source.width = source.height = 1;
+              const patternBefore = source.getContext('2d').createPattern(source, 'repeat');
+              source.getContext('2d').drawImage(image, 0, 0);
+              const target = document.createElement('canvas'); target.width = target.height = 1;
+              target.getContext('2d').drawImage(source, 0, 0);
+              const errors = [name(() => target.getContext('2d').getImageData(0, 0, 1, 1)),
+                name(() => target.toDataURL()), name(() => target.toBlob(() => {{}})),
+                name(() => target.captureStream())];
+              target.width = 1;
+              errors.push(name(() => target.toDataURL()));
+              const patternTarget = document.createElement('canvas');
+              const patternContext = patternTarget.getContext('2d');
+              patternContext.fillStyle = patternBefore; patternContext.fillRect(0, 0, 1, 1);
+              errors.push(name(() => patternTarget.toDataURL()));
+              const taintedPattern = source.getContext('2d').createPattern(source, 'repeat');
+              const clearTarget = document.createElement('canvas');
+              const clearContext = clearTarget.getContext('2d');
+              clearContext.fillStyle = taintedPattern; clearContext.clearRect(0, 0, 1, 1);
+              errors.push(name(() => clearTarget.toDataURL()));
+              patternContext.fillStyle = taintedPattern; patternContext.fillRect(0, 0, 1, 1);
+              errors.push(name(() => patternTarget.toDataURL()));
+              return errors.join();
+            }})()"#
+        ),
+    );
+    server.join().unwrap();
+    assert_eq!(
+        result,
+        "SecurityError,SecurityError,SecurityError,SecurityError,none,none,none,SecurityError"
+    );
+}
+
+#[test]
 fn canvas_clear_rect_clips_large_untransformed_rectangles() {
     let mut runtime = JsRuntime::new().unwrap();
     let result = eval_str(
@@ -3387,6 +3750,53 @@ fn webgl_canvas_context_state_resources_and_loss_boundary() {
         result,
         "function|true|true|true|255,64,128,255|true|true|1,2,3,4|true|true|12|true|true|true|true|true|true|true|true|true|true"
     );
+}
+
+#[test]
+fn webgl2_extends_the_software_context_with_owned_objects_and_state() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let result = eval_str(
+        &mut runtime,
+        r#"(() => {
+          const canvas = document.createElement('canvas');
+          canvas.width = 2; canvas.height = 1;
+          const gl = canvas.getContext('webgl2', {alpha:false, stencil:true, powerPreference:'low-power'});
+          const shape = gl instanceof WebGL2RenderingContext && gl instanceof WebGLRenderingContext &&
+            gl.getContextAttributes().alpha === false && gl.getContextAttributes().stencil === true &&
+            gl.getContextAttributes().powerPreference === 'low-power' && canvas.getContext('webgl') === null;
+          const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+          const feedback = gl.createTransformFeedback(); gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, feedback);
+          gl.beginTransformFeedback(gl.POINTS); gl.pauseTransformFeedback(); gl.resumeTransformFeedback(); gl.endTransformFeedback();
+          const query = gl.createQuery(); gl.beginQuery(gl.ANY_SAMPLES_PASSED, query);
+          const queryBound = gl.getQuery(gl.ANY_SAMPLES_PASSED, gl.CURRENT_QUERY) === query;
+          gl.endQuery(gl.ANY_SAMPLES_PASSED);
+          const sampler = gl.createSampler(); gl.samplerParameteri(sampler, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE); gl.bindSampler(0, sampler);
+          const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+          const objects = vao instanceof WebGLVertexArrayObject && vao instanceof WebGLObject &&
+            feedback instanceof WebGLTransformFeedback && query instanceof WebGLQuery && sampler instanceof WebGLSampler && sync instanceof WebGLSync;
+          gl.bindTransformFeedback(0xdead, feedback);
+          const invalidEnum = gl.getError() === gl.INVALID_ENUM;
+          const state = gl.getParameter(gl.VERTEX_ARRAY_BINDING) === vao &&
+            gl.getParameter(gl.TRANSFORM_FEEDBACK_BINDING) === feedback && queryBound &&
+            gl.getQueryParameter(query, gl.QUERY_RESULT_AVAILABLE) === true &&
+            gl.getSamplerParameter(sampler, gl.TEXTURE_WRAP_R) === gl.CLAMP_TO_EDGE &&
+            gl.getParameter(gl.SAMPLER_BINDING) === sampler &&
+            gl.getSyncParameter(sync, gl.SYNC_STATUS) === gl.SIGNALED &&
+            gl.clientWaitSync(sync, 0, 0) === gl.ALREADY_SIGNALED;
+          gl.clearBufferfv(gl.COLOR, 0, new Float32Array([0.25, 0.5, 1, 1]));
+          const pixels = new Uint8Array(4); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+          const clear = Array.from(pixels).join(',') === '64,128,255,255';
+          const other = document.createElement('canvas').getContext('webgl2');
+          other.bindVertexArray(vao);
+          const ownership = other.getError() === other.INVALID_OPERATION;
+          gl.deleteVertexArray(vao); gl.deleteTransformFeedback(feedback); gl.deleteQuery(query); gl.deleteSampler(sampler); gl.deleteSync(sync);
+          const deleted = !gl.isVertexArray(vao) && !gl.isTransformFeedback(feedback) && !gl.isQuery(query) && !gl.isSampler(sampler) && !gl.isSync(sync);
+          const offscreen = new OffscreenCanvas(1, 1).getContext('webgl2') instanceof WebGL2RenderingContext;
+          const strings = String(gl) === '[object WebGL2RenderingContext]' && gl.getParameter(gl.VERSION).startsWith('WebGL 2.0');
+          return [shape, objects, invalidEnum, state, clear, ownership, deleted, offscreen, strings].join('|');
+        })()"#,
+    );
+    assert_eq!(result, "true|true|true|true|true|true|true|true|true");
 }
 
 #[test]
@@ -16251,9 +16661,9 @@ fn navigator_storage_is_secure_context_only_and_denial_is_not_fixed_success() {
     assert_eq!(
         eval_str(
             &mut insecure,
-            "typeof StorageManager + ':' + ('storage' in navigator)"
+            "typeof StorageManager + ':' + ('storage' in navigator) + ':' + typeof FileSystemHandle"
         ),
-        "undefined:false"
+        "undefined:false:undefined"
     );
     {
         let mut state = insecure.host_state.borrow_mut();
@@ -16296,7 +16706,7 @@ fn navigator_storage_rejects_operations_for_an_opaque_secure_origin() {
         .insert(document_id, None);
     runtime
         .eval(
-            r#"globalThis.opaqueProbe = { done: false, exposed: false, rejected: false };
+            r#"globalThis.opaqueProbe = { done: false, exposed: false, rejected: false, directoryRejected: false };
                    (() => {
                      opaqueProbe.exposed = typeof StorageManager === 'function' &&
                        navigator.storage instanceof StorageManager;
@@ -16304,6 +16714,7 @@ fn navigator_storage_rejects_operations_for_an_opaque_secure_origin() {
                        () => { opaqueProbe.done = true; },
                        error => { opaqueProbe.done = true; opaqueProbe.rejected = error instanceof TypeError; }
                      );
+                     navigator.storage.getDirectory().catch(error => { opaqueProbe.directoryRejected = error.name === 'SecurityError'; });
                    })();"#,
         )
         .unwrap();
@@ -16311,9 +16722,9 @@ fn navigator_storage_rejects_operations_for_an_opaque_secure_origin() {
     assert_eq!(
         eval_str(
             &mut runtime,
-            "opaqueProbe.done + ':' + opaqueProbe.exposed + ':' + opaqueProbe.rejected"
+            "opaqueProbe.done + ':' + opaqueProbe.exposed + ':' + opaqueProbe.rejected + ':' + opaqueProbe.directoryRejected"
         ),
-        "true:true:true"
+        "true:true:true:true"
     );
 }
 
@@ -17624,6 +18035,93 @@ fn web_audio_models_context_state_param_automation_and_node_lifecycle() {
 }
 
 #[test]
+fn offline_audio_context_renders_the_existing_graph_deterministically() {
+    let mut runtime = runtime_from_html("<html><body></body></html>");
+    runtime.eval(r#"
+        globalThis.offlineEvents = [];
+        const context = new OfflineAudioContext({numberOfChannels: 2, length: 480, sampleRate: 48000});
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.frequency.value = 1000;
+        gain.gain.value = 0.5;
+        oscillator.connect(gain).connect(context.destination);
+        oscillator.start(0); oscillator.stop(0.005);
+        context.oncomplete = event => offlineEvents.push('complete:' + event.renderedBuffer.length);
+        context.startRendering().then(buffer => {
+          offlineEvents.push('promise:' + context.state + ':' + buffer.numberOfChannels);
+          globalThis.offlineSample = buffer.getChannelData(0)[12];
+          globalThis.offlineSilent = buffer.getChannelData(0)[300];
+        });
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "offlineEvents.join(',')"),
+        "complete:480,promise:closed:2"
+    );
+    assert!((eval_num(&mut runtime, "offlineSample") - 0.5).abs() < 0.0001);
+    assert_eq!(eval_num(&mut runtime, "offlineSilent"), 0.0);
+}
+
+#[test]
+fn offline_audio_context_suspends_on_a_render_quantum_and_decodes_pcm_wave() {
+    let mut runtime = runtime_from_html("<html><body></body></html>");
+    runtime.eval(r#"
+        globalThis.offlineOrder = [];
+        const context = new OfflineAudioContext(1, 384, 48000);
+        context.suspend(129 / 48000).then(() => {
+          offlineOrder.push('suspended:' + context.currentTime + ':' + context.state);
+          return context.resume();
+        }).then(() => offlineOrder.push('resumed'));
+        context.startRendering().then(() => offlineOrder.push('complete:' + context.state));
+
+        const wave = new ArrayBuffer(48);
+        const bytes = new Uint8Array(wave);
+        const view = new DataView(wave);
+        const text = (offset, value) => { for (let index = 0; index < value.length; index++) bytes[offset + index] = value.charCodeAt(index); };
+        text(0, 'RIFF'); view.setUint32(4, 40, true); text(8, 'WAVE'); text(12, 'fmt ');
+        view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+        view.setUint32(24, 8000, true); view.setUint32(28, 16000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+        text(36, 'data'); view.setUint32(40, 4, true); view.setInt16(44, 16384, true); view.setInt16(46, -16384, true);
+        const decoderContext = new OfflineAudioContext(1, 1, 8000);
+        decoderContext.decodeAudioData(wave).then(buffer => globalThis.decodedAudio = [buffer.length, buffer.sampleRate,
+          buffer.getChannelData(0)[0], buffer.getChannelData(0)[1]].join('|'));
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "offlineOrder.join(',')"),
+        "suspended:0.0026666666666666666:suspended,resumed,complete:closed"
+    );
+    assert_eq!(eval_str(&mut runtime, "decodedAudio"), "2|8000|0.5|-0.5");
+}
+
+#[test]
+fn audio_worklet_reuses_the_worklet_runtime_and_registers_nodes() {
+    let mut runtime = runtime_from_html("<html><body></body></html>");
+    runtime.eval(r#"
+        globalThis.workletResult = [];
+        const context = new OfflineAudioContext(1, 128, 48000);
+        const source = encodeURIComponent(`registerProcessor('fixture', class extends AudioWorkletProcessor {
+          process(inputs, outputs) { outputs[0][0].fill(0.25); return true; }
+        })`);
+        context.audioWorklet.addModule('data:text/javascript,' + source)
+          .then(() => {
+            const node = new AudioWorkletNode(context, 'fixture');
+            node.connect(context.destination);
+            workletResult.push(node instanceof AudioNode, node.port instanceof MessagePort,
+              context.audioWorklet.registeredNames.join('|'));
+            return context.startRendering();
+          }).then(buffer => {
+            workletResult.push(buffer.getChannelData(0)[64]);
+          });
+    "#).unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "workletResult.join(',')"),
+        "true,true,fixture,0.25"
+    );
+}
+
+#[test]
 fn notifications_model_permission_and_task_queued_lifecycle() {
     let mut runtime = runtime_from_html("<html><body></body></html>");
     assert_eq!(eval_str(&mut runtime, "Notification.permission"), "default");
@@ -18334,6 +18832,1027 @@ fn media_session_actions_use_host_dispatch_and_validate_state_boundaries() {
         !runtime
             .dispatch_media_session_action("seekto", serde_json::json!({"seekTime": 8}))
             .unwrap()
+    );
+}
+
+fn test_gamepad(index: u32, timestamp: f64, axis: f64) -> GamepadSnapshot {
+    GamepadSnapshot {
+        id: "Deterministic Pad".to_string(),
+        index,
+        connected: true,
+        timestamp,
+        mapping: "standard".to_string(),
+        axes: vec![axis, -axis],
+        buttons: vec![GamepadButtonSnapshot {
+            pressed: axis > 0.5,
+            touched: axis > 0.0,
+            value: axis,
+        }],
+        haptic_effects: vec!["dual-rumble".to_string()],
+    }
+}
+
+#[test]
+fn gamepad_provider_preserves_slots_snapshots_and_connection_events() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicGamepadProvider::new(vec![test_gamepad(
+        2, 10.0, 0.25,
+    )]));
+    provider.set_user_gesture(true);
+    runtime.set_gamepad_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.gamepadEvents = [];
+               addEventListener('gamepadconnected', event => gamepadEvents.push('connect:' + event.gamepad.index));
+               addEventListener('gamepaddisconnected', event => gamepadEvents.push('disconnect:' + event.gamepad.index));"#,
+        )
+        .unwrap();
+    runtime.poll_gamepads().unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "gamepadEvents.join(',')"),
+        "connect:2"
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "JSON.stringify([navigator.getGamepads().length, navigator.getGamepads()[0], navigator.getGamepads()[2].id, navigator.getGamepads()[2].axes, navigator.getGamepads()[2].buttons[0].value])"
+        ),
+        r#"[3,null,"Deterministic Pad",[0.25,-0.25],0.25]"#
+    );
+    runtime
+        .eval("globalThis.firstGamepad = navigator.getGamepads()[2]")
+        .unwrap();
+
+    provider.publish(vec![test_gamepad(2, 20.0, 0.75)]);
+    runtime.poll_gamepads().unwrap();
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "String(firstGamepad === navigator.getGamepads()[2]) + ':' + firstGamepad.timestamp + ':' + firstGamepad.buttons[0].pressed"
+        ),
+        "true:20:true"
+    );
+
+    provider.publish(Vec::new());
+    runtime.poll_gamepads().unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "gamepadEvents.join(',')"),
+        "connect:2,disconnect:2"
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "String(firstGamepad.connected) + ':' + navigator.getGamepads().length"
+        ),
+        "false:0"
+    );
+}
+
+#[test]
+fn gamepad_haptics_validate_at_the_provider_boundary() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicGamepadProvider::new(vec![test_gamepad(
+        0, 1.0, 0.0,
+    )]));
+    provider.set_user_gesture(true);
+    runtime.set_gamepad_provider(provider.clone());
+    runtime.poll_gamepads().unwrap();
+    runtime
+        .eval(
+            r#"globalThis.hapticResult = '';
+               navigator.getGamepads()[0].vibrationActuator.playEffect('dual-rumble', {
+                 duration: 25, startDelay: 2, strongMagnitude: 1, weakMagnitude: 0.5
+               }).then(value => hapticResult = value);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "hapticResult"), "complete");
+    let requests = provider.haptic_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, 0);
+    let request = requests[0].1.as_ref().unwrap();
+    assert_eq!(request.effect, "dual-rumble");
+    assert_eq!(request.strong_magnitude, 1.0);
+    assert_eq!(request.weak_magnitude, 0.5);
+}
+
+#[test]
+fn gamepad_exposure_requires_a_gesture_and_permissions_policy() {
+    let mut runtime =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "https://gamepad.example.test/")
+            .unwrap();
+    let provider = Arc::new(DeterministicGamepadProvider::new(vec![test_gamepad(
+        0, 1.0, 0.0,
+    )]));
+    runtime.set_gamepad_provider(provider.clone());
+    assert_eq!(
+        eval_str(&mut runtime, "String(navigator.getGamepads().length)"),
+        "0"
+    );
+    provider.set_user_gesture(true);
+    assert_eq!(
+        eval_str(&mut runtime, "String(navigator.getGamepads().length)"),
+        "1"
+    );
+    runtime
+        .install_response_security_headers(&[("Permissions-Policy".into(), "gamepad=()".into())]);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "(() => { try { navigator.getGamepads(); return 'allowed'; } catch (error) { return error.name; } })()"
+        ),
+        "SecurityError"
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "String(!document.permissionsPolicy.allowsFeature('gamepad'))"
+        ),
+        "true"
+    );
+}
+
+fn orientation_snapshot(
+    orientation_type: ScreenOrientationType,
+    angle: u16,
+) -> ScreenOrientationSnapshot {
+    ScreenOrientationSnapshot {
+        orientation_type,
+        angle,
+    }
+}
+
+#[test]
+fn screen_orientation_lock_updates_state_and_fires_before_resolution() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicScreenOrientationProvider::new(
+        orientation_snapshot(ScreenOrientationType::PortraitPrimary, 0),
+    ));
+    runtime.set_screen_orientation_provider(provider.clone());
+    runtime.refresh_screen_orientation().unwrap();
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "JSON.stringify([screen instanceof Screen, screen.orientation instanceof ScreenOrientation, screen.orientation instanceof EventTarget, screen.orientation === screen.orientation, screen.orientation.type, screen.orientation.angle])"
+        ),
+        r#"[true,true,true,true,"portrait-primary",0]"#
+    );
+    runtime
+        .eval(
+            r#"globalThis.orientationLog = [];
+               screen.orientation.onchange = () => orientationLog.push('change:' + screen.orientation.type);
+               addEventListener('keydown', () => document.documentElement.requestFullscreen(), { once: true });
+               __omoikane_dispatch_keyboard_input('keydown', { key: 'Enter', code: 'Enter' });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime
+        .eval(
+            "screen.orientation.lock('landscape-secondary').then(() => orientationLog.push('resolved'))",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "orientationLog.join(',') + ':' + screen.orientation.angle"
+        ),
+        "change:landscape-secondary,resolved:270"
+    );
+    provider.publish(orientation_snapshot(
+        ScreenOrientationType::PortraitSecondary,
+        180,
+    ));
+    runtime.refresh_screen_orientation().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "orientationLog.slice(-1)[0]"),
+        "change:portrait-secondary"
+    );
+}
+
+#[test]
+fn screen_orientation_enforces_visibility_fullscreen_and_provider_failures() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicScreenOrientationProvider::default());
+    runtime.set_screen_orientation_provider(provider.clone());
+    runtime
+        .eval(
+            "globalThis.orientationError = ''; screen.orientation.lock('portrait').catch(error => orientationError = error.name)",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "orientationError"), "SecurityError");
+
+    runtime
+        .eval(
+            "addEventListener('keydown', () => document.documentElement.requestFullscreen(), { once: true }); __omoikane_dispatch_keyboard_input('keydown', { key: 'Enter', code: 'Enter' })",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    provider.fail_next(ScreenOrientationError::NotSupported("fixed display".into()));
+    runtime
+        .eval(
+            "orientationError = ''; screen.orientation.lock('portrait').catch(error => orientationError = error.name)",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "orientationError"),
+        "NotSupportedError"
+    );
+    runtime.set_page_visibility(true);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "(() => { try { screen.orientation.unlock(); return 'allowed'; } catch (error) { return error.name; } })()"
+        ),
+        "SecurityError"
+    );
+}
+
+#[test]
+fn screen_orientation_pending_child_lock_aborts_when_document_retires() {
+    let document = crate::html::TreeBuilder::parse("<iframe id='child'></iframe>").document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    runtime
+        .eval(
+            "addEventListener('keydown', () => document.documentElement.requestFullscreen(), { once: true }); __omoikane_dispatch_keyboard_input('keydown', { key: 'Enter', code: 'Enter' })",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime
+        .eval(
+            r#"globalThis.orientationAbort = '';
+               const frame = document.getElementById('child');
+               const pending = frame.contentWindow.screen.orientation.lock('portrait-primary');
+               frame.remove();
+               pending.catch(error => orientationAbort = error.name);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "orientationAbort"), "AbortError");
+}
+
+#[test]
+fn screen_orientation_sandbox_requires_allow_orientation_lock() {
+    let document = crate::html::TreeBuilder::parse(
+        "<iframe id='blocked' allow='fullscreen' sandbox='allow-scripts allow-same-origin'></iframe>\
+         <iframe id='allowed' allow='fullscreen' sandbox='allow-scripts allow-same-origin allow-orientation-lock'></iframe>",
+    )
+    .document();
+    let allowed_iframe = document.query_selector("#allowed").unwrap().identity();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    runtime
+        .eval("void document.getElementById('allowed').contentWindow")
+        .unwrap();
+    let allowed_root = runtime.host_state.borrow().iframe_documents[&allowed_iframe]
+        .document
+        .query_selector("html")
+        .unwrap();
+    runtime
+        .eval(
+            r#"globalThis.sandboxResults = [];
+               document.getElementById('blocked').contentWindow.screen.orientation
+                 .lock('portrait-primary').catch(error => sandboxResults.push(error.name));"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert!(
+        runtime
+            .host_state
+            .borrow_mut()
+            .request_fullscreen(&allowed_root)
+    );
+    runtime
+        .eval(
+            "document.getElementById('allowed').contentWindow.screen.orientation.lock('portrait-primary').then(() => sandboxResults.push('allowed'))",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "sandboxResults.sort().join(',')"),
+        "SecurityError,allowed"
+    );
+}
+
+#[test]
+fn wake_lock_aggregates_sentinels_and_releases_on_visibility_loss() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicWakeLockProvider::default());
+    runtime.set_wake_lock_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.wakeLog = [];
+               Promise.all([navigator.wakeLock.request(), navigator.wakeLock.request('screen')])
+                 .then(([first, second]) => {
+                   globalThis.firstWake = first;
+                   globalThis.secondWake = second;
+                   first.onrelease = () => wakeLog.push('first');
+                   second.addEventListener('release', () => wakeLog.push('second'));
+                 });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(provider.held_count(), 1);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "[firstWake instanceof WakeLockSentinel, firstWake.type, firstWake.released, navigator.wakeLock === navigator.wakeLock].join(':')"
+        ),
+        "true:screen:false:true"
+    );
+    runtime.eval("firstWake.release()").unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(provider.held_count(), 1);
+    runtime.set_page_visibility(true);
+    assert_eq!(provider.held_count(), 0);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "wakeLog.join(',') + ':' + firstWake.released + ':' + secondWake.released"
+        ),
+        "first,second:true:true"
+    );
+}
+
+#[test]
+fn wake_lock_enforces_type_policy_visibility_and_provider_failure() {
+    let mut runtime =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "https://wake-lock.example.test/")
+            .unwrap();
+    let provider = Arc::new(DeterministicWakeLockProvider::default());
+    runtime.set_wake_lock_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.wakeErrors = [];
+               navigator.wakeLock.request('system').catch(error => wakeErrors.push(error.name));"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    provider.fail_next("battery is low");
+    runtime
+        .eval("navigator.wakeLock.request().catch(error => wakeErrors.push(error.name))")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime.install_response_security_headers(&[(
+        "Permissions-Policy".into(),
+        "screen-wake-lock=()".into(),
+    )]);
+    runtime
+        .eval("navigator.wakeLock.request().catch(error => wakeErrors.push(error.name))")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "wakeErrors.join(',')"),
+        "TypeError,NotAllowedError,NotAllowedError"
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "String(!document.permissionsPolicy.allowsFeature('screen-wake-lock'))"
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn wake_lock_host_revocation_and_document_retirement_release_platform_state() {
+    let document = crate::html::TreeBuilder::parse("<iframe id='child'></iframe>").document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let provider = Arc::new(DeterministicWakeLockProvider::default());
+    runtime.set_wake_lock_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.revoked = 0;
+               navigator.wakeLock.request().then(lock => {
+                 globalThis.hostLock = lock;
+                 lock.onrelease = () => revoked++;
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime.revoke_wake_locks();
+    assert_eq!(provider.held_count(), 0);
+    assert_eq!(
+        eval_str(&mut runtime, "revoked + ':' + hostLock.released"),
+        "1:true"
+    );
+
+    runtime
+        .eval(
+            r#"globalThis.childFrame = document.getElementById('child');
+               childFrame.contentWindow.navigator.wakeLock.request().then(lock => {
+                 globalThis.childLock = lock;
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(provider.held_count(), 1);
+    runtime.eval("childFrame.remove()").unwrap();
+    assert_eq!(provider.held_count(), 0);
+}
+
+#[test]
+fn web_authn_provider_receives_owned_normalized_requests_and_builds_responses() {
+    let mut runtime =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "https://login.example.test/app")
+            .unwrap();
+    let provider = Arc::new(DeterministicWebAuthnProvider::default());
+    provider.set_capabilities([
+        "conditionalGet".to_owned(),
+        "userVerifyingPlatformAuthenticator".to_owned(),
+        "embedder-private-value".to_owned(),
+    ]);
+    provider.respond_to_next_creation(Ok(WebAuthnCreationResponse {
+        credential_id: vec![1, 2, 3],
+        client_data_json: br#"{"type":"webauthn.create"}"#.to_vec(),
+        attestation_object: vec![0xa0],
+        authenticator_data: vec![4; 37],
+        public_key: Some(vec![5, 6]),
+        public_key_algorithm: -7,
+        transports: vec!["internal".into()],
+        authenticator_attachment: Some("platform".into()),
+        client_extension_results: serde_json::json!({"credProps":{"rk":true}}),
+    }));
+    runtime.set_web_authn_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.webAuthnResult = 'pending';
+               navigator.credentials.create({publicKey:{
+                 challenge: new Uint8Array([9,8,7]),
+                 rp: {name:'Example'},
+                 user: {id:new Uint8Array([6,5]),name:'user',displayName:'User'},
+                 pubKeyCredParams:[{type:'public-key',alg:-7}],
+                 authenticatorSelection:{residentKey:'required',userVerification:'required'}
+               }}).then(value => {
+                 globalThis.createdCredential = value;
+                 webAuthnResult = JSON.stringify(value);
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(provider.creation_requests().len(), 1);
+    let request = &provider.creation_requests()[0];
+    assert_eq!(request.origin, "https://login.example.test");
+    assert_eq!(request.rp_id, "login.example.test");
+    assert_eq!(request.challenge, [9, 8, 7]);
+    assert_eq!(request.user_id, [6, 5]);
+    assert_eq!(request.resident_key, "required");
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "[createdCredential instanceof PublicKeyCredential, createdCredential.response instanceof AuthenticatorAttestationResponse, createdCredential.id, createdCredential.rawId.byteLength, createdCredential.response.getTransports()[0], PublicKeyCredential.name].join(':')"
+        ),
+        "true:true:AQID:3:internal:PublicKeyCredential"
+    );
+    runtime
+        .eval("PublicKeyCredential.getClientCapabilities().then(value => globalThis.capabilityNames = Object.keys(value).join(','))")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "capabilityNames"),
+        "conditionalGet,userVerifyingPlatformAuthenticator"
+    );
+    runtime
+        .eval(
+            "PublicKeyCredential.signalUnknownCredential({}).catch(error => globalThis.signalError = error.name)",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "signalError"), "NotSupportedError");
+    assert!(eval_str(&mut runtime, "webAuthnResult").contains("credProps"));
+
+    provider.respond_to_next_assertion(Ok(WebAuthnAssertionResponse {
+        credential_id: vec![1, 2, 3],
+        client_data_json: br#"{"type":"webauthn.get"}"#.to_vec(),
+        authenticator_data: vec![7; 37],
+        signature: vec![8, 9],
+        user_handle: Some(vec![10]),
+        authenticator_attachment: Some("platform".into()),
+        client_extension_results: serde_json::json!({}),
+    }));
+    runtime
+        .eval(
+            r#"navigator.credentials.get({publicKey:{challenge:new Uint8Array([1]),
+               allowCredentials:[{type:'public-key',id:createdCredential.rawId}]}})
+               .then(value => globalThis.assertedCredential = value);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        provider.assertion_requests()[0].allow_credentials,
+        [vec![1, 2, 3]]
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "[assertedCredential.response.signature.byteLength, assertedCredential.response.userHandle.byteLength, navigator.credentials === navigator.credentials].join(':')"
+        ),
+        "2:1:true"
+    );
+}
+
+#[test]
+fn web_authn_enforces_abort_rp_policy_secure_context_and_retirement() {
+    let mut insecure =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "http://example.test/").unwrap();
+    assert_eq!(
+        eval_str(
+            &mut insecure,
+            "[typeof PublicKeyCredential, 'credentials' in navigator].join(':')"
+        ),
+        "undefined:false"
+    );
+
+    let document = crate::html::TreeBuilder::parse("<iframe id='child'></iframe>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://a.example.test/").unwrap();
+    let provider = Arc::new(DeterministicWebAuthnProvider::default());
+    runtime.set_web_authn_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.authErrors=[];
+               const controller=new AbortController();
+               navigator.credentials.create({signal:controller.signal,publicKey:{challenge:new Uint8Array([1]),rp:{name:'x'},user:{id:new Uint8Array([1]),name:'u',displayName:'u'},pubKeyCredParams:[{type:'public-key',alg:-7}]}}).catch(error=>authErrors.push(error.name));
+               controller.abort();
+               navigator.credentials.get({publicKey:{challenge:new Uint8Array([1]),rpId:'other.test'}}).catch(error=>authErrors.push(error.name));"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "authErrors.join(',')"),
+        "AbortError,SecurityError"
+    );
+    assert!(provider.creation_requests().is_empty());
+
+    runtime.install_response_security_headers(&[(
+        "Permissions-Policy".into(),
+        "publickey-credentials-get=()".into(),
+    )]);
+    runtime
+        .eval("navigator.credentials.get({publicKey:{challenge:new Uint8Array([1])}}).catch(error=>authErrors.push(error.name))")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "authErrors.at(-1)"),
+        "NotAllowedError"
+    );
+
+    runtime
+        .eval("globalThis.childFrame=document.getElementById('child'); childFrame.remove()")
+        .unwrap();
+    assert!(!provider.cancelled_documents().is_empty());
+}
+
+#[test]
+fn opfs_handles_persist_owned_bytes_and_enforce_origin_quota() {
+    let storage = StorageManager::with_policy(32, StoragePersistencePolicy::Allow);
+    let mut runtime = JsRuntime::with_document_url_and_storage(
+        NodeHandle::document(),
+        "https://files.example.test/",
+        storage.clone(),
+        storage.create_session(),
+    )
+    .unwrap();
+    runtime
+        .eval(
+            r#"globalThis.opfsResult = 'pending';
+               (async () => {
+                 const root = await navigator.storage.getDirectory();
+                 const dir = await root.getDirectoryHandle('docs', {create:true});
+                 const handle = await dir.getFileHandle('note.txt', {create:true});
+                 const writer = await handle.createWritable();
+                 await writer.write('hello');
+                 await writer.close();
+                 const file = await handle.getFile();
+                 const entries = [];
+                 for await (const [name, value] of dir) entries.push(name + ':' + value.kind);
+                 opfsResult = [root.name, dir.kind, file.name, await file.text(), entries.join(','),
+                   (await root.resolve(handle)).join('/'), await handle.isSameEntry(await dir.getFileHandle('note.txt')),
+                   await handle.isSameEntry(structuredClone(handle))].join('|');
+               })().catch(error => { opfsResult = error.name + ':' + error.message; });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "opfsResult"),
+        "|directory|note.txt|hello|note.txt:file|docs/note.txt|true|true"
+    );
+    assert_eq!(
+        storage
+            .estimate(&StorageOrigin::from_url("https://files.example.test/").unwrap())
+            .usage,
+        17
+    );
+    runtime
+        .eval(
+            "globalThis.heldWriter = null; navigator.storage.getDirectory().then(root => root.getDirectoryHandle('docs')).then(dir => dir.getFileHandle('note.txt')).then(file => file.createWritable({ mode: 'exclusive' })).then(writer => { heldWriter = writer; });",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    let mut same_origin = JsRuntime::with_document_url_and_storage(
+        NodeHandle::document(),
+        "https://files.example.test/other",
+        storage.clone(),
+        storage.create_session(),
+    )
+    .unwrap();
+    same_origin
+        .eval(
+            "globalThis.lockResult = 'pending'; navigator.storage.getDirectory().then(root => root.getDirectoryHandle('docs')).then(dir => dir.getFileHandle('note.txt')).then(file => file.createWritable()).then(() => { lockResult = 'unlocked'; }, error => { lockResult = error.name; });",
+        )
+        .unwrap();
+    same_origin.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut same_origin, "lockResult"),
+        "NoModificationAllowedError"
+    );
+    runtime.eval("heldWriter.abort()").unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime
+        .eval(
+            r#"__omoikane_install_worker_global('https://files.example.test/worker.js', 'opfs-worker');
+               globalThis.syncResult = 'pending';
+               (async () => {
+                 const root = await navigator.storage.getDirectory();
+                 const file = await (await root.getDirectoryHandle('docs')).getFileHandle('note.txt');
+                 const access = await file.createSyncAccessHandle();
+                 const before = access.getSize();
+                 access.write(new Uint8Array([33]), {at: before});
+                 access.flush();
+                 access.close();
+                 syncResult = before + ':' + await (await file.getFile()).text();
+               })().catch(error => { syncResult = error.name + ':' + error.message; });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "syncResult"), "5:hello!");
+}
+
+#[test]
+fn web_share_normalizes_owned_data_consumes_activation_and_serializes_requests() {
+    let provider = Arc::new(DeterministicShareProvider::default());
+    provider.respond_to_next(Ok(()));
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_share_provider(provider.clone());
+    runtime
+        .eval(
+            r#"document.body.innerHTML = '<button id=share>share</button>';
+               globalThis.shareResult = 'pending';
+               globalThis.secondShare = 'pending';
+               const button = document.getElementById('share');
+               __omoikane_dispatch_mouse_input(button.__id, 'mousedown', {}, true);
+               const first = navigator.share({
+                 title: 42,
+                 text: 'body',
+                 url: '/shared',
+                 files: [new File([new Uint8Array([1, 2, 3])], 'data.bin', {type:'application/octet-stream', lastModified:7})]
+               });
+               navigator.share({text:'second'}).then(
+                 () => { secondShare = 'resolved'; },
+                 error => { secondShare = error.name; }
+               );
+               first.then(() => { shareResult = 'resolved'; }, error => { shareResult = error.name; });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "shareResult + ':' + secondShare"),
+        "resolved:InvalidStateError"
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "navigator.userActivation.isActive + ':' + navigator.canShare({url:'data:no'}) + ':' + navigator.canShare({text:''})"
+        ),
+        "false:false:true"
+    );
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].title.as_deref(), Some("42"));
+    assert_eq!(requests[0].text.as_deref(), Some("body"));
+    assert_eq!(requests[0].url.as_deref(), Some("http://localhost/shared"));
+    assert_eq!(requests[0].files[0].name, "data.bin");
+    assert_eq!(requests[0].files[0].bytes, vec![1, 2, 3]);
+}
+
+#[test]
+fn web_share_rejects_without_activation_and_reflects_provider_capability() {
+    let provider = Arc::new(DeterministicShareProvider::default());
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_share_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.shareDenied = 'pending';
+               navigator.share({text:'body'}).catch(error => { shareDenied = error.name; });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "shareDenied"), "NotAllowedError");
+    provider.set_supported(false);
+    assert_eq!(
+        eval_str(&mut runtime, "navigator.canShare({text:'body'})"),
+        "false"
+    );
+    assert!(provider.requests().is_empty());
+}
+
+#[test]
+fn web_share_enforces_secure_context_policy_provider_errors_and_retirement() {
+    let mut insecure =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "http://example.test/").unwrap();
+    assert_eq!(
+        eval_str(
+            &mut insecure,
+            "typeof navigator.share + ':' + typeof navigator.canShare"
+        ),
+        "undefined:undefined"
+    );
+
+    let provider = Arc::new(DeterministicShareProvider::default());
+    provider.respond_to_next(Err(ShareError {
+        name: "OperationError".into(),
+        message: "platform failure".into(),
+    }));
+    let mut runtime =
+        JsRuntime::with_document_and_url(default_document(), "https://share.example.test/page")
+            .unwrap();
+    runtime.set_share_provider(provider.clone());
+    runtime
+        .eval(
+            r#"document.body.innerHTML = '<button id=share>share</button>';
+               globalThis.shareFailure = 'pending';
+               const button = document.getElementById('share');
+               __omoikane_dispatch_mouse_input(button.__id, 'mousedown', {}, true);
+               navigator.share({text:'body'}).catch(error => { shareFailure = error.name; });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "shareFailure"), "OperationError");
+
+    runtime
+        .install_response_security_headers(&[("Permissions-Policy".into(), "web-share=()".into())]);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "navigator.canShare({text:'blocked'}) + ':' + document.permissionsPolicy.allowsFeature('web-share')"
+        ),
+        "false:false"
+    );
+
+    provider.respond_to_next(Ok(()));
+    runtime.install_response_security_headers(&[]);
+    runtime
+        .eval(
+            r#"__omoikane_dispatch_mouse_input(button.__id, 'mousedown', {}, true);
+               globalThis.retiredShare = 'pending';
+               navigator.share({text:'retire'}).then(
+                 () => { retiredShare = 'resolved'; },
+                 error => { retiredShare = error.name; }
+               );"#,
+        )
+        .unwrap();
+    let document_id = runtime.document().identity();
+    runtime
+        .host_state
+        .borrow_mut()
+        .web_share
+        .retire_document(document_id);
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "retiredShare"), "AbortError");
+    assert_eq!(provider.cancelled_documents(), vec![document_id]);
+}
+
+#[test]
+fn web_speech_synthesis_queues_owned_requests_and_advances_on_host_events() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicWebSpeechProvider::new(vec![SpeechVoice {
+        voice_uri: "urn:omoikane:test-voice".to_string(),
+        name: "Test Voice".to_string(),
+        lang: "en-US".to_string(),
+        local_service: true,
+        default: true,
+    }]));
+    runtime.set_web_speech_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.speechEvents = [];
+               globalThis.firstSpeech = new SpeechSynthesisUtterance('first');
+               globalThis.secondSpeech = new SpeechSynthesisUtterance('second');
+               firstSpeech.voice = speechSynthesis.getVoices()[0];
+               firstSpeech.onstart = () => speechEvents.push('first:start');
+               firstSpeech.onend = () => speechEvents.push('first:end');
+               secondSpeech.onstart = () => speechEvents.push('second:start');
+               speechSynthesis.speak(firstSpeech);
+               speechSynthesis.speak(secondSpeech);"#,
+        )
+        .unwrap();
+    let commands = provider.commands();
+    assert_eq!(commands.len(), 1);
+    let WebSpeechCommand::Speak(first) = &commands[0] else {
+        panic!("expected first synthesis command")
+    };
+    assert_eq!(first.text, "first");
+    assert_eq!(first.voice_uri.as_deref(), Some("urn:omoikane:test-voice"));
+    runtime
+        .dispatch_speech_synthesis_event("start", serde_json::json!({}))
+        .unwrap();
+    runtime
+        .dispatch_speech_synthesis_event("end", serde_json::json!({"elapsedTime": 1.25}))
+        .unwrap();
+    assert_eq!(provider.commands().len(), 2);
+    assert_eq!(
+        eval_str(&mut runtime, "speechEvents.join(',')"),
+        "first:start,first:end"
+    );
+    runtime
+        .dispatch_speech_synthesis_event("start", serde_json::json!({}))
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "speechEvents.join(',')"),
+        "first:start,first:end,second:start"
+    );
+    drop(runtime);
+    assert!(matches!(
+        provider.commands().last(),
+        Some(WebSpeechCommand::Teardown)
+    ));
+}
+
+#[test]
+fn web_speech_recognition_reports_provider_failure_and_owns_configuration() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicWebSpeechProvider::default());
+    runtime.set_web_speech_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.recognitionEvents = [];
+               globalThis.recognition = new SpeechRecognition();
+               recognition.lang = 'ja-JP';
+               recognition.continuous = true;
+               recognition.interimResults = true;
+               recognition.maxAlternatives = 3;
+               recognition.phrases = [new SpeechRecognitionPhrase('omoikane', 2)];
+               recognition.onerror = event => recognitionEvents.push(event.error);
+               recognition.onend = () => recognitionEvents.push('end');
+               recognition.start();"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    let commands = provider.commands();
+    let WebSpeechCommand::StartRecognition(request) = &commands[0] else {
+        panic!("expected recognition request")
+    };
+    assert_eq!(request.lang, "ja-JP");
+    assert!(request.continuous);
+    assert_eq!(request.max_alternatives, 3);
+    assert_eq!(request.phrases[0].phrase, "omoikane");
+    assert_eq!(
+        eval_str(&mut runtime, "recognitionEvents.join(',')"),
+        "not-allowed,end"
+    );
+}
+
+#[test]
+fn web_speech_recognition_delivers_owned_results_and_one_end_event() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicWebSpeechProvider::accepting(Vec::new()));
+    runtime.set_web_speech_provider(provider);
+    runtime
+        .eval(
+            r#"globalThis.acceptedRecognitionEvents = [];
+               globalThis.acceptedRecognition = new SpeechRecognition();
+               acceptedRecognition.onstart = () => acceptedRecognitionEvents.push('start');
+               acceptedRecognition.onresult = event => acceptedRecognitionEvents.push(
+                 event.results[0][0].transcript + ':' + event.results[0].isFinal
+               );
+               acceptedRecognition.onend = () => acceptedRecognitionEvents.push('end');
+               acceptedRecognition.start();"#,
+        )
+        .unwrap();
+    runtime
+        .dispatch_speech_recognition_event(1, "start", serde_json::json!({}))
+        .unwrap();
+    runtime
+        .dispatch_speech_recognition_event(
+            1,
+            "result",
+            serde_json::json!({
+                "resultIndex": 0,
+                "results": [{
+                    "isFinal": true,
+                    "alternatives": [{"transcript": "hello", "confidence": 0.9}]
+                }]
+            }),
+        )
+        .unwrap();
+    runtime
+        .dispatch_speech_recognition_event(1, "end", serde_json::json!({}))
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "acceptedRecognitionEvents.join(',')"),
+        "start,hello:true,end"
+    );
+}
+
+#[test]
+fn web_codecs_chunks_frames_and_audio_own_their_input_bytes() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime
+        .eval(
+            r#"globalThis.codecValues = {};
+               const chunkInput = new Uint8Array([1,2,3]);
+               const chunk = new EncodedVideoChunk({type:'key', timestamp:12, duration:4, data:chunkInput});
+               chunkInput[0] = 9;
+               const chunkCopy = new Uint8Array(3); chunk.copyTo(chunkCopy);
+               const frameInput = new Uint8Array([1,2,3,4,5,6,7,8]);
+               const frame = new VideoFrame(frameInput, {format:'RGBA', codedWidth:2, codedHeight:1, timestamp:-2});
+               const frameClone = frame.clone(); frame.close();
+               const audioInput = new Float32Array([0.25,-0.5]);
+               const audio = new AudioData({format:'f32', sampleRate:8000, numberOfFrames:2, numberOfChannels:1, timestamp:7, data:audioInput});
+               audioInput[0] = 1;
+               const audioCopy = new Float32Array(2); audio.copyTo(audioCopy, {planeIndex:0});
+               const clonedChunk = structuredClone(chunk);
+               const clonedChunkCopy = new Uint8Array(3); clonedChunk.copyTo(clonedChunkCopy);
+               const transferredFrame = structuredClone(frameClone, {transfer:[frameClone]});
+               const transferredAudio = structuredClone(audio, {transfer:[audio]});
+               Object.assign(codecValues, {
+                 chunk: Array.from(chunkCopy).join(','), frameClosed: frame.format === null,
+                 clonedChunk: Array.from(clonedChunkCopy).join(','),
+                 transferredWidth: transferredFrame.codedWidth, frameCloneClosed: frameClone.format === null,
+                 audio: Array.from(audioCopy).join(','), audioClosed: audio.format === null,
+                 transferredAudioDuration: transferredAudio.duration,
+                 color: new VideoColorSpace({primaries:'bt709'}).toJSON().primaries
+               });"#,
+        )
+        .unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "JSON.stringify(codecValues)"),
+        r#"{"chunk":"1,2,3","frameClosed":true,"clonedChunk":"1,2,3","transferredWidth":2,"frameCloneClosed":true,"audio":"0.25,-0.5","audioClosed":true,"transferredAudioDuration":250,"color":"bt709"}"#
+    );
+}
+
+#[test]
+fn web_codecs_provider_controls_support_queue_output_and_flush() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_web_codecs_provider(Arc::new(DeterministicWebCodecsProvider::new(["raw-test"])));
+    runtime
+        .eval(
+            r#"globalThis.codecEvents = [];
+               globalThis.decoder = new VideoDecoder({
+                 output(frame) { codecEvents.push('output:' + frame.timestamp + ':' + frame.codedWidth); frame.close(); },
+                 error(error) { codecEvents.push('error:' + error.name); }
+               });
+               VideoDecoder.isConfigSupported({codec:'raw-test', codedWidth:2, codedHeight:1}).then(result => codecEvents.push('support:' + result.supported));
+               decoder.ondequeue = () => codecEvents.push('dequeue');
+               decoder.configure({codec:'raw-test', codedWidth:2, codedHeight:1});
+               decoder.decode(new EncodedVideoChunk({type:'key', timestamp:33, data:new Uint8Array([1,2,3,4,5,6,7,8])}));
+               codecEvents.push('queued:' + decoder.decodeQueueSize);
+               decoder.flush().then(() => codecEvents.push('flush'));
+               globalThis.unsupported = new AudioEncoder({output(){}, error(error){codecEvents.push('unsupported:' + error.name)}});
+               unsupported.configure({codec:'missing', sampleRate:48000, numberOfChannels:2});"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "codecEvents.join(',')"),
+        "queued:1,support:true,output:33:2,dequeue,unsupported:NotSupportedError,flush"
+    );
+    assert_eq!(eval_str(&mut runtime, "decoder.state"), "configured");
+    assert_eq!(eval_str(&mut runtime, "unsupported.state"), "closed");
+}
+
+#[test]
+fn web_codecs_image_decoder_uses_provider_capabilities_and_owned_data() {
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_web_codecs_provider(Arc::new(DeterministicWebCodecsProvider::new([
+        "image/x-omoikane-rgba",
+    ])));
+    runtime
+        .eval(
+            r#"globalThis.imageCodec = [];
+               const source = new Uint8Array([10,20,30,255]);
+               const decoder = new ImageDecoder({type:'image/x-omoikane-rgba', data:source, desiredWidth:1, desiredHeight:1});
+               source[0] = 99;
+               Promise.all([
+                 ImageDecoder.isTypeSupported('image/x-omoikane-rgba'),
+                 ImageDecoder.isTypeSupported('image/png'),
+                 decoder.decode()
+               ]).then(([supported, unsupported, result]) => {
+                 const copy = new Uint8Array(4);
+                 return result.image.copyTo(copy).then(() => {
+                   imageCodec.push(supported, unsupported, decoder.complete, result.complete, copy[0]);
+                   result.image.close(); decoder.close();
+                 });
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "imageCodec.join(',')"),
+        "true,false,true,true,10"
     );
 }
 

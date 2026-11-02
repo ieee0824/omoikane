@@ -1,0 +1,6 @@
+{
+  "tests": [
+    { "path": "wasm/jsapi/instance/exports.any.js" },
+    { "path": "wasm/jsapi/instance/toString.any.js" }
+  ]
+}

@@ -9,6 +9,7 @@ use std::sync::{
 
 use super::native_scroll::NativeScrollInvalidator;
 use crate::http::SchemefulSite;
+use serde::{Deserialize, Serialize};
 
 const DEFAULT_QUOTA_BYTES: u64 = 50 * 1024 * 1024;
 static NEXT_WEB_LOCK_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
@@ -155,6 +156,10 @@ struct StorageState {
     persistence_policy: StoragePersistencePolicy,
     persistence_path: Option<PathBuf>,
     persisted_origins: HashSet<StorageOrigin>,
+    opfs_path: Option<PathBuf>,
+    opfs: HashMap<String, OpfsDirectory>,
+    opfs_locks: HashMap<(StorageOrigin, Vec<String>), Vec<OpfsLock>>,
+    next_opfs_lock_id: u64,
     web_locks: HashMap<(StorageOrigin, String), WebLockResource>,
     web_lock_requests: HashMap<u64, WebLockRequest>,
     next_web_lock_request_id: u64,
@@ -175,11 +180,69 @@ impl Default for StorageState {
             persistence_policy: StoragePersistencePolicy::Unsupported,
             persistence_path: None,
             persisted_origins: HashSet::new(),
+            opfs_path: None,
+            opfs: HashMap::new(),
+            opfs_locks: HashMap::new(),
+            next_opfs_lock_id: 1,
             web_locks: HashMap::new(),
             web_lock_requests: HashMap::new(),
             next_web_lock_request_id: 1,
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct OpfsDirectory {
+    entries: HashMap<String, OpfsEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "lowercase")]
+enum OpfsEntry {
+    Directory(OpfsDirectory),
+    File(OpfsFile),
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct OpfsFile {
+    bytes: Vec<u8>,
+    modified: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OpfsEntrySnapshot {
+    pub(crate) name: String,
+    pub(crate) kind: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OpfsFileSnapshot {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) modified: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OpfsError {
+    InvalidName,
+    NotFound,
+    TypeMismatch,
+    NotEmpty,
+    QuotaExceeded,
+    Io,
+    Locked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OpfsLockMode {
+    Siloed,
+    Exclusive,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OpfsLock {
+    id: u64,
+    owner: usize,
+    mode: OpfsLockMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -420,11 +483,15 @@ impl StorageManager {
     ) -> io::Result<Self> {
         let persistence_path = persistence_path.into();
         let persisted_origins = load_persisted_origins(&persistence_path)?;
+        let opfs_path = persistence_path.with_file_name("opfs.json");
+        let opfs = load_opfs(&opfs_path)?;
         Ok(Self(Arc::new(Mutex::new(StorageState {
             quota_bytes,
             persistence_policy,
             persistence_path: Some(persistence_path),
             persisted_origins,
+            opfs_path: Some(opfs_path),
+            opfs,
             ..StorageState::default()
         }))))
     }
@@ -450,8 +517,12 @@ impl StorageManager {
                 )
             })
         });
+        let opfs = state
+            .opfs
+            .get(&origin.serialize())
+            .map_or(0, opfs_directory_usage);
         StorageEstimate {
-            usage: local.saturating_add(caches),
+            usage: local.saturating_add(caches).saturating_add(opfs),
             quota: state.quota_bytes,
         }
     }
@@ -487,6 +558,235 @@ impl StorageManager {
             return Err(error);
         }
         Ok(true)
+    }
+
+    pub(crate) fn opfs_get_handle(
+        &self,
+        origin: &StorageOrigin,
+        parent: &[String],
+        name: &str,
+        directory: bool,
+        create: bool,
+    ) -> Result<(), OpfsError> {
+        validate_opfs_name(name)?;
+        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        let old = state.opfs.clone();
+        let root = state.opfs.entry(origin.serialize()).or_default();
+        let parent = opfs_directory_mut(root, parent)?;
+        match parent.entries.get(name) {
+            Some(OpfsEntry::Directory(_)) if directory => return Ok(()),
+            Some(OpfsEntry::File(_)) if !directory => return Ok(()),
+            Some(_) => return Err(OpfsError::TypeMismatch),
+            None if !create => return Err(OpfsError::NotFound),
+            None => {}
+        }
+        parent.entries.insert(
+            name.to_owned(),
+            if directory {
+                OpfsEntry::Directory(OpfsDirectory::default())
+            } else {
+                OpfsEntry::File(OpfsFile::default())
+            },
+        );
+        persist_opfs_or_restore(&mut state, old)
+    }
+
+    pub(crate) fn opfs_root(&self, origin: &StorageOrigin) -> Result<(), OpfsError> {
+        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        if state.opfs.contains_key(&origin.serialize()) {
+            return Ok(());
+        }
+        let old = state.opfs.clone();
+        state
+            .opfs
+            .insert(origin.serialize(), OpfsDirectory::default());
+        persist_opfs_or_restore(&mut state, old)
+    }
+
+    pub(crate) fn opfs_list(
+        &self,
+        origin: &StorageOrigin,
+        path: &[String],
+    ) -> Result<Vec<OpfsEntrySnapshot>, OpfsError> {
+        let state = self.0.lock().expect("storage manager mutex poisoned");
+        let root = state
+            .opfs
+            .get(&origin.serialize())
+            .ok_or(OpfsError::NotFound)?;
+        let directory = opfs_directory(root, path)?;
+        let mut entries = directory
+            .entries
+            .iter()
+            .map(|(name, entry)| OpfsEntrySnapshot {
+                name: name.clone(),
+                kind: match entry {
+                    OpfsEntry::Directory(_) => "directory",
+                    OpfsEntry::File(_) => "file",
+                },
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(entries)
+    }
+
+    pub(crate) fn opfs_file(
+        &self,
+        origin: &StorageOrigin,
+        path: &[String],
+    ) -> Result<OpfsFileSnapshot, OpfsError> {
+        let state = self.0.lock().expect("storage manager mutex poisoned");
+        let (name, parent) = path.split_last().ok_or(OpfsError::TypeMismatch)?;
+        let root = state
+            .opfs
+            .get(&origin.serialize())
+            .ok_or(OpfsError::NotFound)?;
+        match opfs_directory(root, parent)?.entries.get(name) {
+            Some(OpfsEntry::File(file)) => Ok(OpfsFileSnapshot {
+                bytes: file.bytes.clone(),
+                modified: file.modified,
+            }),
+            Some(_) => Err(OpfsError::TypeMismatch),
+            None => Err(OpfsError::NotFound),
+        }
+    }
+
+    pub(crate) fn opfs_write(
+        &self,
+        origin: &StorageOrigin,
+        path: &[String],
+        bytes: Vec<u8>,
+        modified: u64,
+    ) -> Result<(), OpfsError> {
+        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        let old = state.opfs.clone();
+        let key = origin.serialize();
+        let root = state.opfs.get_mut(&key).ok_or(OpfsError::NotFound)?;
+        let (name, parent) = path.split_last().ok_or(OpfsError::TypeMismatch)?;
+        match opfs_directory_mut(root, parent)?.entries.get_mut(name) {
+            Some(OpfsEntry::File(file)) => {
+                file.bytes = bytes;
+                file.modified = modified;
+            }
+            Some(_) => return Err(OpfsError::TypeMismatch),
+            None => return Err(OpfsError::NotFound),
+        }
+        if opfs_directory_usage(state.opfs.get(&key).unwrap()) > state.quota_bytes {
+            state.opfs = old;
+            return Err(OpfsError::QuotaExceeded);
+        }
+        persist_opfs_or_restore(&mut state, old)
+    }
+
+    pub(crate) fn opfs_acquire_lock(
+        &self,
+        owner: usize,
+        origin: &StorageOrigin,
+        path: &[String],
+        mode: OpfsLockMode,
+    ) -> Result<u64, OpfsError> {
+        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        let key = (origin.clone(), path.to_vec());
+        let locks = state.opfs_locks.get(&key);
+        let compatible = mode == OpfsLockMode::Siloed
+            && locks.is_none_or(|locks| locks.iter().all(|lock| lock.mode == OpfsLockMode::Siloed));
+        if locks.is_some() && !compatible {
+            return Err(OpfsError::Locked);
+        }
+        let id = state.next_opfs_lock_id;
+        state.next_opfs_lock_id = state.next_opfs_lock_id.saturating_add(1);
+        state
+            .opfs_locks
+            .entry(key)
+            .or_default()
+            .push(OpfsLock { id, owner, mode });
+        Ok(id)
+    }
+
+    pub(crate) fn opfs_release_lock(&self, lock_id: u64) {
+        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        state.opfs_locks.retain(|_, locks| {
+            locks.retain(|lock| lock.id != lock_id);
+            !locks.is_empty()
+        });
+    }
+
+    pub(crate) fn opfs_release_document_locks(&self, owner: usize) {
+        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        state.opfs_locks.retain(|_, locks| {
+            locks.retain(|lock| lock.owner != owner);
+            !locks.is_empty()
+        });
+    }
+
+    pub(crate) fn opfs_remove(
+        &self,
+        origin: &StorageOrigin,
+        parent: &[String],
+        name: &str,
+        recursive: bool,
+    ) -> Result<(), OpfsError> {
+        validate_opfs_name(name)?;
+        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        let target = parent
+            .iter()
+            .cloned()
+            .chain(std::iter::once(name.to_owned()))
+            .collect::<Vec<_>>();
+        if opfs_path_has_lock(&state, origin, &target) {
+            return Err(OpfsError::Locked);
+        }
+        let old = state.opfs.clone();
+        let root = state
+            .opfs
+            .get_mut(&origin.serialize())
+            .ok_or(OpfsError::NotFound)?;
+        let directory = opfs_directory_mut(root, parent)?;
+        let entry = directory.entries.get(name).ok_or(OpfsError::NotFound)?;
+        if !recursive && matches!(entry, OpfsEntry::Directory(value) if !value.entries.is_empty()) {
+            return Err(OpfsError::NotEmpty);
+        }
+        directory.entries.remove(name);
+        persist_opfs_or_restore(&mut state, old)
+    }
+
+    pub(crate) fn opfs_move_file(
+        &self,
+        origin: &StorageOrigin,
+        source: &[String],
+        destination_parent: &[String],
+        destination_name: &str,
+    ) -> Result<(), OpfsError> {
+        validate_opfs_name(destination_name)?;
+        let mut state = self.0.lock().expect("storage manager mutex poisoned");
+        let destination = destination_parent
+            .iter()
+            .cloned()
+            .chain(std::iter::once(destination_name.to_owned()))
+            .collect::<Vec<_>>();
+        if opfs_path_has_lock(&state, origin, source)
+            || opfs_path_has_lock(&state, origin, &destination)
+        {
+            return Err(OpfsError::Locked);
+        }
+        let old = state.opfs.clone();
+        let root = state
+            .opfs
+            .get_mut(&origin.serialize())
+            .ok_or(OpfsError::NotFound)?;
+        let (source_name, source_parent) = source.split_last().ok_or(OpfsError::TypeMismatch)?;
+        let entry = opfs_directory_mut(root, source_parent)?
+            .entries
+            .remove(source_name)
+            .ok_or(OpfsError::NotFound)?;
+        if !matches!(entry, OpfsEntry::File(_)) {
+            state.opfs = old;
+            return Err(OpfsError::TypeMismatch);
+        }
+        let destination = opfs_directory_mut(root, destination_parent)?;
+        destination
+            .entries
+            .insert(destination_name.to_owned(), entry);
+        persist_opfs_or_restore(&mut state, old)
     }
 
     /// Allocates an isolated top-level browsing-session identifier.
@@ -1006,6 +1306,93 @@ fn web_lock_advance(
     notifications
 }
 
+fn validate_opfs_name(name: &str) -> Result<(), OpfsError> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+        Err(OpfsError::InvalidName)
+    } else {
+        Ok(())
+    }
+}
+
+fn opfs_path_has_lock(state: &StorageState, origin: &StorageOrigin, path: &[String]) -> bool {
+    state.opfs_locks.keys().any(|(lock_origin, locked)| {
+        lock_origin == origin
+            && path.len() <= locked.len()
+            && path.iter().zip(locked).all(|(left, right)| left == right)
+    })
+}
+
+fn opfs_directory<'a>(
+    mut directory: &'a OpfsDirectory,
+    path: &[String],
+) -> Result<&'a OpfsDirectory, OpfsError> {
+    for name in path {
+        directory = match directory.entries.get(name) {
+            Some(OpfsEntry::Directory(next)) => next,
+            Some(_) => return Err(OpfsError::TypeMismatch),
+            None => return Err(OpfsError::NotFound),
+        };
+    }
+    Ok(directory)
+}
+
+fn opfs_directory_mut<'a>(
+    mut directory: &'a mut OpfsDirectory,
+    path: &[String],
+) -> Result<&'a mut OpfsDirectory, OpfsError> {
+    for name in path {
+        directory = match directory.entries.get_mut(name) {
+            Some(OpfsEntry::Directory(next)) => next,
+            Some(_) => return Err(OpfsError::TypeMismatch),
+            None => return Err(OpfsError::NotFound),
+        };
+    }
+    Ok(directory)
+}
+
+fn opfs_directory_usage(directory: &OpfsDirectory) -> u64 {
+    directory.entries.iter().fold(0, |usage, (name, entry)| {
+        usage
+            .saturating_add(name.len() as u64)
+            .saturating_add(match entry {
+                OpfsEntry::Directory(value) => opfs_directory_usage(value),
+                OpfsEntry::File(value) => value.bytes.len() as u64,
+            })
+    })
+}
+
+fn load_opfs(path: &Path) -> io::Result<HashMap<String, OpfsDirectory>> {
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(HashMap::new()),
+        Err(error) => Err(error),
+    }
+}
+
+fn save_opfs(path: &Path, opfs: &HashMap<String, OpfsDirectory>) -> io::Result<()> {
+    let bytes = serde_json::to_vec(opfs).map_err(io::Error::other)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, bytes)?;
+    fs::rename(temporary, path)
+}
+
+fn persist_opfs_or_restore(
+    state: &mut StorageState,
+    old: HashMap<String, OpfsDirectory>,
+) -> Result<(), OpfsError> {
+    if let Some(path) = state.opfs_path.as_deref()
+        && save_opfs(path, &state.opfs).is_err()
+    {
+        state.opfs = old;
+        return Err(OpfsError::Io);
+    }
+    Ok(())
+}
+
 fn load_persisted_origins(path: &Path) -> io::Result<HashSet<StorageOrigin>> {
     let encoded = match fs::read(path) {
         Ok(encoded) => encoded,
@@ -1318,6 +1705,69 @@ mod tests {
         assert!(manager.persist(&origin).is_err());
         assert!(!manager.persisted(&origin));
         fs::remove_file(blocker).unwrap();
+    }
+
+    #[test]
+    fn opfs_profile_survives_restart_is_origin_scoped_and_rolls_back_quota_failures() {
+        let path = temporary_profile("opfs-restart");
+        let opfs_path = path.with_file_name("opfs.json");
+        let first = StorageOrigin::from_url("https://first.example.test/").unwrap();
+        let second = StorageOrigin::from_url("https://second.example.test/").unwrap();
+        {
+            let manager =
+                StorageManager::with_profile(&path, 24, StoragePersistencePolicy::Allow).unwrap();
+            manager.opfs_root(&first).unwrap();
+            manager
+                .opfs_get_handle(&first, &[], "data", true, true)
+                .unwrap();
+            manager
+                .opfs_get_handle(&first, &["data".into()], "value.bin", false, true)
+                .unwrap();
+            manager
+                .opfs_write(
+                    &first,
+                    &["data".into(), "value.bin".into()],
+                    vec![1, 2, 3],
+                    42,
+                )
+                .unwrap();
+            assert_eq!(manager.opfs_list(&second, &[]), Err(OpfsError::NotFound));
+            assert_eq!(
+                manager.opfs_write(
+                    &first,
+                    &["data".into(), "value.bin".into()],
+                    vec![0; 64],
+                    43,
+                ),
+                Err(OpfsError::QuotaExceeded)
+            );
+            let file_path = vec!["data".into(), "value.bin".into()];
+            manager
+                .opfs_acquire_lock(7, &first, &file_path, OpfsLockMode::Exclusive)
+                .unwrap();
+            assert_eq!(
+                manager.opfs_acquire_lock(8, &first, &file_path, OpfsLockMode::Siloed),
+                Err(OpfsError::Locked)
+            );
+            manager.opfs_release_document_locks(7);
+            let replacement = manager
+                .opfs_acquire_lock(8, &first, &file_path, OpfsLockMode::Siloed)
+                .unwrap();
+            manager.opfs_release_lock(replacement);
+        }
+        let restarted =
+            StorageManager::with_profile(&path, 24, StoragePersistencePolicy::Allow).unwrap();
+        assert_eq!(
+            restarted
+                .opfs_file(&first, &["data".into(), "value.bin".into()])
+                .unwrap(),
+            OpfsFileSnapshot {
+                bytes: vec![1, 2, 3],
+                modified: 42,
+            }
+        );
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(opfs_path);
     }
 
     fn observer_visit(destination: &str) -> VisitedLinkKey {

@@ -7,6 +7,7 @@
 //! RGBA bitmap in place. Everything here is a pure function of its inputs.
 
 mod composite;
+pub(crate) mod filter;
 mod paint;
 mod raster;
 mod shadow;
@@ -193,6 +194,9 @@ pub(crate) struct DrawCommand {
     pub(crate) clip: Vec<ClipRegion>,
     #[serde(default = "yes")]
     pub(crate) smoothing: bool,
+    /// The `filter` attribute: a CSS filter value list, or absent for `none`.
+    #[serde(default)]
+    pub(crate) filter: Option<String>,
 }
 
 fn one() -> f64 {
@@ -287,8 +291,18 @@ pub(crate) fn draw(
         .shadow
         .as_ref()
         .filter(|shadow| shadow::is_visible(shadow));
-    let margin = shadow.map_or(Margin::default(), shadow::margin);
-    let source = source_layer(&shape, rule, width, height, margin, &paint);
+    let filters = command
+        .filter
+        .as_deref()
+        .and_then(filter::parse)
+        .unwrap_or_default();
+    let margin = shadow
+        .map_or(Margin::default(), shadow::margin)
+        .grow(filter::margin(&filters));
+    let source = filter::apply(
+        source_layer(&shape, rule, width, height, margin, &paint),
+        &filters,
+    );
     if let Some(shadow) = shadow.and_then(|shadow| shadow::layer(&source, shadow)) {
         composite(surface, &shadow, operator, alpha, clip.as_ref());
     }
@@ -308,6 +322,18 @@ pub(crate) struct Margin {
     pub(crate) top: usize,
     pub(crate) right: usize,
     pub(crate) bottom: usize,
+}
+
+impl Margin {
+    /// Both margins added together on every side.
+    pub(crate) fn grow(self, other: Self) -> Self {
+        Self {
+            left: self.left + other.left,
+            top: self.top + other.top,
+            right: self.right + other.right,
+            bottom: self.bottom + other.bottom,
+        }
+    }
 }
 
 /// The intersection of `regions`, or `None` without a clip.

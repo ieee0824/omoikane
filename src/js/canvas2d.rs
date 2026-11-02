@@ -125,6 +125,22 @@ pub(super) fn parse_color_native(
     Ok(boa_engine::object::builtins::JsArray::from_iter(values, context).into())
 }
 
+/// `__omoikane_canvas_parse_filter(text)` reports whether `text` is a valid
+/// `filter` attribute value: a CSS filter value list or `none`.
+pub(super) fn parse_filter_native(
+    _: &JsValue,
+    args: &[JsValue],
+    _: &mut Context,
+) -> JsResult<JsValue> {
+    let valid = args
+        .first()
+        .and_then(JsValue::as_string)
+        .is_some_and(|text| {
+            crate::canvas2d::filter::parse(&text.to_std_string_escaped()).is_some()
+        });
+    Ok(valid.into())
+}
+
 /// Converts SVG path data into absolute `M`, `L`, `Q`, `C` and `Z` commands
 /// for `new Path2D(d)`. Elliptical arcs are flattened to lines.
 fn svg_path_commands(d: &str) -> Vec<serde_json::Value> {

@@ -1,0 +1,16 @@
+{
+  "tests": [
+    { "path": "fs/idlharness.https.any.js", "server": "wptserve" },
+    { "path": "fs/root-name.https.any.js", "server": "wptserve" },
+    { "path": "fs/FileSystemDirectoryHandle-getDirectoryHandle.https.any.js", "server": "wptserve" },
+    { "path": "fs/FileSystemDirectoryHandle-getFileHandle.https.any.js", "server": "wptserve" },
+    { "path": "fs/FileSystemDirectoryHandle-iteration.https.any.js", "server": "wptserve" },
+    { "path": "fs/FileSystemDirectoryHandle-removeEntry.https.any.js", "server": "wptserve" },
+    { "path": "fs/FileSystemDirectoryHandle-resolve.https.any.js", "server": "wptserve" },
+    { "path": "fs/FileSystemBaseHandle-isSameEntry.https.any.js", "server": "wptserve" },
+    { "path": "fs/FileSystemBaseHandle-remove.https.any.js", "server": "wptserve" },
+    { "path": "fs/FileSystemFileHandle-getFile.https.any.js", "server": "wptserve" },
+    { "path": "fs/FileSystemFileHandle-move.https.any.js", "server": "wptserve" },
+    { "path": "fs/FileSystemWritableFileStream-write.https.any.js", "server": "wptserve" }
+  ]
+}

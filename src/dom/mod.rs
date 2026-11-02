@@ -2204,6 +2204,9 @@ impl NodeHandle {
             inner.aria_element_references.remove(&qualified_name);
         }
         if let NodeData::Element(element) = &mut inner.data {
+            if namespace_uri.is_none() && local_name == "style" {
+                element.style_computation_source = None;
+            }
             if namespace_uri.is_none() && local_name == "async" {
                 element.script_force_async = false;
             }
@@ -2337,6 +2340,9 @@ impl NodeHandle {
                 .position(|attribute| attribute.qualified_name == qualified_name)
             {
                 let attribute = element.attribute_records.remove(index);
+                if attribute.namespace_uri.is_none() && attribute.local_name == "style" {
+                    element.style_computation_source = None;
+                }
                 if attribute.namespace_uri.is_none()
                     && attribute.local_name == "checked"
                     && !element.dirty_checkedness
@@ -2363,6 +2369,9 @@ impl NodeHandle {
             };
             let qualified_name = element.attribute_records[index].qualified_name.clone();
             invalidate_for_attribute(&[&qualified_name, local_name]);
+            if namespace_uri.is_none() && local_name == "style" {
+                element.style_computation_source = None;
+            }
             if qualified_name == "form" && namespace_uri.is_none() {
                 element.parser_form_owner = None;
             }
@@ -3691,6 +3700,35 @@ fn parse_attribute_selector(selector: &str) -> Option<AttributeSelector> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xml_style_mutations_invalidate_only_the_unnamespaced_computation_source() {
+        let node = NodeHandle::xml_element("g", Some("http://www.w3.org/2000/svg".into()));
+        node.set_xml_attribute("style", "paint-order: fill");
+        node.set_style_computation_source(Some("paint-order: fill stroke".into()));
+        node.set_xml_attribute_ns("x:style", Some("urn:test".into()), "style", "unrelated");
+        assert_eq!(
+            node.inline_style_source().as_deref(),
+            Some("paint-order: fill stroke")
+        );
+        node.remove_xml_attribute_ns(Some("urn:test"), "style");
+        assert_eq!(
+            node.inline_style_source().as_deref(),
+            Some("paint-order: fill stroke")
+        );
+        node.set_xml_attribute_ns("style", None, "style", "paint-order: markers stroke");
+        assert_eq!(
+            node.inline_style_source().as_deref(),
+            Some("paint-order: markers stroke")
+        );
+        node.set_style_computation_source(Some("paint-order: fill stroke".into()));
+        node.remove_xml_attribute_ns(None, "style");
+        assert_eq!(node.inline_style_source(), None);
+        node.set_xml_attribute("style", "paint-order: fill");
+        node.set_style_computation_source(Some("paint-order: fill stroke".into()));
+        node.remove_xml_attribute("style");
+        assert_eq!(node.inline_style_source(), None);
+    }
 
     #[test]
     fn appending_scalar_text_preserves_exact_utf16_data() {
