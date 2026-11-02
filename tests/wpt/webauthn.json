@@ -1,0 +1,10 @@
+{
+  "tests": [
+    { "path": "webauthn/idlharness.https.window.js", "server": "wptserve" },
+    { "path": "webauthn/securecontext.http.html", "server": "wptserve-http" },
+    { "path": "webauthn/securecontext.https.html", "server": "wptserve" },
+    { "path": "webauthn/public-key-credential-creation-options-from-json.https.window.js", "server": "wptserve" },
+    { "path": "webauthn/public-key-credential-request-options-from-json.https.window.js", "server": "wptserve" },
+    { "path": "webauthn/getclientcapabilities.https.html", "server": "wptserve" }
+  ]
+}

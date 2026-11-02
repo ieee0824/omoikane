@@ -34452,6 +34452,271 @@ let omoikaneUserActivationState;
   globalThis.AbortSignal = AbortSignal;
   globalThis.AbortController = AbortController;
 
+  if (globalThis.isSecureContext) {
+    const credentialToken = {};
+    const credentialState = new WeakMap();
+    const responseState = new WeakMap();
+    const publicKeyCredentialState = new WeakMap();
+    const webAuthnBytes = value => Uint8Array.from(value || []).buffer;
+    const webAuthnBase64Url = value => cryptoBytesToBase64Url(Array.from(new Uint8Array(value)));
+    const webAuthnDecodeBase64Url = value => {
+      try { return Uint8Array.from(cryptoBase64UrlToBytes(String(value))).buffer; }
+      catch (_) { throw new DOMException("The value is not valid base64url", "EncodingError"); }
+    };
+    const webAuthnDecodePrf = extensions => {
+      if (extensions === undefined) return undefined;
+      const output = { ...Object(extensions) };
+      if (output.largeBlob && output.largeBlob.write !== undefined) output.largeBlob = { ...output.largeBlob, write: webAuthnDecodeBase64Url(output.largeBlob.write) };
+      if (output.credBlob !== undefined) output.credBlob = webAuthnDecodeBase64Url(output.credBlob);
+      if (output.prf) {
+        output.prf = { ...output.prf };
+        const convert = values => values === undefined ? undefined : { first: webAuthnDecodeBase64Url(values.first), ...(values.second === undefined ? {} : { second: webAuthnDecodeBase64Url(values.second) }) };
+        if (output.prf.eval !== undefined) output.prf.eval = convert(output.prf.eval);
+        if (output.prf.evalByCredential !== undefined) output.prf.evalByCredential = Object.fromEntries(Object.entries(output.prf.evalByCredential).map(([id, values]) => [id, convert(values)]));
+      }
+      return output;
+    };
+    const webAuthnCapabilities = () => Array.from(JSON.parse(String(__omoikane_web_authn("capabilities", __omoikane_document_id, ""))).capabilities || []);
+    const webAuthnEnum = (value, allowed, fallback, name) => {
+      const selected = value === undefined ? fallback : String(value);
+      if (!allowed.includes(selected)) throw new TypeError(`Invalid ${name}`);
+      return selected;
+    };
+    const webAuthnSequence = (value, name) => {
+      if (value === undefined) return [];
+      if (value === null || typeof value === "string" || typeof value[Symbol.iterator] !== "function") {
+        throw new TypeError(`${name} must be a sequence`);
+      }
+      return Array.from(value);
+    };
+    class Credential {
+      constructor(token, id, type) {
+        if (token !== credentialToken) throw new TypeError("Illegal constructor");
+        credentialState.set(this, { id, type });
+      }
+      get id() { return (credentialState.get(this) || illegalInvocation()).id; }
+      get type() { return (credentialState.get(this) || illegalInvocation()).type; }
+      get [Symbol.toStringTag]() { return "Credential"; }
+    }
+    class AuthenticatorResponse {
+      constructor(token, state) {
+        if (token !== credentialToken) throw new TypeError("Illegal constructor");
+        responseState.set(this, state);
+      }
+      get clientDataJSON() { return (responseState.get(this) || illegalInvocation()).clientDataJSON; }
+      get [Symbol.toStringTag]() { return "AuthenticatorResponse"; }
+    }
+    class AuthenticatorAttestationResponse extends AuthenticatorResponse {
+      constructor(token, data) {
+        const state = {
+          clientDataJSON: webAuthnBytes(data.clientDataJson),
+          attestationObject: webAuthnBytes(data.attestationObject),
+          authenticatorData: webAuthnBytes(data.authenticatorData),
+          publicKey: data.publicKey == null ? null : webAuthnBytes(data.publicKey),
+          publicKeyAlgorithm: Number(data.publicKeyAlgorithm),
+          transports: Object.freeze(Array.from(data.transports || [], String)),
+        };
+        super(token, state);
+      }
+      get attestationObject() { return (responseState.get(this) || illegalInvocation()).attestationObject; }
+      getTransports() { return Array.from((responseState.get(this) || illegalInvocation()).transports); }
+      getAuthenticatorData() { return (responseState.get(this) || illegalInvocation()).authenticatorData.slice(0); }
+      getPublicKey() {
+        const value = (responseState.get(this) || illegalInvocation()).publicKey;
+        return value === null ? null : value.slice(0);
+      }
+      getPublicKeyAlgorithm() { return (responseState.get(this) || illegalInvocation()).publicKeyAlgorithm; }
+      get [Symbol.toStringTag]() { return "AuthenticatorAttestationResponse"; }
+    }
+    class AuthenticatorAssertionResponse extends AuthenticatorResponse {
+      constructor(token, data) {
+        super(token, {
+          clientDataJSON: webAuthnBytes(data.clientDataJson),
+          authenticatorData: webAuthnBytes(data.authenticatorData),
+          signature: webAuthnBytes(data.signature),
+          userHandle: data.userHandle == null ? null : webAuthnBytes(data.userHandle),
+        });
+      }
+      get authenticatorData() { return (responseState.get(this) || illegalInvocation()).authenticatorData; }
+      get signature() { return (responseState.get(this) || illegalInvocation()).signature; }
+      get userHandle() { return (responseState.get(this) || illegalInvocation()).userHandle; }
+      get [Symbol.toStringTag]() { return "AuthenticatorAssertionResponse"; }
+    }
+    class PublicKeyCredential extends Credential {
+      constructor(token, data, response, kind) {
+        const rawId = webAuthnBytes(data.credentialId);
+        super(token, webAuthnBase64Url(rawId), "public-key");
+        publicKeyCredentialState.set(this, {
+          rawId, response, kind,
+          authenticatorAttachment: data.authenticatorAttachment == null ? null : String(data.authenticatorAttachment),
+          extensions: Object.freeze({ ...(data.clientExtensionResults || {}) }),
+        });
+      }
+      get rawId() { return (publicKeyCredentialState.get(this) || illegalInvocation()).rawId; }
+      get response() { return (publicKeyCredentialState.get(this) || illegalInvocation()).response; }
+      get authenticatorAttachment() { return (publicKeyCredentialState.get(this) || illegalInvocation()).authenticatorAttachment; }
+      getClientExtensionResults() { return { ...(publicKeyCredentialState.get(this) || illegalInvocation()).extensions }; }
+      toJSON() {
+        const state = publicKeyCredentialState.get(this) || illegalInvocation();
+        const base = {
+          id: this.id, rawId: webAuthnBase64Url(state.rawId), type: this.type,
+          authenticatorAttachment: state.authenticatorAttachment,
+          clientExtensionResults: { ...state.extensions },
+        };
+        const response = responseState.get(state.response);
+        if (state.kind === "creation") {
+          base.response = {
+            clientDataJSON: webAuthnBase64Url(response.clientDataJSON),
+            authenticatorData: webAuthnBase64Url(response.authenticatorData),
+            transports: Array.from(response.transports),
+            publicKeyAlgorithm: response.publicKeyAlgorithm,
+            attestationObject: webAuthnBase64Url(response.attestationObject),
+          };
+          if (response.publicKey !== null) base.response.publicKey = webAuthnBase64Url(response.publicKey);
+        } else {
+          base.response = {
+            clientDataJSON: webAuthnBase64Url(response.clientDataJSON),
+            authenticatorData: webAuthnBase64Url(response.authenticatorData),
+            signature: webAuthnBase64Url(response.signature),
+          };
+          if (response.userHandle !== null) base.response.userHandle = webAuthnBase64Url(response.userHandle);
+        }
+        return base;
+      }
+      static isUserVerifyingPlatformAuthenticatorAvailable() {
+        return Promise.resolve(webAuthnCapabilities().includes("userVerifyingPlatformAuthenticator"));
+      }
+      static isConditionalMediationAvailable() {
+        return Promise.resolve(webAuthnCapabilities().includes("conditionalGet"));
+      }
+      static getClientCapabilities() {
+        const output = {};
+        for (const capability of webAuthnCapabilities().sort()) output[capability] = true;
+        return Promise.resolve(output);
+      }
+      static parseCreationOptionsFromJSON(options) {
+        if (options === null || typeof options !== "object") throw new TypeError("Options must be a dictionary");
+        const copy = { ...options, challenge: webAuthnDecodeBase64Url(options.challenge), user: { ...options.user, id: webAuthnDecodeBase64Url(options.user.id) } };
+        copy.excludeCredentials = webAuthnSequence(options.excludeCredentials, "excludeCredentials").map(item => ({ ...item, id: webAuthnDecodeBase64Url(item.id) }));
+        if (copy.attestation === undefined) copy.attestation = "none";
+        if (copy.hints === undefined) copy.hints = [];
+        if (options.extensions !== undefined) copy.extensions = webAuthnDecodePrf(options.extensions);
+        return copy;
+      }
+      static parseRequestOptionsFromJSON(options) {
+        if (options === null || typeof options !== "object") throw new TypeError("Options must be a dictionary");
+        const copy = { ...options, challenge: webAuthnDecodeBase64Url(options.challenge), allowCredentials: webAuthnSequence(options.allowCredentials, "allowCredentials").map(item => ({ ...item, id: webAuthnDecodeBase64Url(item.id) })) };
+        if (options.extensions !== undefined) copy.extensions = webAuthnDecodePrf(options.extensions);
+        return copy;
+      }
+      static signalUnknownCredential(options) { void options; return Promise.reject(new DOMException("Credential signaling is not supported", "NotSupportedError")); }
+      static signalAllAcceptedCredentials(options) { void options; return Promise.reject(new DOMException("Credential signaling is not supported", "NotSupportedError")); }
+      static signalCurrentUserDetails(options) { void options; return Promise.reject(new DOMException("Credential signaling is not supported", "NotSupportedError")); }
+      get [Symbol.toStringTag]() { return "PublicKeyCredential"; }
+    }
+    const normalizeCredentialDescriptors = (items, name) => webAuthnSequence(items, name).map(item => {
+      if (item === null || typeof item !== "object" || String(item.type) !== "public-key") throw new TypeError(`Invalid ${name} entry`);
+      return copyBufferSourceBytes(item.id);
+    });
+    function normalizeCreationOptions(options) {
+      if (options === null || typeof options !== "object" || options.publicKey === undefined) throw new TypeError("publicKey options are required");
+      const value = options.publicKey;
+      if (value === null || typeof value !== "object") throw new TypeError("publicKey must be a dictionary");
+      const rp = value.rp, user = value.user;
+      if (rp === null || typeof rp !== "object" || rp.name === undefined) throw new TypeError("rp.name is required");
+      if (user === null || typeof user !== "object" || user.id === undefined || user.name === undefined || user.displayName === undefined) throw new TypeError("user fields are required");
+      const challenge = copyBufferSourceBytes(value.challenge);
+      if (challenge.length === 0) throw new TypeError("challenge must not be empty");
+      const userId = copyBufferSourceBytes(user.id);
+      if (userId.length === 0 || userId.length > 64) throw new TypeError("user.id must contain 1 to 64 bytes");
+      const params = webAuthnSequence(value.pubKeyCredParams, "pubKeyCredParams");
+      if (params.length === 0) throw new TypeError("pubKeyCredParams must not be empty");
+      const selection = value.authenticatorSelection == null ? {} : Object(value.authenticatorSelection);
+      return {
+        origin: "", rpId: value.rp.id === undefined ? location.hostname : String(value.rp.id), rpName: String(rp.name), challenge,
+        userId, userName: String(user.name), userDisplayName: String(user.displayName),
+        algorithms: params.map(param => { if (String(param.type) !== "public-key") throw new TypeError("Invalid credential type"); const alg = Number(param.alg); if (!Number.isInteger(alg)) throw new TypeError("Invalid COSE algorithm"); return alg; }),
+        excludeCredentials: normalizeCredentialDescriptors(value.excludeCredentials, "excludeCredentials"),
+        userVerification: webAuthnEnum(selection.userVerification, ["required", "preferred", "discouraged"], "preferred", "userVerification"),
+        residentKey: webAuthnEnum(selection.residentKey, ["required", "preferred", "discouraged"], selection.requireResidentKey ? "required" : "discouraged", "residentKey"),
+        authenticatorAttachment: selection.authenticatorAttachment === undefined ? null : webAuthnEnum(selection.authenticatorAttachment, ["platform", "cross-platform"], "", "authenticatorAttachment"),
+        attestation: webAuthnEnum(value.attestation, ["none", "indirect", "direct", "enterprise"], "none", "attestation"),
+        hints: webAuthnSequence(value.hints, "hints").map(String),
+        timeout: value.timeout === undefined ? null : Math.min(0xffffffff, Math.max(0, Math.trunc(Number(value.timeout)) || 0)),
+        transientUserActivation: navigator.userActivation.isActive,
+      };
+    }
+    function normalizeAssertionOptions(options) {
+      if (options === null || typeof options !== "object" || options.publicKey === undefined) throw new TypeError("publicKey options are required");
+      const value = options.publicKey;
+      if (value === null || typeof value !== "object") throw new TypeError("publicKey must be a dictionary");
+      const challenge = copyBufferSourceBytes(value.challenge);
+      if (challenge.length === 0) throw new TypeError("challenge must not be empty");
+      return {
+        origin: "", rpId: value.rpId === undefined ? location.hostname : String(value.rpId), challenge,
+        allowCredentials: normalizeCredentialDescriptors(value.allowCredentials, "allowCredentials"),
+        userVerification: webAuthnEnum(value.userVerification, ["required", "preferred", "discouraged"], "preferred", "userVerification"),
+        mediation: webAuthnEnum(options.mediation, ["silent", "optional", "required", "conditional"], "optional", "mediation"),
+        hints: webAuthnSequence(value.hints, "hints").map(String),
+        timeout: value.timeout === undefined ? null : Math.min(0xffffffff, Math.max(0, Math.trunc(Number(value.timeout)) || 0)),
+      };
+    }
+    function credentialOperation(kind, options) {
+      let normalized, signal;
+      try {
+        normalized = kind === "create" ? normalizeCreationOptions(options) : normalizeAssertionOptions(options);
+        signal = options.signal;
+        if (signal !== undefined && !(signal instanceof AbortSignal)) throw new TypeError("signal must be an AbortSignal");
+        if (signal && signal.aborted) return Promise.reject(signal.reason);
+      } catch (error) { return Promise.reject(error); }
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const abort = () => { if (!settled) { settled = true; reject(signal.reason); } };
+        if (signal) signal.addEventListener("abort", abort, { once: true });
+        queueMicrotask(() => {
+          if (settled) return;
+          try {
+            const result = JSON.parse(String(__omoikane_web_authn(kind, __omoikane_document_id, JSON.stringify(normalized))));
+            if (result.error) throw new DOMException(result.message || "The authenticator request failed", result.error);
+            const data = result[kind === "create" ? "creation" : "assertion"];
+            const response = kind === "create" ? new AuthenticatorAttestationResponse(credentialToken, data) : new AuthenticatorAssertionResponse(credentialToken, data);
+            settled = true;
+            resolve(new PublicKeyCredential(credentialToken, data, response, kind === "create" ? "creation" : "assertion"));
+          } catch (error) { settled = true; reject(error); }
+          finally { if (signal) signal.removeEventListener("abort", abort); }
+        });
+      });
+    }
+    class CredentialsContainer {
+      constructor(token) { if (token !== credentialToken) throw new TypeError("Illegal constructor"); }
+      create(options = {}) { return credentialOperation("create", options); }
+      get(options = {}) { return credentialOperation("get", options); }
+      store() { return Promise.reject(new DOMException("Credential storage is not supported", "NotSupportedError")); }
+      preventSilentAccess() { return Promise.resolve(); }
+      get [Symbol.toStringTag]() { return "CredentialsContainer"; }
+    }
+    const credentials = new CredentialsContainer(credentialToken);
+    Object.defineProperty(Object.getPrototypeOf(navigator), "credentials", { configurable: true, enumerable: true, get() { if (this !== navigator) illegalInvocation(); return credentials; } });
+    for (const constructor of [Credential, CredentialsContainer, PublicKeyCredential, AuthenticatorResponse, AuthenticatorAttestationResponse, AuthenticatorAssertionResponse]) {
+      Object.defineProperty(constructor, "length", { value: 0 });
+      Object.defineProperty(globalThis, constructor.name, { configurable: true, writable: true, value: constructor });
+    }
+    for (const [target, members] of [
+      [Credential.prototype, ["id", "type"]],
+      [CredentialsContainer.prototype, ["create", "get", "store", "preventSilentAccess"]],
+      [PublicKeyCredential.prototype, ["rawId", "response", "authenticatorAttachment", "getClientExtensionResults", "toJSON"]],
+      [PublicKeyCredential, ["isUserVerifyingPlatformAuthenticatorAvailable", "isConditionalMediationAvailable", "getClientCapabilities", "parseCreationOptionsFromJSON", "parseRequestOptionsFromJSON", "signalUnknownCredential", "signalAllAcceptedCredentials", "signalCurrentUserDetails"]],
+      [AuthenticatorResponse.prototype, ["clientDataJSON"]],
+      [AuthenticatorAttestationResponse.prototype, ["attestationObject", "getTransports", "getAuthenticatorData", "getPublicKey", "getPublicKeyAlgorithm"]],
+      [AuthenticatorAssertionResponse.prototype, ["authenticatorData", "signature", "userHandle"]],
+    ]) {
+      for (const member of members) {
+        const descriptor = Object.getOwnPropertyDescriptor(target, member);
+        Object.defineProperty(target, member, { ...descriptor, enumerable: true });
+      }
+    }
+  }
+
   const cookieStoreOwners = new WeakMap();
   const cookieStoreToken = {};
   const cookieStoreCreationURL = document.URL;

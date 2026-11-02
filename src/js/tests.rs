@@ -19254,6 +19254,158 @@ fn wake_lock_host_revocation_and_document_retirement_release_platform_state() {
 }
 
 #[test]
+fn web_authn_provider_receives_owned_normalized_requests_and_builds_responses() {
+    let mut runtime =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "https://login.example.test/app")
+            .unwrap();
+    let provider = Arc::new(DeterministicWebAuthnProvider::default());
+    provider.set_capabilities([
+        "conditionalGet".to_owned(),
+        "userVerifyingPlatformAuthenticator".to_owned(),
+        "embedder-private-value".to_owned(),
+    ]);
+    provider.respond_to_next_creation(Ok(WebAuthnCreationResponse {
+        credential_id: vec![1, 2, 3],
+        client_data_json: br#"{"type":"webauthn.create"}"#.to_vec(),
+        attestation_object: vec![0xa0],
+        authenticator_data: vec![4; 37],
+        public_key: Some(vec![5, 6]),
+        public_key_algorithm: -7,
+        transports: vec!["internal".into()],
+        authenticator_attachment: Some("platform".into()),
+        client_extension_results: serde_json::json!({"credProps":{"rk":true}}),
+    }));
+    runtime.set_web_authn_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.webAuthnResult = 'pending';
+               navigator.credentials.create({publicKey:{
+                 challenge: new Uint8Array([9,8,7]),
+                 rp: {name:'Example'},
+                 user: {id:new Uint8Array([6,5]),name:'user',displayName:'User'},
+                 pubKeyCredParams:[{type:'public-key',alg:-7}],
+                 authenticatorSelection:{residentKey:'required',userVerification:'required'}
+               }}).then(value => {
+                 globalThis.createdCredential = value;
+                 webAuthnResult = JSON.stringify(value);
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(provider.creation_requests().len(), 1);
+    let request = &provider.creation_requests()[0];
+    assert_eq!(request.origin, "https://login.example.test");
+    assert_eq!(request.rp_id, "login.example.test");
+    assert_eq!(request.challenge, [9, 8, 7]);
+    assert_eq!(request.user_id, [6, 5]);
+    assert_eq!(request.resident_key, "required");
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "[createdCredential instanceof PublicKeyCredential, createdCredential.response instanceof AuthenticatorAttestationResponse, createdCredential.id, createdCredential.rawId.byteLength, createdCredential.response.getTransports()[0], PublicKeyCredential.name].join(':')"
+        ),
+        "true:true:AQID:3:internal:PublicKeyCredential"
+    );
+    runtime
+        .eval("PublicKeyCredential.getClientCapabilities().then(value => globalThis.capabilityNames = Object.keys(value).join(','))")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "capabilityNames"),
+        "conditionalGet,userVerifyingPlatformAuthenticator"
+    );
+    runtime
+        .eval(
+            "PublicKeyCredential.signalUnknownCredential({}).catch(error => globalThis.signalError = error.name)",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "signalError"), "NotSupportedError");
+    assert!(eval_str(&mut runtime, "webAuthnResult").contains("credProps"));
+
+    provider.respond_to_next_assertion(Ok(WebAuthnAssertionResponse {
+        credential_id: vec![1, 2, 3],
+        client_data_json: br#"{"type":"webauthn.get"}"#.to_vec(),
+        authenticator_data: vec![7; 37],
+        signature: vec![8, 9],
+        user_handle: Some(vec![10]),
+        authenticator_attachment: Some("platform".into()),
+        client_extension_results: serde_json::json!({}),
+    }));
+    runtime
+        .eval(
+            r#"navigator.credentials.get({publicKey:{challenge:new Uint8Array([1]),
+               allowCredentials:[{type:'public-key',id:createdCredential.rawId}]}})
+               .then(value => globalThis.assertedCredential = value);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        provider.assertion_requests()[0].allow_credentials,
+        [vec![1, 2, 3]]
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "[assertedCredential.response.signature.byteLength, assertedCredential.response.userHandle.byteLength, navigator.credentials === navigator.credentials].join(':')"
+        ),
+        "2:1:true"
+    );
+}
+
+#[test]
+fn web_authn_enforces_abort_rp_policy_secure_context_and_retirement() {
+    let mut insecure =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "http://example.test/").unwrap();
+    assert_eq!(
+        eval_str(
+            &mut insecure,
+            "[typeof PublicKeyCredential, 'credentials' in navigator].join(':')"
+        ),
+        "undefined:false"
+    );
+
+    let document = crate::html::TreeBuilder::parse("<iframe id='child'></iframe>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://a.example.test/").unwrap();
+    let provider = Arc::new(DeterministicWebAuthnProvider::default());
+    runtime.set_web_authn_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.authErrors=[];
+               const controller=new AbortController();
+               navigator.credentials.create({signal:controller.signal,publicKey:{challenge:new Uint8Array([1]),rp:{name:'x'},user:{id:new Uint8Array([1]),name:'u',displayName:'u'},pubKeyCredParams:[{type:'public-key',alg:-7}]}}).catch(error=>authErrors.push(error.name));
+               controller.abort();
+               navigator.credentials.get({publicKey:{challenge:new Uint8Array([1]),rpId:'other.test'}}).catch(error=>authErrors.push(error.name));"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "authErrors.join(',')"),
+        "AbortError,SecurityError"
+    );
+    assert!(provider.creation_requests().is_empty());
+
+    runtime.install_response_security_headers(&[(
+        "Permissions-Policy".into(),
+        "publickey-credentials-get=()".into(),
+    )]);
+    runtime
+        .eval("navigator.credentials.get({publicKey:{challenge:new Uint8Array([1])}}).catch(error=>authErrors.push(error.name))")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "authErrors.at(-1)"),
+        "NotAllowedError"
+    );
+
+    runtime
+        .eval("globalThis.childFrame=document.getElementById('child'); childFrame.remove()")
+        .unwrap();
+    assert!(!provider.cancelled_documents().is_empty());
+}
+
+#[test]
 fn web_speech_synthesis_queues_owned_requests_and_advances_on_host_events() {
     let mut runtime = JsRuntime::new().unwrap();
     let provider = Arc::new(DeterministicWebSpeechProvider::new(vec![SpeechVoice {
