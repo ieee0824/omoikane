@@ -75,8 +75,7 @@ impl RuntimeCode {
             return Err(JitError::UnsupportedPlatform);
         }
         let snapshot = block
-            .bytecode_contract()
-            .verify()
+            .verified_jit_code()
             .map_err(|_| JitError::InvalidCodeSize)?;
         #[cfg(target_arch = "aarch64")]
         let (stub, return_pc) = super::aarch64::runtime_call()?;

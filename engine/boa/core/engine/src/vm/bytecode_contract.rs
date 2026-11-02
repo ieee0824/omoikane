@@ -12,11 +12,45 @@ use std::{
 };
 
 use boa_gc::Finalize;
+#[cfg(feature = "baseline-jit")]
+use std::{cell::OnceCell, rc::Rc};
 
 use super::{
     CodeBlock, Constant,
     opcode::{InstructionIterator, VaryingOperand},
 };
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SNAPSHOT_CONSTANT_VISITS: Cell<usize> = const { Cell::new(0) };
+    pub(crate) static ROOT_VERIFICATION_VISITS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Local instruction/handler metadata. JIT caching publishes it only after
+/// every nested function has also passed structural verification. It contains
+/// no GC handles; nested constant metadata is not duplicated into parents.
+#[derive(Debug)]
+pub(crate) struct VerifiedCodeBlock {
+    pub(crate) byte_len: u32,
+    pub(crate) register_count: u32,
+    pub(crate) instructions: Vec<BytecodeInstruction>,
+    pub(crate) handlers: Vec<BytecodeHandler>,
+}
+
+#[cfg(feature = "baseline-jit")]
+#[derive(Debug, Default)]
+pub(crate) struct VerifiedCodeBlockCache {
+    verified: Cell<bool>,
+    local: OnceCell<Rc<VerifiedCodeBlock>>,
+}
+
+#[cfg(feature = "baseline-jit")]
+impl Clone for VerifiedCodeBlockCache {
+    fn clone(&self) -> Self {
+        // A builder may clone a block and then edit its private bytecode.
+        Self::default()
+    }
+}
 
 /// Increment whenever the meaning or encoding of a contract field changes.
 pub const BYTECODE_CONTRACT_VERSION: u32 = 3;
@@ -196,6 +230,49 @@ pub struct BytecodeContract<'a> {
 }
 
 impl CodeBlock {
+    /// Shares local metadata between JIT tiers after verifying this immutable
+    /// block and all nested functions. No metadata is published on failure.
+    /// JIT callers use frozen, published blocks; mutable builders use `verify`.
+    #[cfg(feature = "baseline-jit")]
+    pub(crate) fn verified_jit_code(&self) -> Result<Rc<VerifiedCodeBlock>, BytecodeContractError> {
+        if let Some(verified) = self.jit_verified_code.local.get() {
+            return Ok(Rc::clone(verified));
+        }
+        let verified = self.bytecode_contract().verify_root()?;
+        self.verify_nested_jit_code()?;
+        let verified = Rc::new(verified);
+        self.jit_verified_code
+            .local
+            .set(Rc::clone(&verified))
+            .expect("verification does not reenter the same immutable block");
+        Ok(verified)
+    }
+
+    /// A complete proof is reusable even when this function never becomes hot.
+    /// Drop its temporary decoded instructions before checking children; only
+    /// functions that reach a JIT tier retain local instruction metadata.
+    #[cfg(feature = "baseline-jit")]
+    fn verify_jit_structure(&self) -> Result<(), BytecodeContractError> {
+        if !self.jit_verified_code.verified.get() {
+            self.bytecode_contract().verify_root()?;
+            self.verify_nested_jit_code()?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "baseline-jit")]
+    fn verify_nested_jit_code(&self) -> Result<(), BytecodeContractError> {
+        if !self.jit_verified_code.verified.get() {
+            for constant in &self.constants {
+                if let Constant::Function(function) = constant {
+                    function.verify_jit_structure()?;
+                }
+            }
+            self.jit_verified_code.verified.set(true);
+        }
+        Ok(())
+    }
+
     /// Returns the versioned read-only bytecode boundary.
     #[must_use]
     pub const fn bytecode_contract(&self) -> BytecodeContract<'_> {
@@ -239,6 +316,78 @@ impl CodeBlock {
 impl BytecodeContract<'_> {
     /// Decode and validate all instruction, register, index, jump and handler data.
     pub fn verify(self) -> Result<BytecodeContractSnapshot, BytecodeContractError> {
+        let root = self.verify_root()?;
+        let constants = self
+            .code
+            .constants
+            .iter()
+            .map(|constant| {
+                #[cfg(test)]
+                SNAPSHOT_CONSTANT_VISITS.with(|count| count.set(count.get() + 1));
+                Ok(match constant {
+                    Constant::String(value) => BytecodeConstant::String(value.clone()),
+                    Constant::Function(code) => BytecodeConstant::Function {
+                        name: code.name().to_std_string_escaped(),
+                        contract: Box::new(code.bytecode_contract().verify()?),
+                    },
+                    Constant::BigInt(value) => BytecodeConstant::BigInt(value.clone()),
+                    Constant::Scope(scope) => BytecodeConstant::Scope {
+                        scope_index: scope.scope_index(),
+                        bindings: scope.num_bindings(),
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, BytecodeContractError>>()?;
+
+        Ok(BytecodeContractSnapshot {
+            version: BYTECODE_CONTRACT_VERSION,
+            byte_len: root.byte_len,
+            register_count: root.register_count,
+            binding_count: self.code.bindings.len() as u32,
+            inline_cache_count: self.code.ic.len() as u32,
+            instructions: root.instructions,
+            constants,
+            handlers: root.handlers,
+        })
+    }
+
+    fn verify_root(self) -> Result<VerifiedCodeBlock, BytecodeContractError> {
+        #[cfg(test)]
+        ROOT_VERIFICATION_VISITS.with(|count| count.set(count.get() + 1));
+        let (instructions, boundaries) = self.verified_instructions()?;
+        let handlers = self
+            .code
+            .handlers
+            .iter()
+            .enumerate()
+            .map(|(index, handler)| {
+                if handler.start >= handler.end
+                    || !boundaries.contains(&handler.start)
+                    || !boundaries.contains(&handler.end)
+                {
+                    return Err(BytecodeContractError::InvalidHandler {
+                        index: index as u32,
+                    });
+                }
+                Ok(BytecodeHandler {
+                    start: handler.start,
+                    end: handler.end,
+                    environment_count: handler.environment_count,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(VerifiedCodeBlock {
+            byte_len: self.code.bytecode.bytecode.len() as u32,
+            register_count: self.code.register_count,
+            instructions,
+            handlers,
+        })
+    }
+
+    fn verified_instructions(
+        self,
+    ) -> Result<(Vec<BytecodeInstruction>, BTreeSet<u32>), BytecodeContractError> {
         let byte_len = self.code.bytecode.bytecode.len() as u32;
         let mut iterator = InstructionIterator::new(&self.code.bytecode);
         let mut decoded = Vec::new();
@@ -323,58 +472,7 @@ impl BytecodeContract<'_> {
             });
         }
 
-        let handlers = self
-            .code
-            .handlers
-            .iter()
-            .enumerate()
-            .map(|(index, handler)| {
-                if handler.start >= handler.end
-                    || !boundaries.contains(&handler.start)
-                    || !boundaries.contains(&handler.end)
-                {
-                    return Err(BytecodeContractError::InvalidHandler {
-                        index: index as u32,
-                    });
-                }
-                Ok(BytecodeHandler {
-                    start: handler.start,
-                    end: handler.end,
-                    environment_count: handler.environment_count,
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let constants = self
-            .code
-            .constants
-            .iter()
-            .map(|constant| {
-                Ok(match constant {
-                    Constant::String(value) => BytecodeConstant::String(value.clone()),
-                    Constant::Function(code) => BytecodeConstant::Function {
-                        name: code.name().to_std_string_escaped(),
-                        contract: Box::new(code.bytecode_contract().verify()?),
-                    },
-                    Constant::BigInt(value) => BytecodeConstant::BigInt(value.clone()),
-                    Constant::Scope(scope) => BytecodeConstant::Scope {
-                        scope_index: scope.scope_index(),
-                        bindings: scope.num_bindings(),
-                    },
-                })
-            })
-            .collect::<Result<Vec<_>, BytecodeContractError>>()?;
-
-        Ok(BytecodeContractSnapshot {
-            version: BYTECODE_CONTRACT_VERSION,
-            byte_len,
-            register_count,
-            binding_count,
-            inline_cache_count,
-            instructions,
-            constants,
-            handlers,
-        })
+        Ok((instructions, boundaries))
     }
 
     /// Deterministic text form for golden tests and contract reviews.
@@ -776,6 +874,64 @@ mod tests {
         assert!(dump.contains("GetPropertyByName"));
         assert!(dump.contains("SetPropertyByName"));
         assert!(dump.contains("Jump"));
+    }
+
+    #[test]
+    #[cfg(feature = "baseline-jit")]
+    fn jit_verification_keeps_nested_proofs_without_retaining_unused_instructions() {
+        let mut nested = CodeBlock::new(crate::JsString::default(), 0, false);
+        let mut emitter = super::super::opcode::ByteCodeEmitter::new();
+        emitter.emit_push_zero(VaryingOperand::new(0));
+        nested.bytecode = emitter.into_bytecode();
+        nested.register_count = 1;
+        let nested = boa_gc::Rooted::new(nested);
+        let mut root = CodeBlock::new(crate::JsString::default(), 0, false);
+        root.constants
+            .push(Constant::Function(nested.clone().into_edge()));
+        root.verified_jit_code().unwrap();
+        assert!(nested.jit_verified_code.verified.get());
+        assert!(nested.jit_verified_code.local.get().is_none());
+        let hot = nested.verified_jit_code().unwrap();
+        assert_eq!(hot.instructions.len(), 1);
+        assert!(Rc::ptr_eq(&hot, &nested.verified_jit_code().unwrap()));
+        let full = root.bytecode_contract().verify().unwrap();
+        let BytecodeConstant::Function { contract, .. } = &full.constants[0] else {
+            panic!()
+        };
+        assert_eq!(contract.instructions.len(), 1);
+    }
+
+    #[test]
+    #[cfg(feature = "baseline-jit")]
+    fn jit_verification_checks_nested_code_and_does_not_reuse_a_clones_cache() {
+        let mut nested = CodeBlock::new(crate::JsString::default(), 0, false);
+        let mut emitter = super::super::opcode::ByteCodeEmitter::new();
+        emitter.emit_push_literal(VaryingOperand::new(1), VaryingOperand::new(0));
+        nested.bytecode = emitter.into_bytecode();
+        nested.register_count = 1;
+        let nested = boa_gc::Rooted::new(nested);
+        let mut root = CodeBlock::new(crate::JsString::default(), 0, false);
+        let first = root.verified_jit_code().unwrap();
+        assert!(Rc::ptr_eq(&first, &root.verified_jit_code().unwrap()));
+        let mut edited = root.clone();
+        edited
+            .constants
+            .push(Constant::Function(nested.clone().into_edge()));
+        assert!(matches!(
+            edited.verified_jit_code(),
+            Err(BytecodeContractError::RegisterOutOfBounds { .. })
+        ));
+        assert!(matches!(
+            edited.bytecode_contract().verify(),
+            Err(BytecodeContractError::RegisterOutOfBounds { .. })
+        ));
+        root.constants
+            .push(Constant::Function(nested.clone().into_edge()));
+        // The public contract stays fresh even for mutable unpublished builders.
+        assert!(matches!(
+            root.bytecode_contract().verify(),
+            Err(BytecodeContractError::RegisterOutOfBounds { .. })
+        ));
     }
 
     #[test]

@@ -5556,6 +5556,44 @@ fn paint_replaced_image_box(
     );
 }
 
+fn paint_video_cues(
+    canvas: &mut Canvas,
+    layout: &LayoutBox,
+    clip: Option<Rect>,
+    offset: PaintOffset,
+) {
+    if layout.node.tag_name().as_deref() != Some("video") {
+        return;
+    }
+    let Some(text) = layout.node.media_cue_text() else {
+        return;
+    };
+    if text.is_empty() {
+        return;
+    }
+    let content = offset.rect(layout.dimensions.content);
+    let height = (content.height * 0.22).max(24.0).min(content.height);
+    let box_rect = Rect {
+        x: content.x + content.width * 0.08,
+        y: content.y + content.height - height,
+        width: content.width * 0.84,
+        height,
+    };
+    let clip = clip
+        .and_then(|outer| intersect(outer, content))
+        .or(Some(content));
+    canvas.fill_rect_clipped(box_rect, Color::rgba(0, 0, 0, 192), clip);
+    text::paint_text_placeholder(
+        canvas,
+        box_rect,
+        &text,
+        (height * 0.45).max(12.0),
+        Color::rgb(255, 255, 255),
+        clip,
+        0.0,
+    );
+}
+
 fn content_image_orientation(image: &Image, style: &ComputedStyle) -> Option<(i32, bool)> {
     let value = match style.get_by_id(PropertyId::ImageOrientation) {
         Some(ComputedValue::Keyword(value)) => value.to_ascii_lowercase(),
@@ -5872,6 +5910,7 @@ fn paint_box_internal_to(
     } else {
         paint_replaced_image_box(canvas, layout, style, inherited_clip, offset);
     }
+    paint_video_cues(canvas, layout, inherited_clip, offset);
     if paint_decorations {
         border::paint_borders(canvas, layout, style, inherited_clip, offset);
     }

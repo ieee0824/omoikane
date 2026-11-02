@@ -10777,6 +10777,35 @@ fn render_document_executes_inline_script() {
 }
 
 #[test]
+fn showing_webvtt_cue_paints_over_video_content_box() {
+    let html = r#"<html><head><style>
+        html, body { margin: 0; background: white; }
+        video { display: block; width: 200px; height: 100px; background: blue; }
+    </style></head><body>
+        <video id="video"></video>
+        <script>
+          const video = document.getElementById("video");
+          const track = video.addTextTrack("captions", "English", "en");
+          track.mode = "showing";
+          track.addCue(new VTTCue(0.5, 2, "Caption"));
+          video.currentTime = 1;
+        </script>
+    </body></html>"#;
+    let document = TreeBuilder::parse(html).document();
+    let canvas = render_document(
+        &document,
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 200.0,
+            height: 100.0,
+        },
+    )
+    .unwrap();
+    assert_eq!(canvas.pixel(180, 90), Some(Color::rgb(0, 0, 63)));
+}
+
+#[test]
 fn render_document_uses_stylesheet_injected_by_script() {
     let html = r##"<html><head><style>
         body { margin: 0; }

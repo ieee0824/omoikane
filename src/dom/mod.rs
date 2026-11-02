@@ -558,6 +558,8 @@ pub struct Element {
     fullscreen: bool,
     /// Dynamic HTML media state exposed to CSS pseudo-class matching.
     media_selector_state: Option<u8>,
+    /// Active showing WebVTT cue text painted over a video replaced box.
+    media_cue_text: Option<String>,
     /// Stable ordering among elements currently rendered in the top layer.
     top_layer_order: Option<u64>,
 }
@@ -659,6 +661,7 @@ impl Element {
             modal_dialog: false,
             fullscreen: false,
             media_selector_state,
+            media_cue_text: None,
             top_layer_order: None,
         }
     }
@@ -722,6 +725,7 @@ impl Element {
             modal_dialog: false,
             fullscreen: false,
             media_selector_state,
+            media_cue_text: None,
             top_layer_order: None,
         }
     }
@@ -2200,6 +2204,9 @@ impl NodeHandle {
             inner.aria_element_references.remove(&qualified_name);
         }
         if let NodeData::Element(element) = &mut inner.data {
+            if namespace_uri.is_none() && local_name == "style" {
+                element.style_computation_source = None;
+            }
             if namespace_uri.is_none() && local_name == "async" {
                 element.script_force_async = false;
             }
@@ -2333,6 +2340,9 @@ impl NodeHandle {
                 .position(|attribute| attribute.qualified_name == qualified_name)
             {
                 let attribute = element.attribute_records.remove(index);
+                if attribute.namespace_uri.is_none() && attribute.local_name == "style" {
+                    element.style_computation_source = None;
+                }
                 if attribute.namespace_uri.is_none()
                     && attribute.local_name == "checked"
                     && !element.dirty_checkedness
@@ -2359,6 +2369,9 @@ impl NodeHandle {
             };
             let qualified_name = element.attribute_records[index].qualified_name.clone();
             invalidate_for_attribute(&[&qualified_name, local_name]);
+            if namespace_uri.is_none() && local_name == "style" {
+                element.style_computation_source = None;
+            }
             if qualified_name == "form" && namespace_uri.is_none() {
                 element.parser_form_owner = None;
             }
@@ -2563,6 +2576,29 @@ impl NodeHandle {
         }
         element.media_selector_state = Some(state);
         true
+    }
+
+    /// Replaces the owned active subtitle text for an HTML video element.
+    pub(crate) fn set_media_cue_text(&self, text: Option<String>) -> bool {
+        let mut inner = self.0.borrow_mut();
+        let NodeData::Element(element) = &mut inner.data else {
+            return false;
+        };
+        if !is_html_media_element(element) || element.media_cue_text == text {
+            return false;
+        }
+        element.media_cue_text = text;
+        true
+    }
+
+    /// Returns the active subtitle text, if this is a media element with cues.
+    pub(crate) fn media_cue_text(&self) -> Option<String> {
+        match &self.0.borrow().data {
+            NodeData::Element(element) if is_html_media_element(element) => {
+                element.media_cue_text.clone()
+            }
+            _ => None,
+        }
     }
 
     /// Returns whether this element is an open modal dialog.
@@ -3664,6 +3700,35 @@ fn parse_attribute_selector(selector: &str) -> Option<AttributeSelector> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xml_style_mutations_invalidate_only_the_unnamespaced_computation_source() {
+        let node = NodeHandle::xml_element("g", Some("http://www.w3.org/2000/svg".into()));
+        node.set_xml_attribute("style", "paint-order: fill");
+        node.set_style_computation_source(Some("paint-order: fill stroke".into()));
+        node.set_xml_attribute_ns("x:style", Some("urn:test".into()), "style", "unrelated");
+        assert_eq!(
+            node.inline_style_source().as_deref(),
+            Some("paint-order: fill stroke")
+        );
+        node.remove_xml_attribute_ns(Some("urn:test"), "style");
+        assert_eq!(
+            node.inline_style_source().as_deref(),
+            Some("paint-order: fill stroke")
+        );
+        node.set_xml_attribute_ns("style", None, "style", "paint-order: markers stroke");
+        assert_eq!(
+            node.inline_style_source().as_deref(),
+            Some("paint-order: markers stroke")
+        );
+        node.set_style_computation_source(Some("paint-order: fill stroke".into()));
+        node.remove_xml_attribute_ns(None, "style");
+        assert_eq!(node.inline_style_source(), None);
+        node.set_xml_attribute("style", "paint-order: fill");
+        node.set_style_computation_source(Some("paint-order: fill stroke".into()));
+        node.remove_xml_attribute("style");
+        assert_eq!(node.inline_style_source(), None);
+    }
 
     #[test]
     fn appending_scalar_text_preserves_exact_utf16_data() {

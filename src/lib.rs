@@ -30,6 +30,7 @@ pub mod realtime;
 pub mod resource_worker;
 mod screenshot;
 pub mod svg;
+mod webvtt;
 pub mod xml;
 
 #[cfg(test)]

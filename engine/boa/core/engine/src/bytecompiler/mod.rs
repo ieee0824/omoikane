@@ -2313,6 +2313,8 @@ impl<'ctx> ByteCompiler<'ctx> {
         CodeBlock {
             #[cfg(feature = "baseline-jit")]
             jit_code_id: crate::vm::next_jit_code_id(),
+            #[cfg(feature = "baseline-jit")]
+            jit_verified_code: crate::vm::bytecode_contract::VerifiedCodeBlockCache::default(),
             length: self.length,
             register_count,
             this_mode: self.this_mode,

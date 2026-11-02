@@ -1,0 +1,9 @@
+{
+  "tests": [
+    { "path": "webvtt/api/VTTCue/constructor.html" },
+    { "path": "webvtt/api/VTTCue/constructor-exceptions.html" },
+    { "path": "webvtt/api/VTTCue/size.html" },
+    { "path": "webvtt/api/VTTRegion/constructor.html" },
+    { "path": "html/semantics/embedded-content/media-elements/track/track-element/cloneNode.html" }
+  ]
+}
