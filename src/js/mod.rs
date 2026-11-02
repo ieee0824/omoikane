@@ -176,6 +176,8 @@ pub use screen_orientation::{
     DeterministicScreenOrientationProvider, ScreenOrientationError, ScreenOrientationProvider,
     ScreenOrientationSnapshot, ScreenOrientationType,
 };
+mod wake_lock;
+pub use wake_lock::{DeterministicWakeLockProvider, WakeLockError, WakeLockProvider};
 mod media_capture;
 pub use media_capture::{
     MediaCaptureDevice, MediaCaptureProvider, MediaCaptureSnapshot, MediaDeviceKind,
@@ -2431,6 +2433,7 @@ struct HostState {
     geolocation: geolocation::State,
     gamepad: gamepad::State,
     screen_orientation: screen_orientation::State,
+    wake_lock: wake_lock::State,
     media_capture: media_capture::State,
     media_source: media_source::State,
     web_codecs: web_codecs::State,
@@ -3423,6 +3426,7 @@ impl HostState {
             geolocation: geolocation::State::default(),
             gamepad: gamepad::State::default(),
             screen_orientation: screen_orientation::State::default(),
+            wake_lock: wake_lock::State::default(),
             media_capture: media_capture::State::default(),
             media_source: media_source::State::default(),
             web_codecs: web_codecs::State::default(),
@@ -6365,6 +6369,7 @@ impl HostState {
         self.idle_period_requests.remove(&document_id);
         self.auxiliary_opener_updaters.remove(&document_id);
         self.promise_reports.retire_document(document_id);
+        self.wake_lock.release_document(document_id);
         self.pointer_lock.retire_document(document_id);
         self.input_bridge.retire_document(document_id);
         self.form_state.retire_document(document_id);
@@ -6503,6 +6508,8 @@ impl HostState {
             .remove(&previous.document.identity());
         self.promise_reports
             .retire_document(previous.document.identity());
+        self.wake_lock
+            .release_document(previous.document.identity());
         self.pointer_lock
             .retire_document(previous.document.identity());
         self.input_bridge
@@ -10624,10 +10631,14 @@ impl JsRuntime {
             {
                 continue;
             }
-            let result = self.eval_in_document_realm(
-                document_id,
-                &format!("__omoikane_dispatch_visibilitychange({document_id})"),
-            );
+            let script = if hidden {
+                format!(
+                    "if (typeof __omoikane_release_wake_locks === 'function') __omoikane_release_wake_locks(); __omoikane_dispatch_visibilitychange({document_id})"
+                )
+            } else {
+                format!("__omoikane_dispatch_visibilitychange({document_id})")
+            };
+            let result = self.eval_in_document_realm(document_id, &script);
             self.record_error_from("visibilitychange", result);
         }
     }
@@ -16665,6 +16676,7 @@ fn register_host_bindings(
     geolocation::register(context, &mut bindings)?;
     gamepad::register(context, &mut bindings)?;
     screen_orientation::register(context, &mut bindings)?;
+    wake_lock::register(context, &mut bindings)?;
     media_capture::register(context, &mut bindings)?;
     media_source::register(context, &mut bindings)?;
     web_codecs::register(context, &mut bindings)?;

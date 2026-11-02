@@ -19137,6 +19137,123 @@ fn screen_orientation_sandbox_requires_allow_orientation_lock() {
 }
 
 #[test]
+fn wake_lock_aggregates_sentinels_and_releases_on_visibility_loss() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicWakeLockProvider::default());
+    runtime.set_wake_lock_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.wakeLog = [];
+               Promise.all([navigator.wakeLock.request(), navigator.wakeLock.request('screen')])
+                 .then(([first, second]) => {
+                   globalThis.firstWake = first;
+                   globalThis.secondWake = second;
+                   first.onrelease = () => wakeLog.push('first');
+                   second.addEventListener('release', () => wakeLog.push('second'));
+                 });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(provider.held_count(), 1);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "[firstWake instanceof WakeLockSentinel, firstWake.type, firstWake.released, navigator.wakeLock === navigator.wakeLock].join(':')"
+        ),
+        "true:screen:false:true"
+    );
+    runtime.eval("firstWake.release()").unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(provider.held_count(), 1);
+    runtime.set_page_visibility(true);
+    assert_eq!(provider.held_count(), 0);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "wakeLog.join(',') + ':' + firstWake.released + ':' + secondWake.released"
+        ),
+        "first,second:true:true"
+    );
+}
+
+#[test]
+fn wake_lock_enforces_type_policy_visibility_and_provider_failure() {
+    let mut runtime =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "https://wake-lock.example.test/")
+            .unwrap();
+    let provider = Arc::new(DeterministicWakeLockProvider::default());
+    runtime.set_wake_lock_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.wakeErrors = [];
+               navigator.wakeLock.request('system').catch(error => wakeErrors.push(error.name));"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    provider.fail_next("battery is low");
+    runtime
+        .eval("navigator.wakeLock.request().catch(error => wakeErrors.push(error.name))")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime.install_response_security_headers(&[(
+        "Permissions-Policy".into(),
+        "screen-wake-lock=()".into(),
+    )]);
+    runtime
+        .eval("navigator.wakeLock.request().catch(error => wakeErrors.push(error.name))")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "wakeErrors.join(',')"),
+        "TypeError,NotAllowedError,NotAllowedError"
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "String(!document.permissionsPolicy.allowsFeature('screen-wake-lock'))"
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn wake_lock_host_revocation_and_document_retirement_release_platform_state() {
+    let document = crate::html::TreeBuilder::parse("<iframe id='child'></iframe>").document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let provider = Arc::new(DeterministicWakeLockProvider::default());
+    runtime.set_wake_lock_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.revoked = 0;
+               navigator.wakeLock.request().then(lock => {
+                 globalThis.hostLock = lock;
+                 lock.onrelease = () => revoked++;
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime.revoke_wake_locks();
+    assert_eq!(provider.held_count(), 0);
+    assert_eq!(
+        eval_str(&mut runtime, "revoked + ':' + hostLock.released"),
+        "1:true"
+    );
+
+    runtime
+        .eval(
+            r#"globalThis.childFrame = document.getElementById('child');
+               childFrame.contentWindow.navigator.wakeLock.request().then(lock => {
+                 globalThis.childLock = lock;
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(provider.held_count(), 1);
+    runtime.eval("childFrame.remove()").unwrap();
+    assert_eq!(provider.held_count(), 0);
+}
+
+#[test]
 fn web_speech_synthesis_queues_owned_requests_and_advances_on_host_events() {
     let mut runtime = JsRuntime::new().unwrap();
     let provider = Arc::new(DeterministicWebSpeechProvider::new(vec![SpeechVoice {

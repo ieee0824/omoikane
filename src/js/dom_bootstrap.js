@@ -30671,6 +30671,93 @@ let omoikaneUserActivationState;
     }
   }
 
+  if (globalThis.isSecureContext) {
+    const wakeLockToken = {};
+    const wakeLockSentinelState = new WeakMap();
+    const liveWakeLockSentinels = new Set();
+    function finishWakeLockRelease(sentinel) {
+      const state = wakeLockSentinelState.get(sentinel) || illegalInvocation();
+      if (state.released) return;
+      state.released = true;
+      liveWakeLockSentinels.delete(sentinel);
+      __omoikane_wake_lock("release", __omoikane_document_id);
+      const event = new Event("release");
+      Object.defineProperty(event, Symbol.toStringTag, { configurable: true, value: "Event" });
+      event.isTrusted = true;
+      sentinel.dispatchEvent(event);
+    }
+    class WakeLockSentinel extends EventTarget {
+      constructor(token) {
+        if (token !== wakeLockToken) throw new TypeError("Illegal constructor");
+        super();
+        wakeLockSentinelState.set(this, { released: false, onrelease: null });
+        liveWakeLockSentinels.add(this);
+      }
+      get released() { return (wakeLockSentinelState.get(this) || illegalInvocation()).released; }
+      get type() { wakeLockSentinelState.get(this) || illegalInvocation(); return "screen"; }
+      get onrelease() { return (wakeLockSentinelState.get(this) || illegalInvocation()).onrelease; }
+      set onrelease(value) {
+        const state = wakeLockSentinelState.get(this) || illegalInvocation();
+        if (state.onrelease) this.removeEventListener("release", state.onrelease);
+        state.onrelease = typeof value === "function" ? value : null;
+        if (state.onrelease) this.addEventListener("release", state.onrelease);
+      }
+      release() {
+        try { wakeLockSentinelState.get(this) || illegalInvocation(); }
+        catch (error) { return Promise.reject(error); }
+        finishWakeLockRelease(this);
+        return Promise.resolve();
+      }
+      get [Symbol.toStringTag]() { return "WakeLockSentinel"; }
+    }
+    class WakeLock {
+      constructor(token) { if (token !== wakeLockToken) throw new TypeError("Illegal constructor"); }
+      request(type = "screen") {
+        let requested;
+        try {
+          requested = String(type);
+          if (requested !== "screen") throw new TypeError("Invalid wake lock type");
+        } catch (error) {
+          return Promise.reject(error);
+        }
+        return Promise.resolve().then(() => {
+          const result = String(__omoikane_wake_lock("request", __omoikane_document_id));
+          if (result !== "ok") {
+            throw new DOMException(
+              result === "NotAllowedError" ? "Screen wake lock is not allowed." : result,
+              "NotAllowedError",
+            );
+          }
+          return new WakeLockSentinel(wakeLockToken);
+        });
+      }
+      get [Symbol.toStringTag]() { return "WakeLock"; }
+    }
+    const wakeLock = new WakeLock(wakeLockToken);
+    Object.defineProperty(WakeLock, "length", { value: 0 });
+    Object.defineProperty(WakeLockSentinel, "length", { value: 0 });
+    Object.defineProperty(globalThis, "WakeLock", { configurable: true, writable: true, value: WakeLock });
+    Object.defineProperty(globalThis, "WakeLockSentinel", { configurable: true, writable: true, value: WakeLockSentinel });
+    const navigatorWakeLockDescriptor = Object.getOwnPropertyDescriptor({
+      get wakeLock() { if (this !== navigator) illegalInvocation(); return wakeLock; },
+    }, "wakeLock");
+    Object.defineProperty(Object.getPrototypeOf(navigator), "wakeLock", {
+      ...navigatorWakeLockDescriptor, configurable: true, enumerable: true,
+    });
+    globalThis.__omoikane_release_wake_locks = () => {
+      for (const sentinel of Array.from(liveWakeLockSentinels)) finishWakeLockRelease(sentinel);
+    };
+    for (const [constructor, members] of [
+      [WakeLock, ["request"]],
+      [WakeLockSentinel, ["released", "type", "onrelease", "release"]],
+    ]) {
+      for (const member of members) {
+        const descriptor = Object.getOwnPropertyDescriptor(constructor.prototype, member);
+        Object.defineProperty(constructor.prototype, member, { ...descriptor, enumerable: true });
+      }
+    }
+  }
+
   const speechUtteranceState = new WeakMap();
   const speechRecognitionState = new WeakMap();
   const speechRecognitionSessions = new Map();
@@ -32688,6 +32775,7 @@ let omoikaneUserActivationState;
   const supportedPermissionNames = Object.freeze([
     "notifications", "geolocation", "clipboard-read", "clipboard-write", "persistent-storage",
     "accelerometer", "gyroscope", "magnetometer", "storage-access", "camera", "microphone",
+    "screen-wake-lock",
   ]);
 
   function permissionDescriptorName(descriptor) {
@@ -32703,6 +32791,9 @@ let omoikaneUserActivationState;
   }
 
   function permissionStateFor(name) {
+    if (name === "screen-wake-lock") {
+      return String(__omoikane_wake_lock("permission", __omoikane_document_id));
+    }
     if (name === "storage-access") {
       return String(nativeStorageAccessPermission(__omoikane_document_id));
     }

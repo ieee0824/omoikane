@@ -14,16 +14,18 @@ pub(super) enum PolicyFeature {
     Fullscreen,
     Geolocation,
     Gamepad,
+    ScreenWakeLock,
     CrossOriginIsolated,
     StorageAccess,
     FocusWithoutUserActivation,
 }
 
 impl PolicyFeature {
-    pub(super) const ALL: [Self; 6] = [
+    pub(super) const ALL: [Self; 7] = [
         Self::Fullscreen,
         Self::Geolocation,
         Self::Gamepad,
+        Self::ScreenWakeLock,
         Self::CrossOriginIsolated,
         Self::StorageAccess,
         Self::FocusWithoutUserActivation,
@@ -34,6 +36,7 @@ impl PolicyFeature {
             Self::Fullscreen => "fullscreen",
             Self::Geolocation => "geolocation",
             Self::Gamepad => "gamepad",
+            Self::ScreenWakeLock => "screen-wake-lock",
             Self::CrossOriginIsolated => "cross-origin-isolated",
             Self::StorageAccess => "storage-access",
             Self::FocusWithoutUserActivation => "focus-without-user-activation",
