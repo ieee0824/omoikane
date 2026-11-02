@@ -171,6 +171,11 @@ pub use gamepad::{
     DeterministicGamepadProvider, GamepadButtonSnapshot, GamepadHapticRequest, GamepadHapticResult,
     GamepadProvider, GamepadSnapshot,
 };
+mod screen_orientation;
+pub use screen_orientation::{
+    DeterministicScreenOrientationProvider, ScreenOrientationError, ScreenOrientationProvider,
+    ScreenOrientationSnapshot, ScreenOrientationType,
+};
 mod media_capture;
 pub use media_capture::{
     MediaCaptureDevice, MediaCaptureProvider, MediaCaptureSnapshot, MediaDeviceKind,
@@ -2425,6 +2430,7 @@ struct HostState {
     notification_permission: String,
     geolocation: geolocation::State,
     gamepad: gamepad::State,
+    screen_orientation: screen_orientation::State,
     media_capture: media_capture::State,
     media_source: media_source::State,
     web_codecs: web_codecs::State,
@@ -3182,6 +3188,7 @@ struct IframeSandboxPolicy {
     allow_pointer_lock: bool,
     allow_forms: bool,
     allow_top_navigation: bool,
+    allow_orientation_lock: bool,
 }
 
 impl Default for IframeSandboxPolicy {
@@ -3194,6 +3201,7 @@ impl Default for IframeSandboxPolicy {
             allow_pointer_lock: true,
             allow_forms: true,
             allow_top_navigation: true,
+            allow_orientation_lock: true,
         }
     }
 }
@@ -3216,6 +3224,7 @@ impl IframeSandboxPolicy {
             allow_pointer_lock: tokens.contains("allow-pointer-lock"),
             allow_forms: tokens.contains("allow-forms"),
             allow_top_navigation: tokens.contains("allow-top-navigation"),
+            allow_orientation_lock: tokens.contains("allow-orientation-lock"),
         }
     }
 
@@ -3413,6 +3422,7 @@ impl HostState {
             notification_permission: "default".to_string(),
             geolocation: geolocation::State::default(),
             gamepad: gamepad::State::default(),
+            screen_orientation: screen_orientation::State::default(),
             media_capture: media_capture::State::default(),
             media_source: media_source::State::default(),
             web_codecs: web_codecs::State::default(),
@@ -16654,6 +16664,7 @@ fn register_host_bindings(
     form_submission::register(context, &mut bindings)?;
     geolocation::register(context, &mut bindings)?;
     gamepad::register(context, &mut bindings)?;
+    screen_orientation::register(context, &mut bindings)?;
     media_capture::register(context, &mut bindings)?;
     media_source::register(context, &mut bindings)?;
     web_codecs::register(context, &mut bindings)?;

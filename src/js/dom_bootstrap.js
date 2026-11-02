@@ -27556,15 +27556,6 @@ let omoikaneUserActivationState;
   const nativeScreenMetrics = __omoikane_screen_metrics;
   const parseScreenMetrics = JSON.parse;
   const screenMetric = name => parseScreenMetrics(nativeScreenMetrics())[name];
-  globalThis.screen = Object.defineProperties({}, {
-    width: {enumerable: true, configurable: true, get() { return screenMetric('width'); }},
-    height: {enumerable: true, configurable: true, get() { return screenMetric('height'); }},
-    availWidth: {enumerable: true, configurable: true, get() { return screenMetric('width'); }},
-    availHeight: {enumerable: true, configurable: true, get() { return screenMetric('height'); }},
-    colorDepth: {enumerable: true, configurable: true, get() { return screenMetric('colorDepth'); }},
-    pixelDepth: {enumerable: true, configurable: true, get() { return screenMetric('pixelDepth'); }},
-  });
-
   // Origin-scoped Web Storage. The backing areas live in the browser host so
   // localStorage survives Runtime replacement and sessionStorage follows the
   // top-level browsing session. Wrappers remain document/window specific.
@@ -30572,6 +30563,111 @@ let omoikaneUserActivationState;
         event.eventPhase = 0;
       }
       return !event.defaultPrevented;
+    }
+  }
+
+  const screenToken = {};
+  const screenBrands = new WeakSet();
+  const screenOrientationState = new WeakMap();
+  const orientationLockTypes = new Set([
+    "any", "natural", "landscape", "portrait", "portrait-primary", "portrait-secondary",
+    "landscape-primary", "landscape-secondary",
+  ]);
+  function orientationResult(operation, request = "") {
+    const result = JSON.parse(String(__omoikane_screen_orientation(
+      operation, __omoikane_document_id, request,
+    )));
+    if (result.error) throw new DOMException(result.message || result.error, result.error);
+    return result.snapshot;
+  }
+  function updateOrientationObject(orientation, snapshot, dispatch) {
+    const state = screenOrientationState.get(orientation) || illegalInvocation();
+    const nextType = String(snapshot.orientationType);
+    const nextAngle = Number(snapshot.angle) >>> 0;
+    const changed = state.type !== nextType || state.angle !== nextAngle;
+    state.type = nextType;
+    state.angle = nextAngle;
+    if (changed && dispatch) orientation.dispatchEvent(new Event("change"));
+  }
+  class ScreenOrientation extends EventTarget {
+    constructor(token) {
+      if (token !== screenToken) throw new TypeError("Illegal constructor");
+      super();
+      screenOrientationState.set(this, { type: "landscape-primary", angle: 0, onchange: null });
+      updateOrientationObject(this, orientationResult("snapshot"), false);
+    }
+    get type() { return (screenOrientationState.get(this) || illegalInvocation()).type; }
+    get angle() { return (screenOrientationState.get(this) || illegalInvocation()).angle; }
+    get onchange() { return (screenOrientationState.get(this) || illegalInvocation()).onchange; }
+    set onchange(value) {
+      const state = screenOrientationState.get(this) || illegalInvocation();
+      if (state.onchange) this.removeEventListener("change", state.onchange);
+      state.onchange = typeof value === "function" ? value : null;
+      if (state.onchange) this.addEventListener("change", state.onchange);
+    }
+    lock(value) {
+      let request;
+      try {
+        if (arguments.length === 0) throw new TypeError("Orientation lock type is required");
+        request = String(value);
+        if (!orientationLockTypes.has(request)) throw new TypeError("Invalid orientation lock type");
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      let token;
+      try {
+        const prepared = String(__omoikane_screen_orientation("prepare", __omoikane_document_id, "", ""));
+        if (prepared.startsWith("{")) {
+          const result = JSON.parse(prepared);
+          throw new DOMException(result.message || result.error, result.error);
+        }
+        token = Number(prepared);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return Promise.resolve().then(() => {
+        const result = JSON.parse(String(__omoikane_screen_orientation(
+          "commit", __omoikane_document_id, token, request,
+        )));
+        if (result.error) throw new DOMException(result.message || result.error, result.error);
+        updateOrientationObject(this, result.snapshot, true);
+      });
+    }
+    unlock() {
+      updateOrientationObject(this, orientationResult("unlock"), true);
+    }
+    get [Symbol.toStringTag]() { return "ScreenOrientation"; }
+  }
+  const screenOrientation = new ScreenOrientation(screenToken);
+  class Screen {
+    constructor(token) {
+      if (token !== screenToken) throw new TypeError("Illegal constructor");
+      screenBrands.add(this);
+    }
+    __brand() { if (!screenBrands.has(this)) illegalInvocation(); }
+    get width() { this.__brand(); return screenMetric("width"); }
+    get height() { this.__brand(); return screenMetric("height"); }
+    get availWidth() { this.__brand(); return screenMetric("width"); }
+    get availHeight() { this.__brand(); return screenMetric("height"); }
+    get colorDepth() { this.__brand(); return screenMetric("colorDepth"); }
+    get pixelDepth() { this.__brand(); return screenMetric("pixelDepth"); }
+    get orientation() { this.__brand(); return screenOrientation; }
+    get [Symbol.toStringTag]() { return "Screen"; }
+  }
+  Object.defineProperty(ScreenOrientation, "length", { value: 0 });
+  Object.defineProperty(globalThis, "Screen", { configurable: true, enumerable: false, writable: true, value: Screen });
+  Object.defineProperty(globalThis, "ScreenOrientation", { configurable: true, enumerable: false, writable: true, value: ScreenOrientation });
+  Object.defineProperty(globalThis, "screen", { configurable: true, enumerable: true, value: new Screen(screenToken) });
+  globalThis.__omoikane_update_screen_orientation = snapshot => {
+    updateOrientationObject(screenOrientation, snapshot, true);
+  };
+  for (const [constructor, members] of [
+    [Screen, ["width", "height", "availWidth", "availHeight", "colorDepth", "pixelDepth", "orientation"]],
+    [ScreenOrientation, ["lock", "unlock", "type", "angle", "onchange"]],
+  ]) {
+    for (const member of members) {
+      const descriptor = Object.getOwnPropertyDescriptor(constructor.prototype, member);
+      Object.defineProperty(constructor.prototype, member, { ...descriptor, enumerable: true });
     }
   }
 
