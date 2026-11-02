@@ -391,6 +391,18 @@ pub(super) fn run_case_with_transport(
         &url,
     )
     .expect("create WPT runtime");
+    runtime.set_media_capture_devices(vec![
+        omoikane::js::MediaCaptureDevice::new(
+            omoikane::js::MediaDeviceKind::AudioInput,
+            "wpt-microphone",
+            "WPT synthetic microphone",
+        ),
+        omoikane::js::MediaCaptureDevice::new(
+            omoikane::js::MediaDeviceKind::VideoInput,
+            "wpt-camera",
+            "WPT synthetic camera",
+        ),
+    ]);
     // Yield to testharness and the host even when a page keeps queuing tasks.
     runtime.set_task_pump_limit(std::num::NonZeroUsize::new(128));
     runtime

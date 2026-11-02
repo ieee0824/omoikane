@@ -59,7 +59,7 @@ impl JsRuntime {
         Ok(())
     }
 
-    fn media_document_ids(&self) -> Vec<usize> {
+    pub(super) fn media_document_ids(&self) -> Vec<usize> {
         let state = self.host_state.borrow();
         let mut ids = Vec::new();
         collect_media_documents(&state, state.document.clone(), &mut ids);

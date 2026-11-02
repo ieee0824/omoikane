@@ -1,0 +1,7 @@
+{
+  "tests": [
+    { "path": "webaudio/the-audio-api/the-offlineaudiocontext-interface/current-time-block-size.html" },
+    { "path": "webaudio/the-audio-api/the-offlineaudiocontext-interface/offlineaudiocontext-incremental-rendering.html" },
+    { "path": "webaudio/the-audio-api/the-audioworklet-interface/baseaudiocontext-audioworklet.https.html" }
+  ]
+}

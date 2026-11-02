@@ -13,15 +13,23 @@ use std::collections::HashMap;
 pub(super) enum PolicyFeature {
     Fullscreen,
     Geolocation,
+    Gamepad,
+    ScreenWakeLock,
+    PublicKeyCredentialsCreate,
+    PublicKeyCredentialsGet,
     CrossOriginIsolated,
     StorageAccess,
     FocusWithoutUserActivation,
 }
 
 impl PolicyFeature {
-    pub(super) const ALL: [Self; 5] = [
+    pub(super) const ALL: [Self; 9] = [
         Self::Fullscreen,
         Self::Geolocation,
+        Self::Gamepad,
+        Self::ScreenWakeLock,
+        Self::PublicKeyCredentialsCreate,
+        Self::PublicKeyCredentialsGet,
         Self::CrossOriginIsolated,
         Self::StorageAccess,
         Self::FocusWithoutUserActivation,
@@ -31,6 +39,10 @@ impl PolicyFeature {
         match self {
             Self::Fullscreen => "fullscreen",
             Self::Geolocation => "geolocation",
+            Self::Gamepad => "gamepad",
+            Self::ScreenWakeLock => "screen-wake-lock",
+            Self::PublicKeyCredentialsCreate => "publickey-credentials-create",
+            Self::PublicKeyCredentialsGet => "publickey-credentials-get",
             Self::CrossOriginIsolated => "cross-origin-isolated",
             Self::StorageAccess => "storage-access",
             Self::FocusWithoutUserActivation => "focus-without-user-activation",

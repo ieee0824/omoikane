@@ -56,6 +56,12 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_canvas2d_contains;
   const nativeCanvasParseColor = globalThis.__omoikane_canvas_parse_color;
   delete globalThis.__omoikane_canvas_parse_color;
+  const nativeCanvasParseFilter = globalThis.__omoikane_canvas_parse_filter;
+  delete globalThis.__omoikane_canvas_parse_filter;
+  const nativeCanvasParseFont = globalThis.__omoikane_canvas_parse_font;
+  delete globalThis.__omoikane_canvas_parse_font;
+  const nativeCanvasText = globalThis.__omoikane_canvas2d_text;
+  delete globalThis.__omoikane_canvas2d_text;
   const nativeCanvasSvgPath = globalThis.__omoikane_canvas_svg_path;
   delete globalThis.__omoikane_canvas_svg_path;
   const nativeBeginFetch = globalThis.__omoikane_begin_fetch;
@@ -161,9 +167,12 @@ let omoikaneUserActivationState;
   const nativeClipboardEventWrite = globalThis.__omoikane_clipboard_event_write;
   const nativeClipboardPermission = globalThis.__omoikane_clipboard_permission;
   const nativeGeolocationPermission = globalThis.__omoikane_geolocation_permission;
+  const nativeMediaCaptureSnapshot = globalThis.__omoikane_media_capture_snapshot;
+  try { delete globalThis.__omoikane_media_capture_snapshot; } catch (_) {}
   const nativeIsSecureContext = globalThis.__omoikane_is_secure_context;
   const nativeCrossOriginIsolated = globalThis.__omoikane_cross_origin_isolated;
   const nativeStorageManager = globalThis.__omoikane_storage_manager;
+  const nativeOpfs = globalThis.__omoikane_opfs;
   const nativeCookieStoreAvailable = globalThis.__omoikane_cookie_store_available;
   const nativeCookieStoreQuery = globalThis.__omoikane_cookie_store_query;
   const nativeCookieStoreSubscriptions = globalThis.__omoikane_cookie_store_subscriptions;
@@ -181,6 +190,7 @@ let omoikaneUserActivationState;
   const nativeWorkletRegister = globalThis.__omoikane_worklet_register;
   const nativeWorkletRegisteredNames = globalThis.__omoikane_worklet_registered_names;
   const nativeWorkletModuleCount = globalThis.__omoikane_worklet_module_count;
+  const nativeWorkletProcess = globalThis.__omoikane_worklet_process;
   const nativeWorkletTeardown = globalThis.__omoikane_worklet_teardown;
   const nativeCryptoRandom = globalThis.__omoikane_crypto_random;
   const nativeCryptoDigest = globalThis.__omoikane_crypto_digest;
@@ -192,6 +202,20 @@ let omoikaneUserActivationState;
   const nativeCompressionWrite = globalThis.__omoikane_compression_write;
   const nativeCompressionFinish = globalThis.__omoikane_compression_finish;
   const nativeCompressionAbort = globalThis.__omoikane_compression_abort;
+  const nativeWasmValidate = globalThis.__omoikane_wasm_validate;
+  const nativeWasmCompile = globalThis.__omoikane_wasm_compile;
+  const nativeWasmModuleMetadata = globalThis.__omoikane_wasm_module_metadata;
+  const nativeWasmInstantiate = globalThis.__omoikane_wasm_instantiate;
+  const nativeWasmInstanceExports = globalThis.__omoikane_wasm_instance_exports;
+  const nativeWasmCall = globalThis.__omoikane_wasm_call;
+  const nativeWasmMemoryNew = globalThis.__omoikane_wasm_memory_new;
+  const nativeWasmMemoryBuffer = globalThis.__omoikane_wasm_memory_buffer;
+  const nativeWasmMemoryGrow = globalThis.__omoikane_wasm_memory_grow;
+  const nativeWasmGlobalNew = globalThis.__omoikane_wasm_global_new;
+  const nativeWasmGlobalValue = globalThis.__omoikane_wasm_global_value;
+  const nativeWasmExportHandle = globalThis.__omoikane_wasm_export_handle;
+  const nativeWasmTableNew = globalThis.__omoikane_wasm_table_new;
+  const nativeWasmTableOp = globalThis.__omoikane_wasm_table_op;
   const nativeArrayBufferInfo = globalThis.__omoikane_array_buffer_info;
   const nativeCloneArrayBuffer = globalThis.__omoikane_clone_array_buffer;
   const nativeTransferArrayBuffer = globalThis.__omoikane_transfer_array_buffer;
@@ -385,6 +409,8 @@ let omoikaneUserActivationState;
   const nativeSetAttributeNS = globalThis.__omoikane_set_attribute_ns;
   const nativeSetStyleComputationSource =
     globalThis.__omoikane_set_style_computation_source;
+  const nativeCloseStyleValueFunctions =
+    globalThis.__omoikane_close_style_value_functions;
   const nativeRemoveAttributeNS = globalThis.__omoikane_remove_attribute_ns;
   const nativeIframeContentDocument = globalThis.__omoikane_iframe_content_document;
   const nativeWindowNamedSnapshot = globalThis.__omoikane_window_named_snapshot;
@@ -458,6 +484,7 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_worklet_register;
   delete globalThis.__omoikane_worklet_registered_names;
   delete globalThis.__omoikane_worklet_module_count;
+  delete globalThis.__omoikane_worklet_process;
   delete globalThis.__omoikane_worklet_teardown;
   delete globalThis.__omoikane_crypto_random;
   delete globalThis.__omoikane_crypto_digest;
@@ -484,6 +511,7 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_serialize_xml;
   delete globalThis.__omoikane_set_attribute_ns;
   delete globalThis.__omoikane_set_style_computation_source;
+  delete globalThis.__omoikane_close_style_value_functions;
   delete globalThis.__omoikane_remove_attribute_ns;
   delete globalThis.__omoikane_iframe_content_document;
   delete globalThis.__omoikane_iframe_global;
@@ -1162,6 +1190,7 @@ let omoikaneUserActivationState;
     /(?:^|[^\w-])(?:calc|min|max|clamp|round|mod|rem|hypot|abs|sign|sin|cos|tan|asin|acos|atan|atan2|pow|sqrt|log|exp)\s*\(/i;
   const needsStyleValueNormalization = (name, value) =>
     name === "transition" || name.startsWith("transition-") ||
+    name === "animation-composition" ||
     name === "hyphenate-character" ||
     name === "initial-letter" || name === "text-box-edge" ||
     logicalBoxStyleProperties.has(name) ||
@@ -1171,6 +1200,11 @@ let omoikaneUserActivationState;
     validatesSpecialStyleProperties.has(name) ||
     (!name.startsWith("--") && numericMathFunctionPattern.test(value)) ||
     (!name.startsWith("--") && /sibling-(?:index|count)\s*\(/i.test(value));
+  // A component value may end with implicitly closed parentheses. Complete it
+  // before adding a declaration's semicolon, preserving unquantized color tokens.
+  const styleComputationValue = value =>
+    safeApply(safeRegExpExec, /\(/, [value]) !== null
+      ? nativeCloseStyleValueFunctions(value) : value;
   const styleShorthandLonghands = Object.freeze({
     "margin-block": ["margin-block-start", "margin-block-end"],
     "margin-inline": ["margin-inline-start", "margin-inline-end"],
@@ -4405,7 +4439,9 @@ let omoikaneUserActivationState;
       const normalizeDecls = (declarations) => {
         const normalized = [];
         for (const declaration of declarations) {
-          const computationValue = declaration.computationValue || declaration.value;
+          const computationValue = styleComputationValue(
+            declaration.computationValue || declaration.value
+          );
           if (needsStyleValueNormalization(declaration.name, declaration.value)) {
             const value = __omoikane_normalize_style_value(
               declaration.name, declaration.value
@@ -4525,7 +4561,7 @@ let omoikaneUserActivationState;
       // retains remove/append precedence for logical and shorthand groups.
       const setValue = (kebab, value, priority) => {
         value = String(value);
-        const computationValue = value;
+        const computationValue = styleComputationValue(value);
         if (needsStyleValueNormalization(kebab, value)) {
           const normalized = __omoikane_normalize_style_value(kebab, value);
           if (normalized === null) return;
@@ -14066,6 +14102,11 @@ let omoikaneUserActivationState;
       if (!source) {
         return;
       }
+      const mediaSource = mediaSourceObjectUrls.get(String(source));
+      if (mediaSource) {
+        attachMediaSource(mediaSource, this, loadId);
+        return;
+      }
       const sourceType = mediaTypeFromSource(source);
       if (/^data:/i.test(source)) {
         queueMediaTask(() => this.__mediaReady(loadId, sourceType));
@@ -14105,6 +14146,8 @@ let omoikaneUserActivationState;
 
     __mediaLoad() {
       const loadId = ++this.__mediaLoadId;
+      const previousMediaSource = this.__attachedMediaSource;
+      if (previousMediaSource) detachMediaSource(previousMediaSource, this);
       this.__mediaCancelPlayback();
       this.__mediaRejectWaiters(new DOMException("The play() request was interrupted.", "AbortError"));
       this.__mediaCurrentSrc = this.src;
@@ -18570,6 +18613,15 @@ let omoikaneUserActivationState;
     set src(value) {
       this.setAttribute("src", String(value));
     }
+    get crossOrigin() {
+      const value = this.getAttribute("crossorigin");
+      if (value === null) return null;
+      return value.toLowerCase() === "use-credentials" ? "use-credentials" : "anonymous";
+    }
+    set crossOrigin(value) {
+      if (value === null) this.removeAttribute("crossorigin");
+      else this.setAttribute("crossorigin", intrinsicString(value));
+    }
     get height() {
       const attr = this.getAttribute("height");
       if (attr !== null && attr !== "") return Math.max(0, Number.parseInt(attr, 10) || 0);
@@ -18586,17 +18638,36 @@ let omoikaneUserActivationState;
     set width(value) { this.setAttribute("width", String(Math.max(0, Number(value) || 0))); }
   }
 
+  /// An `[EnforceRange] unsigned long` argument.
+  function enforceUnsignedLong(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || Math.trunc(number) < 0 || Math.trunc(number) > 0xffffffff)
+      throw new TypeError("Value is outside the 'unsigned long' range");
+    return Math.trunc(number);
+  }
   class ImageData {
-    constructor(dataOrWidth, widthOrHeight, height) {
-      if (typeof dataOrWidth === "number") {
-        this.width = Math.max(0, Math.trunc(dataOrWidth));
-        this.height = Math.max(0, Math.trunc(widthOrHeight));
-        this.data = new Uint8ClampedArray(this.width * this.height * 4);
+    /// `new ImageData(sw, sh)` allocates transparent black pixels;
+    /// `new ImageData(data, sw, sh?)` wraps `data` itself (HTML §4.12.5.1.15).
+    constructor(dataOrWidth, widthOrHeight, height = undefined) {
+      if (arguments.length < 2) throw new TypeError("ImageData requires at least 2 arguments");
+      const size = () => new DOMException("The source width or height is zero or inconsistent", "IndexSizeError");
+      if (dataOrWidth instanceof Uint8ClampedArray) {
+        const data = dataOrWidth, width = enforceUnsignedLong(widthOrHeight);
+        if (data.length === 0 || data.length % 4 !== 0)
+          throw new DOMException("The data length is not a nonzero multiple of 4", "InvalidStateError");
+        const pixels = data.length / 4;
+        if (width === 0 || pixels % width !== 0) throw size();
+        const rows = pixels / width;
+        if (height !== undefined && enforceUnsignedLong(height) !== rows) throw size();
+        this.width = width;
+        this.height = rows;
+        this.data = data;
       } else {
-        this.data = new Uint8ClampedArray(dataOrWidth);
-        this.width = Math.max(0, Math.trunc(widthOrHeight));
-        this.height = height === undefined ? this.data.length / 4 / this.width : Math.max(0, Math.trunc(height));
-        if (this.data.length !== this.width * this.height * 4) throw new DOMException("Invalid ImageData dimensions", "IndexSizeError");
+        const width = enforceUnsignedLong(dataOrWidth), rows = enforceUnsignedLong(widthOrHeight);
+        if (width === 0 || rows === 0) throw size();
+        this.width = width;
+        this.height = rows;
+        this.data = new Uint8ClampedArray(width * rows * 4);
       }
     }
   }
@@ -18613,7 +18684,7 @@ let omoikaneUserActivationState;
   }
   function initialCanvasState(canvas) {
     const [width,height]=canvasDimensions(canvas);
-    return { width,height,pixels:new Uint8ClampedArray(width*height*4), context:null, webgl:null, contextMode:null,
+    return { width,height,pixels:new Uint8ClampedArray(width*height*4), originClean:true, context:null, webgl:null, contextMode:null,
       style:defaultCanvasStyle(), stack:[], path:newCanvasPath() };
   }
   function canvasState(canvas) {
@@ -18625,13 +18696,36 @@ let omoikaneUserActivationState;
         state.contextMode = previous.contextMode;
         state.context = previous.context;
         state.webgl = previous.webgl;
+        state.offscreen = previous.offscreen;
       }
       canvasStates.set(canvas,state); commitCanvas(canvas,state);
     }
     return state;
   }
+  /// Shows a canvas's pixels: an OffscreenCanvas from
+  /// `transferControlToOffscreen()` paints into its placeholder element.
   function commitCanvas(canvas,state){
-    if (canvas.__id != null) __omoikane_canvas_commit(canvas.__id,state.width,state.height,new Uint8Array(state.pixels.buffer));
+    const target = canvas.__placeholder || canvas;
+    if (target.__id != null) __omoikane_canvas_commit(target.__id,state.width,state.height,new Uint8Array(state.pixels.buffer));
+  }
+  /// CanvasRenderingContext2DSettings, converted in dictionary member order.
+  function canvas2dSettings(options) {
+    if (options !== undefined && options !== null && typeof options !== "object" && typeof options !== "function")
+      throw new TypeError("The context options are not an object");
+    const read = name => options == null ? undefined : options[name];
+    const enumeration = (value, allowed, fallback, name) => {
+      if (value === undefined) return fallback;
+      const text = String(value);
+      if (!allowed.includes(text)) throw new TypeError("Invalid " + name + " '" + text + "'");
+      return text;
+    };
+    const alpha = read("alpha");
+    const colorSpace = enumeration(read("colorSpace"), ["srgb", "display-p3"], "srgb", "colorSpace");
+    const colorType = enumeration(read("colorType"), ["unorm8", "float16"], "unorm8", "colorType");
+    const desynchronized = read("desynchronized");
+    const willReadFrequently = read("willReadFrequently");
+    return { alpha: alpha === undefined ? true : !!alpha, colorSpace, colorType,
+      desynchronized: !!desynchronized, willReadFrequently: !!willReadFrequently };
   }
 
   // Canvas 2D (HTML §4.12.5.1). Script keeps the drawing state and builds
@@ -18979,6 +19073,7 @@ let omoikaneUserActivationState;
     constructor(token, image, repetition) {
       if (token !== canvasConstructionToken) throw new TypeError("Illegal constructor");
       Object.defineProperty(this, "__image", { value: image });
+      Object.defineProperty(this, "__originClean", { value: image.originClean });
       Object.defineProperty(this, "__repetition", { value: repetition });
       Object.defineProperty(this, "__transform", { value: canvasIdentity.slice(), writable: true });
     }
@@ -18994,13 +19089,13 @@ let omoikaneUserActivationState;
   function canvasImagePixels(source) {
     const isHtmlCanvas = typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement;
     if (isHtmlCanvas || source instanceof OffscreenCanvas) {
-      const state = canvasState(source);
+      const own = canvasState(source), state = own.offscreen ? canvasState(own.offscreen) : own;
       if (!state.width || !state.height) throw new DOMException("The source canvas is empty.", "InvalidStateError");
       return state;
     }
     if (source instanceof ImageBitmap) {
       if (source.__detached) throw new DOMException("The ImageBitmap is detached", "InvalidStateError");
-      return { width: source.width, height: source.height, pixels: source.__pixels };
+      return { width: source.width, height: source.height, pixels: source.__pixels, originClean: source.__originClean };
     }
     const isImage = typeof HTMLImageElement !== "undefined" && source instanceof HTMLImageElement;
     const isSvgImage = typeof SVGImageElement !== "undefined" && source instanceof SVGImageElement;
@@ -19015,7 +19110,20 @@ let omoikaneUserActivationState;
       throw new DOMException("Image source is unavailable", "InvalidStateError");
     }
     const decoded = JSON.parse(raw);
-    return { width: decoded.width, height: decoded.height, pixels: bytesFromBase64(decoded.pixels) };
+    return { width: decoded.width, height: decoded.height, pixels: bytesFromBase64(decoded.pixels),
+      originClean: canvasElementSourceOriginClean(source) };
+  }
+  function canvasElementSourceOriginClean(source) {
+    const raw = source && (source.getAttribute("src") || source.getAttribute("href"));
+    if (!raw || /^(?:data|blob):/i.test(raw)) return true;
+    try {
+      const sourceUrl = new URL(__omoikane_resolve_url(raw));
+      const documentUrl = new URL(source.ownerDocument && source.ownerDocument.URL || globalThis.location.href);
+      if (sourceUrl.origin === documentUrl.origin) return true;
+      return source instanceof HTMLImageElement && source.crossOrigin !== null;
+    } catch (_) {
+      return false;
+    }
   }
   function canvasBytes(pixels) { return new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength); }
   function canvasPaintSpec(style) {
@@ -19028,9 +19136,14 @@ let omoikaneUserActivationState;
   /// Runs one native drawing command on `context`'s bitmap.
   function canvasDraw(context, kind, paths, options = {}) {
     const state = context.__s, style = state.style;
+    const paintStyle = kind === "stroke" ? style.strokeStyle : style.fillStyle;
+    if (kind !== "clear" && paintStyle instanceof CanvasPattern && !paintStyle.__originClean) {
+      state.originClean = false;
+    }
     const command = { kind, paths, rule: options.rule || "nonzero", transform: style.transform,
       alpha: style.globalAlpha, composite: style.globalCompositeOperation, clip: style.clip,
       smoothing: style.imageSmoothingEnabled };
+    if (style.filter !== "none") command.filter = style.filter;
     let texture = options.texture;
     if (kind !== "clear") {
       if (options.paint) command.paint = options.paint;
@@ -19064,6 +19177,95 @@ let omoikaneUserActivationState;
     }
     return [context.__s.path.subpaths, args];
   }
+  /// The computed font size of the root element of a canvas element's
+  /// document (connected or not), which `rem` refers to; 16 without one.
+  function canvasRootFontSize(canvas) {
+    try {
+      const root = canvas && canvas.nodeType === 1 && canvas.ownerDocument && canvas.ownerDocument.documentElement;
+      if (root && root.isConnected) return parseFloat(getComputedStyle(root).fontSize) || 16;
+    } catch (_) {}
+    return 16;
+  }
+  /// Parses a `font` value relative to the canvas's computed font size. The
+  /// result records the root font size so spacing resolves `rem` alike.
+  function canvasParseFont(value, canvas) {
+    let parentSize = 10;
+    try {
+      if (canvas && canvas.isConnected) parentSize = parseFloat(getComputedStyle(canvas).fontSize) || 10;
+    } catch (_) {}
+    const rootSize = canvasRootFontSize(canvas);
+    const context = { parentSize, rootSize, viewport: [globalThis.innerWidth || 0, globalThis.innerHeight || 0] };
+    const json = nativeCanvasParseFont(String(value), JSON.stringify(context));
+    if (!json) return null;
+    const font = JSON.parse(json);
+    font.rootSize = rootSize;
+    return font;
+  }
+  function canvasFont(context) {
+    const style = context.__s.style;
+    if (!style.fontData) style.fontData = canvasParseFont(style.font, context.canvas) || canvasParseFont("10px sans-serif", null);
+    return style.fontData;
+  }
+  function canvasIsRtl(context) {
+    const direction = context.__s.style.direction;
+    if (direction !== "inherit") return direction === "rtl";
+    try {
+      return !!(context.canvas && context.canvas.isConnected && getComputedStyle(context.canvas).direction === "rtl");
+    } catch (_) { return false; }
+  }
+  /// A letterSpacing/wordSpacing value in pixels for a font of `size` and a
+  /// root font size of `rootSize`.
+  function canvasSpacing(value, size, rootSize) {
+    const match = /^(-?[\d.]+)([a-z]*)$/.exec(value);
+    if (!match) return 0;
+    const units = { px: 1, "": 1, em: size, rem: rootSize, ex: size / 2, ch: size / 2, pt: 96 / 72, pc: 16, in: 96,
+      cm: 96 / 2.54, mm: 96 / 25.4, q: 96 / 101.6, vw: (globalThis.innerWidth || 0) / 100,
+      vh: (globalThis.innerHeight || 0) / 100 };
+    units.vmin = Math.min(units.vw, units.vh); units.vmax = Math.max(units.vw, units.vh);
+    return parseFloat(match[1]) * (units[match[2]] ?? 0);
+  }
+  /// Lays out `text` from the start of its alphabetic baseline, y down.
+  /// Without any usable font, a box of 0.6em advances stands in for glyphs.
+  function canvasTextLayout(context, text) {
+    const style = context.__s.style, font = canvasFont(context);
+    text = String(text);
+    const request = { text, size: font.size, family: font.family, style: font.style, weight: font.weight,
+      stretch: font.stretch, letterSpacing: canvasSpacing(style.letterSpacing, font.size, font.rootSize),
+      wordSpacing: canvasSpacing(style.wordSpacing, font.size, font.rootSize), rtl: canvasIsRtl(context),
+      caps: style.fontVariantCaps !== "normal" ? style.fontVariantCaps : font.variant,
+      kerning: style.fontKerning !== "none" };
+    const canvas = context.canvas, id = canvas && canvas.nodeType === 1 ? internalNodeId(canvas) : null;
+    const json = nativeCanvasText(id ?? null, JSON.stringify(request));
+    if (json) return JSON.parse(json);
+    const size = font.size, width = [...text].length * size * .6;
+    return { width, contours: width ? [[[0, -size * .8], [width, -size * .8], [width, size * .2], [0, size * .2]]] : [],
+      ink: width ? [0, -size * .8, width, size * .2] : null, fontAscent: size * .8, fontDescent: size * .2,
+      emAscent: size * .8, emDescent: size * .2, hanging: size * .64, ideographic: -size * .2 };
+  }
+  /// The x offset of the text start from the anchor for textAlign, and how
+  /// far the textBaseline line sits above the alphabetic baseline.
+  function canvasTextPlacement(context, layout) {
+    const style = context.__s.style, rtl = canvasIsRtl(context);
+    const align = style.textAlign === "start" ? (rtl ? "right" : "left")
+      : style.textAlign === "end" ? (rtl ? "left" : "right") : style.textAlign;
+    const offset = align === "right" ? -layout.width : align === "center" ? -layout.width / 2 : 0;
+    const baseline = { top: layout.emAscent, hanging: layout.hanging, middle: (layout.emAscent - layout.emDescent) / 2,
+      alphabetic: 0, ideographic: layout.ideographic, bottom: -layout.emDescent }[style.textBaseline];
+    return [offset, baseline];
+  }
+  function canvasDrawText(context, kind, text, x, y, maxWidth) {
+    if (!canvasFinite(x, y) || (maxWidth !== undefined && !(maxWidth > 0))) return;
+    const layout = canvasTextLayout(context, text);
+    if (!layout.contours.length) return;
+    const [offset, baseline] = canvasTextPlacement(context, layout);
+    const scale = maxWidth !== undefined && layout.width > maxWidth ? maxWidth / layout.width : 1;
+    const m = context.__s.style.transform;
+    const paths = layout.contours.map(contour => ({
+      points: contour.map(([px, py]) => applyCanvasMatrix(m, x + (offset + px) * scale, y + baseline + py)),
+      closed: true,
+    }));
+    canvasDraw(context, kind, paths);
+  }
   function canvasRectPath(context, x, y, w, h) {
     const path = newCanvasPath();
     canvasPathRect(path, context.__s.style.transform, x, y, w, h);
@@ -19071,15 +19273,18 @@ let omoikaneUserActivationState;
   }
 
   class CanvasRenderingContext2D {
-    constructor(canvas, options = undefined) {
+    constructor(token, canvas, settings) {
+      if (token !== canvasConstructionToken) throw new TypeError("Illegal constructor");
       Object.defineProperty(this, "__canvas", { value: canvas });
+      Object.defineProperty(this, "__settings", { value: settings });
     }
     get canvas() { return this.__canvas; }
     get __s() { return canvasState(this.__canvas); }
     get __path() { return this.__s.path; }
     get __matrix() { return this.__s.style.transform; }
     getContextAttributes() {
-      return { alpha: true, colorSpace: "srgb", desynchronized: false, willReadFrequently: false, colorType: "unorm8" };
+      const { alpha, colorSpace, colorType, desynchronized, willReadFrequently } = this.__settings;
+      return { alpha, colorSpace, colorType, desynchronized, willReadFrequently };
     }
     isContextLost() { return false; }
     save() { const s = this.__s; s.stack.push(copyCanvasStyle(s.style)); }
@@ -19087,6 +19292,7 @@ let omoikaneUserActivationState;
     reset() {
       const s = this.__s;
       s.pixels.fill(0);
+      s.originClean = true;
       s.style = defaultCanvasStyle();
       s.stack = [];
       s.path = newCanvasPath();
@@ -19131,7 +19337,7 @@ let omoikaneUserActivationState;
         throw new DOMException("The provided repetition '" + value + "' is not valid.", "SyntaxError");
       }
       if (!source) return null;
-      const snapshot = { width: source.width, height: source.height, pixels: source.pixels.slice() };
+      const snapshot = { width: source.width, height: source.height, pixels: source.pixels.slice(), originClean: source.originClean };
       return new CanvasPattern(canvasConstructionToken, snapshot, mode);
     }
     setLineDash(segments) {
@@ -19190,6 +19396,7 @@ let omoikaneUserActivationState;
       return new ImageData(Math.abs(width), Math.abs(height));
     }
     getImageData(sx, sy, sw, sh) {
+      if (!this.__s.originClean) throw new DOMException("The canvas is not origin-clean.", "SecurityError");
       let [x, y, width, height] = [sx, sy, sw, sh].map(value => Math.trunc(Number(value)) || 0);
       if (!width || !height) throw new DOMException("The source width or height is 0.", "IndexSizeError");
       if (width < 0) { x += width; width = -width; }
@@ -19241,6 +19448,7 @@ let omoikaneUserActivationState;
       const left = Math.max(sx, 0), top = Math.max(sy, 0);
       const right = Math.min(sx + sw, source.width), bottom = Math.min(sy + sh, source.height);
       if (left >= right || top >= bottom) return;
+      if (!source.originClean) this.__s.originClean = false;
       dx += (left - sx) * scaleX; dy += (top - sy) * scaleY;
       dw = (right - left) * scaleX; dh = (bottom - top) * scaleY;
       [sx, sy, sw, sh] = [left, top, right - left, bottom - top];
@@ -19259,24 +19467,24 @@ let omoikaneUserActivationState;
       });
     }
     measureText(text) {
-      const size = parseFloat(this.__s.style.font) || 10;
-      const width = String(text).length * size * .6;
-      return domInterfaces.makeTextMetrics({ width, actualBoundingBoxLeft: 0, actualBoundingBoxRight: width,
-        actualBoundingBoxAscent: size * .8, actualBoundingBoxDescent: size * .2 });
+      const layout = canvasTextLayout(this, text);
+      const [offset, baseline] = canvasTextPlacement(this, layout);
+      const ink = layout.ink || [0, 0, 0, 0];
+      return domInterfaces.makeTextMetrics({
+        width: layout.width,
+        actualBoundingBoxLeft: -(offset + ink[0]), actualBoundingBoxRight: offset + ink[2],
+        actualBoundingBoxAscent: -(ink[1] + baseline), actualBoundingBoxDescent: ink[3] + baseline,
+        fontBoundingBoxAscent: layout.fontAscent - baseline, fontBoundingBoxDescent: layout.fontDescent + baseline,
+        emHeightAscent: layout.emAscent - baseline, emHeightDescent: layout.emDescent + baseline,
+        hangingBaseline: layout.hanging - baseline, alphabeticBaseline: -baseline,
+        ideographicBaseline: layout.ideographic - baseline,
+      });
     }
-    __textBox(text, x, y) {
-      const style = this.__s.style, size = parseFloat(style.font) || 10, width = this.measureText(text).width;
-      const rtl = style.direction === "rtl";
-      const align = style.textAlign === "start" ? (rtl ? "right" : "left") : style.textAlign === "end" ? (rtl ? "left" : "right") : style.textAlign;
-      const left = align === "right" ? x - width : align === "center" ? x - width / 2 : x;
-      const baseline = { top: 0, hanging: size * .2, middle: size * .5, alphabetic: size * .8, ideographic: size, bottom: size }[style.textBaseline];
-      return [left, y - baseline, width, size];
+    fillText(text, x, y, maxWidth = undefined) {
+      canvasDrawText(this, "fill", text, +x, +y, arguments.length > 3 ? +maxWidth : undefined);
     }
-    fillText(text, x, y) {
-      if (canvasFinite(+x, +y)) canvasDraw(this, "fill", canvasRectPath(this, ...this.__textBox(text, +x, +y)));
-    }
-    strokeText(text, x, y) {
-      if (canvasFinite(+x, +y)) canvasDraw(this, "stroke", canvasRectPath(this, ...this.__textBox(text, +x, +y)));
+    strokeText(text, x, y, maxWidth = undefined) {
+      canvasDrawText(this, "stroke", text, +x, +y, arguments.length > 3 ? +maxWidth : undefined);
     }
     get [Symbol.toStringTag]() { return "CanvasRenderingContext2D"; }
   }
@@ -19312,8 +19520,17 @@ let omoikaneUserActivationState;
   defineCanvasAttribute("globalCompositeOperation", value => value,
     value => canvasCompositeOperations.has(String(value)) ? String(value) : undefined);
   defineCanvasAttribute("imageSmoothingEnabled", value => value, value => !!value);
-  defineCanvasAttribute("font", value => value, value => String(value).trim() || undefined);
-  defineCanvasAttribute("filter", value => value, value => String(value).trim() || undefined);
+  defineCanvasAttribute("font", value => value, (value, context) => {
+    const font = canvasParseFont(value, context.canvas);
+    if (!font) return undefined;
+    context.__s.style.fontData = font;
+    return font.serialized;
+  });
+  // Valid values are kept as written; CSS-wide keywords and invalid lists are ignored.
+  defineCanvasAttribute("filter", value => value, value => {
+    const text = String(value);
+    return nativeCanvasParseFilter(text) ? text : undefined;
+  });
   for (const name of ["letterSpacing", "wordSpacing"]) {
     defineCanvasAttribute(name, value => value, value => {
       const text = String(value).trim().toLowerCase();
@@ -19334,7 +19551,7 @@ let omoikaneUserActivationState;
 
   const webglContextConstructionToken = {};
   const webglResourceConstructionToken = {};
-  class WebGLResource {
+  class WebGLObject {
     constructor(context, kind, token) {
       if (token !== webglResourceConstructionToken) throw new TypeError("Illegal constructor");
       this.__context = context;
@@ -19343,10 +19560,10 @@ let omoikaneUserActivationState;
     }
     get [Symbol.toStringTag]() { return this.__kind; }
   }
-  class WebGLBuffer extends WebGLResource {
+  class WebGLBuffer extends WebGLObject {
     constructor(context, token) { super(context, "WebGLBuffer", token); this.__size = 0; this.__usage = 0; }
   }
-  class WebGLShader extends WebGLResource {
+  class WebGLShader extends WebGLObject {
     constructor(context, type, token) {
       super(context, "WebGLShader", token);
       this.__type = type;
@@ -19355,7 +19572,7 @@ let omoikaneUserActivationState;
       this.__infoLog = "";
     }
   }
-  class WebGLProgram extends WebGLResource {
+  class WebGLProgram extends WebGLObject {
     constructor(context, token) {
       super(context, "WebGLProgram", token);
       this.__shaders = [];
@@ -19364,6 +19581,21 @@ let omoikaneUserActivationState;
       this.__attributes = new Map();
       this.__uniforms = new Map();
     }
+  }
+  class WebGLQuery extends WebGLObject {
+    constructor(context, token) { super(context, "WebGLQuery", token); this.__target = null; this.__result = 0; this.__available = false; }
+  }
+  class WebGLSampler extends WebGLObject {
+    constructor(context, token) { super(context, "WebGLSampler", token); this.__parameters = new Map(); }
+  }
+  class WebGLSync extends WebGLObject {
+    constructor(context, token) { super(context, "WebGLSync", token); this.__signaled = true; }
+  }
+  class WebGLTransformFeedback extends WebGLObject {
+    constructor(context, token) { super(context, "WebGLTransformFeedback", token); this.__active = false; this.__paused = false; }
+  }
+  class WebGLVertexArrayObject extends WebGLObject {
+    constructor(context, token) { super(context, "WebGLVertexArrayObject", token); }
   }
   class WebGLUniformLocation {
     constructor(program, name, token) {
@@ -19431,6 +19663,115 @@ let omoikaneUserActivationState;
     RENDERER: 0x1F01, VENDOR: 0x1F00, VERSION: 0x1F02,
     SHADING_LANGUAGE_VERSION: 0x8B8C,
   };
+  const WEBGL2_CONSTANTS = {
+    READ_BUFFER: 0x0C02, COLOR: 0x1800, DEPTH: 0x1801, STENCIL: 0x1802, DEPTH_STENCIL: 0x84F9,
+    QUERY_RESULT: 0x8866, QUERY_RESULT_AVAILABLE: 0x8867, CURRENT_QUERY: 0x8865,
+    ANY_SAMPLES_PASSED: 0x8C2F, ANY_SAMPLES_PASSED_CONSERVATIVE: 0x8D6A,
+    TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN: 0x8C88,
+    SAMPLER_BINDING: 0x8919, TEXTURE_MIN_FILTER: 0x2801, TEXTURE_MAG_FILTER: 0x2800,
+    TEXTURE_WRAP_S: 0x2802, TEXTURE_WRAP_T: 0x2803, TEXTURE_WRAP_R: 0x8072,
+    NEAREST: 0x2600, LINEAR: 0x2601, REPEAT: 0x2901, CLAMP_TO_EDGE: 0x812F,
+    MIRRORED_REPEAT: 0x8370, TEXTURE_MIN_LOD: 0x813A, TEXTURE_MAX_LOD: 0x813B,
+    TEXTURE_COMPARE_MODE: 0x884C, TEXTURE_COMPARE_FUNC: 0x884D,
+    VERTEX_ARRAY_BINDING: 0x85B5, TRANSFORM_FEEDBACK: 0x8E22,
+    TRANSFORM_FEEDBACK_BINDING: 0x8E25, TRANSFORM_FEEDBACK_ACTIVE: 0x8E24,
+    TRANSFORM_FEEDBACK_PAUSED: 0x8E23, RASTERIZER_DISCARD: 0x8C89,
+    SYNC_GPU_COMMANDS_COMPLETE: 0x9117, SYNC_STATUS: 0x9114,
+    SYNC_CONDITION: 0x9113, SYNC_FLAGS: 0x9115, OBJECT_TYPE: 0x9112,
+    SIGNALED: 0x9119, UNSIGNALED: 0x9118, SYNC_FENCE: 0x9116,
+    ALREADY_SIGNALED: 0x911A, TIMEOUT_EXPIRED: 0x911B,
+    CONDITION_SATISFIED: 0x911C, WAIT_FAILED: 0x911D,
+    SYNC_FLUSH_COMMANDS_BIT: 1, TIMEOUT_IGNORED: -1,
+    MAX_CLIENT_WAIT_TIMEOUT_WEBGL: 0x9247, MAX_SERVER_WAIT_TIMEOUT: 0x9111,
+    MAX_DRAW_BUFFERS: 0x8824, MAX_COLOR_ATTACHMENTS: 0x8CDF,
+    MAX_3D_TEXTURE_SIZE: 0x8073, MAX_ARRAY_TEXTURE_LAYERS: 0x88FF,
+    MAX_SAMPLES: 0x8D57, MAX_ELEMENT_INDEX: 0x8D6B,
+    DRAW_FRAMEBUFFER: 0x8CA9, READ_FRAMEBUFFER: 0x8CA8,
+  };
+  Object.assign(WEBGL2_CONSTANTS, {
+    UNPACK_ROW_LENGTH:0x0CF2, UNPACK_SKIP_ROWS:0x0CF3, UNPACK_SKIP_PIXELS:0x0CF4,
+    PACK_ROW_LENGTH:0x0D02, PACK_SKIP_ROWS:0x0D03, PACK_SKIP_PIXELS:0x0D04,
+    RED:0x1903, RGB8:0x8051, RGB10_A2:0x8059, TEXTURE_BINDING_3D:0x806A,
+    UNPACK_SKIP_IMAGES:0x806D, UNPACK_IMAGE_HEIGHT:0x806E, TEXTURE_3D:0x806F,
+    UNSIGNED_INT_2_10_10_10_REV:0x8368, MAX_ELEMENTS_VERTICES:0x80E8, MAX_ELEMENTS_INDICES:0x80E9,
+    TEXTURE_BASE_LEVEL:0x813C, TEXTURE_MAX_LEVEL:0x813D, MIN:0x8007, MAX:0x8008,
+    DEPTH_COMPONENT24:0x81A6, MAX_TEXTURE_LOD_BIAS:0x84FD, COMPARE_REF_TO_TEXTURE:0x884E,
+    STREAM_READ:0x88E1, STREAM_COPY:0x88E2, STATIC_READ:0x88E5, STATIC_COPY:0x88E6,
+    DYNAMIC_READ:0x88E9, DYNAMIC_COPY:0x88EA,
+    DRAW_BUFFER0:0x8825, DRAW_BUFFER1:0x8826, DRAW_BUFFER2:0x8827, DRAW_BUFFER3:0x8828,
+    DRAW_BUFFER4:0x8829, DRAW_BUFFER5:0x882A, DRAW_BUFFER6:0x882B, DRAW_BUFFER7:0x882C,
+    DRAW_BUFFER8:0x882D, DRAW_BUFFER9:0x882E, DRAW_BUFFER10:0x882F, DRAW_BUFFER11:0x8830,
+    DRAW_BUFFER12:0x8831, DRAW_BUFFER13:0x8832, DRAW_BUFFER14:0x8833, DRAW_BUFFER15:0x8834,
+    MAX_FRAGMENT_UNIFORM_COMPONENTS:0x8B49, MAX_VERTEX_UNIFORM_COMPONENTS:0x8B4A,
+    SAMPLER_3D:0x8B5F, SAMPLER_2D_SHADOW:0x8B62, FRAGMENT_SHADER_DERIVATIVE_HINT:0x8B8B,
+    PIXEL_PACK_BUFFER:0x88EB, PIXEL_UNPACK_BUFFER:0x88EC,
+    PIXEL_PACK_BUFFER_BINDING:0x88ED, PIXEL_UNPACK_BUFFER_BINDING:0x88EF,
+    FLOAT_MAT2x3:0x8B65, FLOAT_MAT2x4:0x8B66, FLOAT_MAT3x2:0x8B67,
+    FLOAT_MAT3x4:0x8B68, FLOAT_MAT4x2:0x8B69, FLOAT_MAT4x3:0x8B6A,
+    SRGB:0x8C40, SRGB8:0x8C41, SRGB8_ALPHA8:0x8C43,
+    RGBA32F:0x8814, RGB32F:0x8815, RGBA16F:0x881A, RGB16F:0x881B,
+    VERTEX_ATTRIB_ARRAY_INTEGER:0x88FD, MIN_PROGRAM_TEXEL_OFFSET:0x8904,
+    MAX_PROGRAM_TEXEL_OFFSET:0x8905, MAX_VARYING_COMPONENTS:0x8B4B,
+    TEXTURE_2D_ARRAY:0x8C1A, TEXTURE_BINDING_2D_ARRAY:0x8C1D,
+    R11F_G11F_B10F:0x8C3A, UNSIGNED_INT_10F_11F_11F_REV:0x8C3B,
+    RGB9_E5:0x8C3D, UNSIGNED_INT_5_9_9_9_REV:0x8C3E,
+    TRANSFORM_FEEDBACK_BUFFER_MODE:0x8C7F, MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS:0x8C80,
+    TRANSFORM_FEEDBACK_VARYINGS:0x8C83, TRANSFORM_FEEDBACK_BUFFER_START:0x8C84,
+    TRANSFORM_FEEDBACK_BUFFER_SIZE:0x8C85, MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS:0x8C8A,
+    MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS:0x8C8B, INTERLEAVED_ATTRIBS:0x8C8C,
+    SEPARATE_ATTRIBS:0x8C8D, TRANSFORM_FEEDBACK_BUFFER:0x8C8E,
+    TRANSFORM_FEEDBACK_BUFFER_BINDING:0x8C8F,
+    RGBA32UI:0x8D70, RGB32UI:0x8D71, RGBA16UI:0x8D76, RGB16UI:0x8D77,
+    RGBA8UI:0x8D7C, RGB8UI:0x8D7D, RGBA32I:0x8D82, RGB32I:0x8D83,
+    RGBA16I:0x8D88, RGB16I:0x8D89, RGBA8I:0x8D8E, RGB8I:0x8D8F,
+    RED_INTEGER:0x8D94, RGB_INTEGER:0x8D98, RGBA_INTEGER:0x8D99,
+    SAMPLER_2D_ARRAY:0x8DC1, SAMPLER_2D_ARRAY_SHADOW:0x8DC4, SAMPLER_CUBE_SHADOW:0x8DC5,
+    UNSIGNED_INT_VEC2:0x8DC6, UNSIGNED_INT_VEC3:0x8DC7, UNSIGNED_INT_VEC4:0x8DC8,
+    INT_SAMPLER_2D:0x8DCA, INT_SAMPLER_3D:0x8DCB, INT_SAMPLER_CUBE:0x8DCC,
+    INT_SAMPLER_2D_ARRAY:0x8DCF, UNSIGNED_INT_SAMPLER_2D:0x8DD2,
+    UNSIGNED_INT_SAMPLER_3D:0x8DD3, UNSIGNED_INT_SAMPLER_CUBE:0x8DD4,
+    UNSIGNED_INT_SAMPLER_2D_ARRAY:0x8DD7, DEPTH_COMPONENT32F:0x8CAC,
+    DEPTH32F_STENCIL8:0x8CAD, FLOAT_32_UNSIGNED_INT_24_8_REV:0x8DAD,
+    FRAMEBUFFER_ATTACHMENT_COLOR_ENCODING:0x8210, FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE:0x8211,
+    FRAMEBUFFER_ATTACHMENT_RED_SIZE:0x8212, FRAMEBUFFER_ATTACHMENT_GREEN_SIZE:0x8213,
+    FRAMEBUFFER_ATTACHMENT_BLUE_SIZE:0x8214, FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE:0x8215,
+    FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE:0x8216, FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE:0x8217,
+    FRAMEBUFFER_DEFAULT:0x8218, UNSIGNED_INT_24_8:0x84FA, DEPTH24_STENCIL8:0x88F0,
+    UNSIGNED_NORMALIZED:0x8C17, DRAW_FRAMEBUFFER_BINDING:0x8CA6,
+    READ_FRAMEBUFFER_BINDING:0x8CAA, RENDERBUFFER_SAMPLES:0x8CAB,
+    FRAMEBUFFER_ATTACHMENT_TEXTURE_LAYER:0x8CD4,
+    COLOR_ATTACHMENT1:0x8CE1, COLOR_ATTACHMENT2:0x8CE2, COLOR_ATTACHMENT3:0x8CE3,
+    COLOR_ATTACHMENT4:0x8CE4, COLOR_ATTACHMENT5:0x8CE5, COLOR_ATTACHMENT6:0x8CE6,
+    COLOR_ATTACHMENT7:0x8CE7, COLOR_ATTACHMENT8:0x8CE8, COLOR_ATTACHMENT9:0x8CE9,
+    COLOR_ATTACHMENT10:0x8CEA, COLOR_ATTACHMENT11:0x8CEB, COLOR_ATTACHMENT12:0x8CEC,
+    COLOR_ATTACHMENT13:0x8CED, COLOR_ATTACHMENT14:0x8CEE, COLOR_ATTACHMENT15:0x8CEF,
+    FRAMEBUFFER_INCOMPLETE_MULTISAMPLE:0x8D56, HALF_FLOAT:0x140B,
+    RG:0x8227, RG_INTEGER:0x8228, R8:0x8229, RG8:0x822B, R16F:0x822D, R32F:0x822E,
+    RG16F:0x822F, RG32F:0x8230, R8I:0x8231, R8UI:0x8232, R16I:0x8233,
+    R16UI:0x8234, R32I:0x8235, R32UI:0x8236, RG8I:0x8237, RG8UI:0x8238,
+    RG16I:0x8239, RG16UI:0x823A, RG32I:0x823B, RG32UI:0x823C,
+    R8_SNORM:0x8F94, RG8_SNORM:0x8F95, RGB8_SNORM:0x8F96, RGBA8_SNORM:0x8F97,
+    SIGNED_NORMALIZED:0x8F9C, COPY_READ_BUFFER:0x8F36, COPY_WRITE_BUFFER:0x8F37,
+    COPY_READ_BUFFER_BINDING:0x8F36, COPY_WRITE_BUFFER_BINDING:0x8F37,
+    UNIFORM_BUFFER:0x8A11, UNIFORM_BUFFER_BINDING:0x8A28, UNIFORM_BUFFER_START:0x8A29,
+    UNIFORM_BUFFER_SIZE:0x8A2A, MAX_VERTEX_UNIFORM_BLOCKS:0x8A2B,
+    MAX_FRAGMENT_UNIFORM_BLOCKS:0x8A2D, MAX_COMBINED_UNIFORM_BLOCKS:0x8A2E,
+    MAX_UNIFORM_BUFFER_BINDINGS:0x8A2F, MAX_UNIFORM_BLOCK_SIZE:0x8A30,
+    MAX_COMBINED_VERTEX_UNIFORM_COMPONENTS:0x8A31,
+    MAX_COMBINED_FRAGMENT_UNIFORM_COMPONENTS:0x8A33, UNIFORM_BUFFER_OFFSET_ALIGNMENT:0x8A34,
+    ACTIVE_UNIFORM_BLOCKS:0x8A36, UNIFORM_TYPE:0x8A37, UNIFORM_SIZE:0x8A38,
+    UNIFORM_BLOCK_INDEX:0x8A3A, UNIFORM_OFFSET:0x8A3B, UNIFORM_ARRAY_STRIDE:0x8A3C,
+    UNIFORM_MATRIX_STRIDE:0x8A3D, UNIFORM_IS_ROW_MAJOR:0x8A3E,
+    UNIFORM_BLOCK_BINDING:0x8A3F, UNIFORM_BLOCK_DATA_SIZE:0x8A40,
+    UNIFORM_BLOCK_ACTIVE_UNIFORMS:0x8A42, UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES:0x8A43,
+    UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER:0x8A44,
+    UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER:0x8A46, INVALID_INDEX:0xFFFFFFFF,
+    MAX_VERTEX_OUTPUT_COMPONENTS:0x9122, MAX_FRAGMENT_INPUT_COMPONENTS:0x9125,
+    VERTEX_ATTRIB_ARRAY_DIVISOR:0x88FE, RGB10_A2UI:0x906F, INT_2_10_10_10_REV:0x8D9F,
+    TEXTURE_IMMUTABLE_FORMAT:0x912F, TEXTURE_IMMUTABLE_LEVELS:0x82DF,
+  });
+  const WEBGL1_CONSTANT_NAMES = Object.keys(WEBGL_CONSTANTS);
+  Object.assign(WEBGL_CONSTANTS, WEBGL2_CONSTANTS);
 
   const WEBGL_CAPABILITIES = Object.freeze([
     WEBGL_CONSTANTS.BLEND, WEBGL_CONSTANTS.CULL_FACE, WEBGL_CONSTANTS.DEPTH_TEST,
@@ -19476,6 +19817,9 @@ let omoikaneUserActivationState;
     }
     return value;
   }
+  function webglIsResource(context, value, constructor) {
+    return value instanceof constructor && value.__context === context && !value.__deleted;
+  }
   function webglSourceNames(source, keyword) {
     const names = [];
     const seen = new Set();
@@ -19490,11 +19834,32 @@ let omoikaneUserActivationState;
     return names;
   }
 
+  function webglContextAttributes(options) {
+    const init = options === null || options === undefined ? {} : Object(options);
+    const powerPreference = init.powerPreference === undefined ? "default" : String(init.powerPreference);
+    if (!["default", "high-performance", "low-power"].includes(powerPreference)) {
+      throw new TypeError("Invalid WebGL powerPreference");
+    }
+    return {
+      alpha: init.alpha === undefined ? true : !!init.alpha,
+      depth: init.depth === undefined ? true : !!init.depth,
+      stencil: init.stencil === undefined ? false : !!init.stencil,
+      antialias: init.antialias === undefined ? true : !!init.antialias,
+      premultipliedAlpha: init.premultipliedAlpha === undefined ? true : !!init.premultipliedAlpha,
+      preserveDrawingBuffer: init.preserveDrawingBuffer === undefined ? false : !!init.preserveDrawingBuffer,
+      powerPreference,
+      failIfMajorPerformanceCaveat: !!init.failIfMajorPerformanceCaveat,
+      desynchronized: !!init.desynchronized,
+      xrCompatible: !!init.xrCompatible,
+    };
+  }
+
   class WebGLRenderingContext extends WebGLEventTarget {
-    constructor(canvas, token) {
+    constructor(canvas, token, attributes = webglContextAttributes()) {
       if (token !== webglContextConstructionToken) throw new TypeError("Illegal constructor");
       super();
       this.canvas = canvas;
+      this.__attributes = Object.freeze({...attributes});
       this.__state = {
         context: this, lost: false, errors: [], clearColor: [0, 0, 0, 0],
         colorMask: [true, true, true, true], depthMask: true,
@@ -19504,12 +19869,28 @@ let omoikaneUserActivationState;
         enabled: new Set(), buffers: new Set(), shaders: new Set(), programs: new Set(),
         arrayBuffer: null, elementArrayBuffer: null, currentProgram: null,
         activeTexture: WEBGL_CONSTANTS.TEXTURE0,
+        queries: new Set(), samplers: new Set(), syncs: new Set(),
+        transformFeedbacks: new Set(), vertexArrays: new Set(), activeQueries: new Map(),
+        samplerBindings: new Map(), transformFeedback: null, vertexArray: null,
       };
       this.__oncontextlost = null;
       this.__oncontextrestored = null;
     }
     get drawingBufferWidth() { return canvasDimensions(this.canvas)[0]; }
     get drawingBufferHeight() { return canvasDimensions(this.canvas)[1]; }
+    get drawingBufferColorSpace() { return this.__drawingBufferColorSpace || "srgb"; }
+    set drawingBufferColorSpace(value) {
+      const colorSpace = String(value);
+      if (colorSpace !== "srgb" && colorSpace !== "display-p3") throw new TypeError("Invalid PredefinedColorSpace");
+      this.__drawingBufferColorSpace = colorSpace;
+    }
+    get unpackColorSpace() { return this.__unpackColorSpace || "srgb"; }
+    set unpackColorSpace(value) {
+      const colorSpace = String(value);
+      if (colorSpace !== "srgb" && colorSpace !== "display-p3") throw new TypeError("Invalid PredefinedColorSpace");
+      this.__unpackColorSpace = colorSpace;
+    }
+    getContextAttributes() { return {...this.__attributes}; }
     get __s() { return this.__state; }
     __commit() { commitCanvas(this.canvas, canvasState(this.canvas)); }
     __lose() {
@@ -19535,10 +19916,16 @@ let omoikaneUserActivationState;
       this.__state.viewport = [0, 0, this.drawingBufferWidth, this.drawingBufferHeight];
       this.__state.scissor = [0, 0, this.drawingBufferWidth, this.drawingBufferHeight];
       this.__state.enabled.clear();
-      for (const resource of [...this.__state.buffers, ...this.__state.shaders, ...this.__state.programs]) resource.__deleted = true;
+      for (const resource of [...this.__state.buffers, ...this.__state.shaders, ...this.__state.programs,
+        ...this.__state.queries, ...this.__state.samplers, ...this.__state.syncs,
+        ...this.__state.transformFeedbacks, ...this.__state.vertexArrays]) resource.__deleted = true;
       this.__state.buffers.clear();
       this.__state.shaders.clear();
       this.__state.programs.clear();
+      this.__state.queries.clear(); this.__state.samplers.clear(); this.__state.syncs.clear();
+      this.__state.transformFeedbacks.clear(); this.__state.vertexArrays.clear();
+      this.__state.activeQueries.clear(); this.__state.samplerBindings.clear();
+      this.__state.transformFeedback = null; this.__state.vertexArray = null;
       this.__state.arrayBuffer = null;
       this.__state.elementArrayBuffer = null;
       this.__state.currentProgram = null;
@@ -19670,10 +20057,10 @@ let omoikaneUserActivationState;
         case WEBGL_CONSTANTS.MAX_FRAGMENT_UNIFORM_VECTORS: return 16;
         case WEBGL_CONSTANTS.RED_BITS:
         case WEBGL_CONSTANTS.GREEN_BITS:
-        case WEBGL_CONSTANTS.BLUE_BITS:
-        case WEBGL_CONSTANTS.ALPHA_BITS: return 8;
-        case WEBGL_CONSTANTS.DEPTH_BITS: return 24;
-        case WEBGL_CONSTANTS.STENCIL_BITS: return 8;
+        case WEBGL_CONSTANTS.BLUE_BITS: return 8;
+        case WEBGL_CONSTANTS.ALPHA_BITS: return this.__attributes.alpha ? 8 : 0;
+        case WEBGL_CONSTANTS.DEPTH_BITS: return this.__attributes.depth ? 24 : 0;
+        case WEBGL_CONSTANTS.STENCIL_BITS: return this.__attributes.stencil ? 8 : 0;
         case WEBGL_CONSTANTS.SAMPLE_BUFFERS:
         case WEBGL_CONSTANTS.SAMPLES: return 0;
         case WEBGL_CONSTANTS.SUBPIXEL_BITS: return 4;
@@ -19974,9 +20361,262 @@ let omoikaneUserActivationState;
     getExtension() { return null; }
     getSupportedExtensions() { return this.__state.lost ? null : []; }
   }
+  function webgl2CreateResource(context, constructor, collection) {
+    if (!webglActive(context)) return null;
+    const resource = new constructor(context, webglResourceConstructionToken);
+    context.__state[collection].add(resource);
+    return resource;
+  }
+  function webgl2DeleteResource(context, resource, constructor, collection, unbind) {
+    if (resource === null) return;
+    const value = webglDeletable(context, resource, constructor);
+    if (!value || value.__deleted) return;
+    value.__deleted = true;
+    context.__state[collection].delete(value);
+    unbind(value);
+  }
+  class WebGL2RenderingContext extends WebGLRenderingContext {
+    constructor(canvas, token, attributes) { super(canvas, token, attributes); }
+    createVertexArray() { return webgl2CreateResource(this, WebGLVertexArrayObject, "vertexArrays"); }
+    deleteVertexArray(value) { webgl2DeleteResource(this, value, WebGLVertexArrayObject, "vertexArrays", deleted => {
+      if (this.__state.vertexArray === deleted) this.__state.vertexArray = null;
+    }); }
+    isVertexArray(value) { return webglIsResource(this, value, WebGLVertexArrayObject); }
+    bindVertexArray(value) {
+      if (!webglActive(this)) return;
+      if (value !== null && webglOwned(this, value, WebGLVertexArrayObject) === undefined) return;
+      this.__state.vertexArray = value;
+    }
+    createTransformFeedback() { return webgl2CreateResource(this, WebGLTransformFeedback, "transformFeedbacks"); }
+    deleteTransformFeedback(value) { webgl2DeleteResource(this, value, WebGLTransformFeedback, "transformFeedbacks", deleted => {
+      if (this.__state.transformFeedback === deleted) this.__state.transformFeedback = null;
+    }); }
+    isTransformFeedback(value) { return webglIsResource(this, value, WebGLTransformFeedback); }
+    bindTransformFeedback(target, value) {
+      if (!webglActive(this)) return;
+      if (target !== WEBGL_CONSTANTS.TRANSFORM_FEEDBACK) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      if (value !== null && webglOwned(this, value, WebGLTransformFeedback) === undefined) return;
+      if (this.__state.transformFeedback?.__active && !this.__state.transformFeedback.__paused) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return;
+      }
+      this.__state.transformFeedback = value;
+    }
+    beginTransformFeedback(mode) {
+      if (!webglActive(this)) return;
+      if (![WEBGL_CONSTANTS.POINTS, WEBGL_CONSTANTS.LINES, WEBGL_CONSTANTS.TRIANGLES].includes(mode)) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return;
+      }
+      const feedback = this.__state.transformFeedback;
+      if (!feedback || feedback.__active) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return; }
+      feedback.__active = true; feedback.__paused = false;
+    }
+    endTransformFeedback() {
+      const feedback = this.__state.transformFeedback;
+      if (!webglActive(this)) return;
+      if (!feedback?.__active) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return; }
+      feedback.__active = false; feedback.__paused = false;
+    }
+    pauseTransformFeedback() {
+      const feedback = this.__state.transformFeedback;
+      if (!webglActive(this)) return;
+      if (!feedback?.__active || feedback.__paused) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return; }
+      feedback.__paused = true;
+    }
+    resumeTransformFeedback() {
+      const feedback = this.__state.transformFeedback;
+      if (!webglActive(this)) return;
+      if (!feedback?.__active || !feedback.__paused) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return; }
+      feedback.__paused = false;
+    }
+    createQuery() { return webgl2CreateResource(this, WebGLQuery, "queries"); }
+    deleteQuery(value) { webgl2DeleteResource(this, value, WebGLQuery, "queries", deleted => {
+      for (const [target, query] of this.__state.activeQueries) if (query === deleted) this.__state.activeQueries.delete(target);
+    }); }
+    isQuery(value) { return webglIsResource(this, value, WebGLQuery); }
+    beginQuery(target, query) {
+      if (!webglActive(this)) return;
+      if (![WEBGL_CONSTANTS.ANY_SAMPLES_PASSED, WEBGL_CONSTANTS.ANY_SAMPLES_PASSED_CONSERVATIVE,
+        WEBGL_CONSTANTS.TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN].includes(target)) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return;
+      }
+      const value = webglOwned(this, query, WebGLQuery);
+      if (!value) return;
+      if (value.__target !== null || this.__state.activeQueries.has(target)) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return;
+      }
+      value.__target = target; value.__available = false;
+      this.__state.activeQueries.set(target, value);
+    }
+    endQuery(target) {
+      if (!webglActive(this)) return;
+      const query = this.__state.activeQueries.get(target);
+      if (!query) { webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION); return; }
+      this.__state.activeQueries.delete(target);
+      query.__target = null; query.__available = true;
+    }
+    getQuery(target, parameter) {
+      if (!webglActive(this)) return null;
+      if (parameter !== WEBGL_CONSTANTS.CURRENT_QUERY) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return null; }
+      if (![WEBGL_CONSTANTS.ANY_SAMPLES_PASSED, WEBGL_CONSTANTS.ANY_SAMPLES_PASSED_CONSERVATIVE,
+        WEBGL_CONSTANTS.TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN].includes(target)) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return null;
+      }
+      return this.__state.activeQueries.get(target) || null;
+    }
+    getQueryParameter(query, parameter) {
+      const value = webglOwned(this, query, WebGLQuery);
+      if (!value) return null;
+      if (parameter === WEBGL_CONSTANTS.QUERY_RESULT) return value.__result;
+      if (parameter === WEBGL_CONSTANTS.QUERY_RESULT_AVAILABLE) return value.__available;
+      webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return null;
+    }
+    createSampler() { return webgl2CreateResource(this, WebGLSampler, "samplers"); }
+    deleteSampler(value) { webgl2DeleteResource(this, value, WebGLSampler, "samplers", deleted => {
+      for (const [unit, sampler] of this.__state.samplerBindings) if (sampler === deleted) this.__state.samplerBindings.delete(unit);
+    }); }
+    isSampler(value) { return webglIsResource(this, value, WebGLSampler); }
+    bindSampler(unit, sampler) {
+      if (!webglActive(this)) return;
+      const index = Number(unit);
+      if (!Number.isInteger(index) || index < 0 || index >= this.getParameter(WEBGL_CONSTANTS.MAX_COMBINED_TEXTURE_IMAGE_UNITS)) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return;
+      }
+      if (sampler !== null && webglOwned(this, sampler, WebGLSampler) === undefined) return;
+      if (sampler === null) this.__state.samplerBindings.delete(index); else this.__state.samplerBindings.set(index, sampler);
+    }
+    samplerParameteri(sampler, parameter, value) { this.__setSamplerParameter(sampler, parameter, Number(value)); }
+    samplerParameterf(sampler, parameter, value) { this.__setSamplerParameter(sampler, parameter, Number(value)); }
+    __setSamplerParameter(sampler, parameter, value) {
+      const target = webglOwned(this, sampler, WebGLSampler);
+      if (!target) return;
+      if (![WEBGL_CONSTANTS.TEXTURE_MIN_FILTER, WEBGL_CONSTANTS.TEXTURE_MAG_FILTER,
+        WEBGL_CONSTANTS.TEXTURE_WRAP_S, WEBGL_CONSTANTS.TEXTURE_WRAP_T, WEBGL_CONSTANTS.TEXTURE_WRAP_R,
+        WEBGL_CONSTANTS.TEXTURE_MIN_LOD, WEBGL_CONSTANTS.TEXTURE_MAX_LOD,
+        WEBGL_CONSTANTS.TEXTURE_COMPARE_MODE, WEBGL_CONSTANTS.TEXTURE_COMPARE_FUNC].includes(parameter)) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return;
+      }
+      if (!Number.isFinite(value)) { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return; }
+      target.__parameters.set(parameter, value);
+    }
+    getSamplerParameter(sampler, parameter) {
+      const value = webglOwned(this, sampler, WebGLSampler);
+      if (!value) return null;
+      const defaults = new Map([
+        [WEBGL_CONSTANTS.TEXTURE_MIN_FILTER, 0x2702], [WEBGL_CONSTANTS.TEXTURE_MAG_FILTER, WEBGL_CONSTANTS.LINEAR],
+        [WEBGL_CONSTANTS.TEXTURE_WRAP_S, WEBGL_CONSTANTS.REPEAT], [WEBGL_CONSTANTS.TEXTURE_WRAP_T, WEBGL_CONSTANTS.REPEAT],
+        [WEBGL_CONSTANTS.TEXTURE_WRAP_R, WEBGL_CONSTANTS.REPEAT], [WEBGL_CONSTANTS.TEXTURE_MIN_LOD, -1000],
+        [WEBGL_CONSTANTS.TEXTURE_MAX_LOD, 1000], [WEBGL_CONSTANTS.TEXTURE_COMPARE_MODE, 0],
+        [WEBGL_CONSTANTS.TEXTURE_COMPARE_FUNC, WEBGL_CONSTANTS.LEQUAL],
+      ]);
+      if (!defaults.has(parameter)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return null; }
+      return value.__parameters.has(parameter) ? value.__parameters.get(parameter) : defaults.get(parameter);
+    }
+    fenceSync(condition, flags) {
+      if (!webglActive(this)) return null;
+      if (condition !== WEBGL_CONSTANTS.SYNC_GPU_COMMANDS_COMPLETE) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return null; }
+      if (flags !== 0) { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return null; }
+      return webgl2CreateResource(this, WebGLSync, "syncs");
+    }
+    deleteSync(value) { webgl2DeleteResource(this, value, WebGLSync, "syncs", () => {}); }
+    isSync(value) { return webglIsResource(this, value, WebGLSync); }
+    clientWaitSync(sync, flags, timeout) {
+      const value = webglOwned(this, sync, WebGLSync);
+      if (!value) return WEBGL_CONSTANTS.WAIT_FAILED;
+      if ((flags & ~WEBGL_CONSTANTS.SYNC_FLUSH_COMMANDS_BIT) || Number(timeout) < 0) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return WEBGL_CONSTANTS.WAIT_FAILED;
+      }
+      return value.__signaled ? WEBGL_CONSTANTS.ALREADY_SIGNALED : WEBGL_CONSTANTS.TIMEOUT_EXPIRED;
+    }
+    waitSync(sync, flags, timeout) {
+      if (!webglOwned(this, sync, WebGLSync)) return;
+      if (flags !== 0 || Number(timeout) !== WEBGL_CONSTANTS.TIMEOUT_IGNORED) webglError(this, WEBGL_CONSTANTS.INVALID_VALUE);
+    }
+    getSyncParameter(sync, parameter) {
+      const value = webglOwned(this, sync, WebGLSync);
+      if (!value) return null;
+      if (parameter === WEBGL_CONSTANTS.OBJECT_TYPE) return WEBGL_CONSTANTS.SYNC_FENCE;
+      if (parameter === WEBGL_CONSTANTS.SYNC_STATUS) return value.__signaled ? WEBGL_CONSTANTS.SIGNALED : WEBGL_CONSTANTS.UNSIGNALED;
+      if (parameter === WEBGL_CONSTANTS.SYNC_CONDITION) return WEBGL_CONSTANTS.SYNC_GPU_COMMANDS_COMPLETE;
+      if (parameter === WEBGL_CONSTANTS.SYNC_FLAGS) return 0;
+      webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return null;
+    }
+    clearBufferfv(buffer, drawbuffer, values, sourceOffset = 0) { this.__clearBuffer(buffer, drawbuffer, values, sourceOffset); }
+    clearBufferiv(buffer, drawbuffer, values, sourceOffset = 0) { this.__clearBuffer(buffer, drawbuffer, values, sourceOffset); }
+    clearBufferuiv(buffer, drawbuffer, values, sourceOffset = 0) { this.__clearBuffer(buffer, drawbuffer, values, sourceOffset); }
+    clearBufferfi(buffer, drawbuffer, depth, stencil) {
+      if (buffer !== WEBGL_CONSTANTS.DEPTH_STENCIL || drawbuffer !== 0) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      this.clearDepth(depth); this.clearStencil(stencil); this.clear(WEBGL_CONSTANTS.DEPTH_BUFFER_BIT | WEBGL_CONSTANTS.STENCIL_BUFFER_BIT);
+    }
+    __clearBuffer(buffer, drawbuffer, values, sourceOffset) {
+      if (drawbuffer !== 0 || ![WEBGL_CONSTANTS.COLOR, WEBGL_CONSTANTS.DEPTH, WEBGL_CONSTANTS.STENCIL].includes(buffer)) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return;
+      }
+      const input = Array.from(values || []).slice(Number(sourceOffset) >>> 0);
+      if (buffer === WEBGL_CONSTANTS.COLOR) {
+        if (input.length < 4) { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return; }
+        this.clearColor(input[0], input[1], input[2], input[3]); this.clear(WEBGL_CONSTANTS.COLOR_BUFFER_BIT);
+      } else if (buffer === WEBGL_CONSTANTS.DEPTH) {
+        if (!input.length) { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return; }
+        this.clearDepth(input[0]); this.clear(WEBGL_CONSTANTS.DEPTH_BUFFER_BIT);
+      } else {
+        if (!input.length) { webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return; }
+        this.clearStencil(input[0]); this.clear(WEBGL_CONSTANTS.STENCIL_BUFFER_BIT);
+      }
+    }
+    getParameter(parameter) {
+      parameter = Number(parameter);
+      switch (parameter) {
+        case WEBGL_CONSTANTS.VERTEX_ARRAY_BINDING: return this.__state.vertexArray;
+        case WEBGL_CONSTANTS.TRANSFORM_FEEDBACK_BINDING: return this.__state.transformFeedback;
+        case WEBGL_CONSTANTS.TRANSFORM_FEEDBACK_ACTIVE: return !!this.__state.transformFeedback?.__active;
+        case WEBGL_CONSTANTS.TRANSFORM_FEEDBACK_PAUSED: return !!this.__state.transformFeedback?.__paused;
+        case WEBGL_CONSTANTS.SAMPLER_BINDING:
+          return this.__state.samplerBindings.get(this.__state.activeTexture - WEBGL_CONSTANTS.TEXTURE0) || null;
+        case WEBGL_CONSTANTS.MAX_DRAW_BUFFERS:
+        case WEBGL_CONSTANTS.MAX_COLOR_ATTACHMENTS: return 4;
+        case WEBGL_CONSTANTS.MAX_3D_TEXTURE_SIZE: return 256;
+        case WEBGL_CONSTANTS.MAX_ARRAY_TEXTURE_LAYERS: return 256;
+        case WEBGL_CONSTANTS.MAX_SAMPLES: return 4;
+        case WEBGL_CONSTANTS.MAX_ELEMENT_INDEX: return 0xffffffff;
+        case WEBGL_CONSTANTS.MAX_CLIENT_WAIT_TIMEOUT_WEBGL: return 0;
+        case WEBGL_CONSTANTS.MAX_SERVER_WAIT_TIMEOUT: return 0;
+        case WEBGL_CONSTANTS.VERSION: return "WebGL 2.0 Omoikane";
+        case WEBGL_CONSTANTS.SHADING_LANGUAGE_VERSION: return "WebGL GLSL ES 3.00 Omoikane";
+        default: return super.getParameter(parameter);
+      }
+    }
+    drawElements(mode, count, type, offset) {
+      if (type !== WEBGL_CONSTANTS.UNSIGNED_INT) return super.drawElements(mode, count, type, offset);
+      if (!webglActive(this)) return;
+      if (!WEBGL_DRAW_MODES.includes(mode)) { webglError(this, WEBGL_CONSTANTS.INVALID_ENUM); return; }
+      if (!Number.isInteger(Number(count)) || Number(count) < 0 || !Number.isInteger(Number(offset)) || Number(offset) < 0) {
+        webglError(this, WEBGL_CONSTANTS.INVALID_VALUE); return;
+      }
+      if (!this.__state.currentProgram || !this.__state.elementArrayBuffer) webglError(this, WEBGL_CONSTANTS.INVALID_OPERATION);
+    }
+    get [Symbol.toStringTag]() { return "WebGL2RenderingContext"; }
+  }
+  for (const name of WEBGL1_CONSTANT_NAMES) {
+    const value = WEBGL_CONSTANTS[name];
+    Object.defineProperty(WebGLRenderingContext, name, { value, writable: false, enumerable: true, configurable: false });
+    Object.defineProperty(WebGLRenderingContext.prototype, name, { value, writable: false, enumerable: true, configurable: false });
+  }
   for (const [name, value] of Object.entries(WEBGL_CONSTANTS)) {
-    Object.defineProperty(WebGLRenderingContext, name, { value, writable: false, enumerable: false, configurable: false });
-    Object.defineProperty(WebGLRenderingContext.prototype, name, { value, writable: false, enumerable: false, configurable: false });
+    Object.defineProperty(WebGL2RenderingContext, name, { value, writable: false, enumerable: true, configurable: false });
+    Object.defineProperty(WebGL2RenderingContext.prototype, name, { value, writable: false, enumerable: true, configurable: false });
+  }
+  for (const name of [
+    "drawingBufferColorSpace", "unpackColorSpace", "createVertexArray", "deleteVertexArray",
+    "isVertexArray", "bindVertexArray", "createTransformFeedback", "deleteTransformFeedback",
+    "isTransformFeedback", "bindTransformFeedback", "beginTransformFeedback", "endTransformFeedback",
+    "pauseTransformFeedback", "resumeTransformFeedback", "createQuery", "deleteQuery", "isQuery",
+    "beginQuery", "endQuery", "getQuery", "getQueryParameter", "createSampler", "deleteSampler",
+    "isSampler", "bindSampler", "samplerParameteri", "samplerParameterf", "getSamplerParameter",
+    "fenceSync", "deleteSync", "isSync", "clientWaitSync", "waitSync", "getSyncParameter",
+    "clearBufferfv", "clearBufferiv", "clearBufferuiv", "clearBufferfi", "getParameter", "drawElements",
+  ]) {
+    const descriptor = Object.getOwnPropertyDescriptor(WebGL2RenderingContext.prototype, name);
+    if (descriptor) Object.defineProperty(WebGL2RenderingContext.prototype, name, {...descriptor, enumerable:true});
   }
 
   function resetHtmlCanvasState(canvas) {
@@ -19998,23 +20638,73 @@ let omoikaneUserActivationState;
         args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLCanvasElement);
     }
 
-    get width(){return canvasDimensions(this)[0];} set width(value){this.setAttribute("width",String(Math.max(0,Math.trunc(Number(value))||0)));resetHtmlCanvasState(this);}
-    get height(){return canvasDimensions(this)[1];} set height(value){this.setAttribute("height",String(Math.max(0,Math.trunc(Number(value))||0)));resetHtmlCanvasState(this);}
-    getContext(type){
-      const requested=String(type).toLowerCase(),s=canvasState(this);
+    get width(){return canvasDimensions(this)[0];} set width(value){canvasRejectPlaceholder(this);this.setAttribute("width",String(Math.max(0,Math.trunc(Number(value))||0)));resetHtmlCanvasState(this);}
+    get height(){return canvasDimensions(this)[1];} set height(value){canvasRejectPlaceholder(this);this.setAttribute("height",String(Math.max(0,Math.trunc(Number(value))||0)));resetHtmlCanvasState(this);}
+    /// Context IDs match case-sensitively (HTML §4.12.5).
+    getContext(contextId, options = undefined){
+      if(arguments.length===0)throw new TypeError("getContext requires a context ID");
+      const requested=String(contextId);
+      const settings=requested==="2d"?canvas2dSettings(options):null;
+      const s=canvasState(this);
+      if(s.contextMode==="placeholder")throw new DOMException("The canvas has transferred control to an OffscreenCanvas","InvalidStateError");
       if(requested==="2d"){
         if(s.contextMode&&s.contextMode!=="2d")return null;
         s.contextMode="2d";
-        return s.context||(s.context=new CanvasRenderingContext2D(this));
+        return s.context||(s.context=new CanvasRenderingContext2D(canvasConstructionToken,this,settings));
       }
       if(requested==="webgl"||requested==="experimental-webgl"){
         if(s.contextMode&&s.contextMode!=="webgl")return null;
         s.contextMode="webgl";
-        return s.webgl||(s.webgl=new WebGLRenderingContext(this,webglContextConstructionToken));
+        return s.webgl||(s.webgl=new WebGLRenderingContext(this,webglContextConstructionToken,webglContextAttributes(options)));
+      }
+      if(requested==="webgl2"){
+        if(s.contextMode&&s.contextMode!=="webgl2")return null;
+        s.contextMode="webgl2";
+        return s.webgl||(s.webgl=new WebGL2RenderingContext(this,webglContextConstructionToken,webglContextAttributes(options)));
       }
       return null;
     }
-    toDataURL(type="image/png"){canvasState(this);return String(type).toLowerCase()==="image/png"?__omoikane_canvas_data_url(this.__id):__omoikane_canvas_data_url(this.__id);}
+    /// A PNG data URL of the bitmap, or `data:,` for an empty bitmap. Other
+    /// image types fall back to PNG.
+    toDataURL(type = "image/png", quality = undefined){
+      canvasRejectPlaceholder(this);
+      const s=canvasState(this);
+      if(!s.originClean)throw new DOMException("The canvas is not origin-clean.","SecurityError");
+      if(s.width===0||s.height===0)return "data:,";
+      return __omoikane_canvas_data_url(this.__id);
+    }
+    /// Calls `callback` in a later task with a PNG Blob of the bitmap as it is
+    /// now, or with null for an empty bitmap or a failed encoding.
+    toBlob(callback, type = "image/png", quality = undefined){
+      if(arguments.length===0)throw new TypeError("toBlob requires a callback");
+      if(typeof callback!=="function")throw new TypeError("The toBlob callback is not a function");
+      canvasRejectPlaceholder(this);
+      const s=canvasState(this);
+      if(!s.originClean)throw new DOMException("The canvas is not origin-clean.","SecurityError");
+      const snapshot=s.width&&s.height?canvasSnapshot(this):null;
+      setTimeout(()=>callback(snapshot?canvasPngBlob(snapshot):null),0);
+    }
+    /// Returns a MediaStream with one video track capturing this canvas.
+    captureStream(frameRequestRate = undefined){
+      if(!(this instanceof HTMLCanvasElement))throw new TypeError("Illegal invocation");
+      if(!canvasState(this).originClean)throw new DOMException("The canvas is not origin-clean.","SecurityError");
+      return canvasCaptureStream(this, frameRequestRate);
+    }
+    /// Hands drawing to an OffscreenCanvas whose frames show in this element.
+    transferControlToOffscreen(){
+      const s=canvasState(this);
+      if(s.contextMode)throw new DOMException("The canvas already has a rendering context or was transferred","InvalidStateError");
+      s.contextMode="placeholder";
+      const offscreen=new OffscreenCanvas(s.width,s.height);
+      Object.defineProperty(offscreen,"__placeholder",{value:this});
+      s.offscreen=offscreen;
+      commitCanvas(offscreen,canvasState(offscreen));
+      return offscreen;
+    }
+  }
+  function canvasRejectPlaceholder(canvas){
+    const s=canvasStates.get(canvas);
+    if(s&&s.contextMode==="placeholder")throw new DOMException("The canvas has transferred control to an OffscreenCanvas","InvalidStateError");
   }
 
   const nativeCanvasPng = globalThis.__omoikane_canvas_png;
@@ -20038,9 +20728,12 @@ let omoikaneUserActivationState;
     }
   }
   function canvasSnapshot(canvas) {
+    // A placeholder canvas shows (and so supplies) its OffscreenCanvas's bitmap.
+    const offscreen = canvasStates.get(canvas)?.offscreen;
+    if (offscreen) return canvasSnapshot(offscreen);
     try {
       const state = canvasStateChecked(canvas);
-      return { width: state.width, height: state.height, pixels: state.pixels.slice() };
+      return { width: state.width, height: state.height, pixels: state.pixels.slice(), originClean: state.originClean };
     } catch (error) {
       if (error instanceof RangeError) {
         throw new DOMException("Canvas dimensions are too large", "IndexSizeError");
@@ -20048,25 +20741,38 @@ let omoikaneUserActivationState;
       throw error;
     }
   }
+  /// Encodes a nonempty bitmap snapshot as a PNG Blob, or null on failure.
+  function canvasPngBlob(snapshot) {
+    if (typeof nativeCanvasPng !== "function") return null;
+    try {
+      const encoded = nativeCanvasPng(snapshot.width, snapshot.height, new Uint8Array(snapshot.pixels.buffer));
+      const comma = typeof encoded === "string" ? encoded.indexOf(",") : -1;
+      return comma < 0 ? null : new Blob([bytesFromBase64(encoded.slice(comma + 1))], { type: "image/png" });
+    } catch (_) {
+      return null;
+    }
+  }
   function imageBitmapSource(source) {
     if (source instanceof ImageBitmap) {
       if (source.__detached) throw new DOMException("The ImageBitmap is detached", "InvalidStateError");
-      return { width: source.width, height: source.height, pixels: source.__pixels };
+      return { width: source.width, height: source.height, pixels: source.__pixels, originClean: source.__originClean };
     }
     const isHtmlCanvas = typeof HTMLCanvasElement !== "undefined" && source instanceof HTMLCanvasElement;
     if (isHtmlCanvas || source instanceof OffscreenCanvas) return canvasSnapshot(source);
     const raw = source && source.__id != null ? __omoikane_canvas_image_source(source.__id) : null;
     if (raw === null) throw new DOMException("Image source is unavailable", "InvalidStateError");
     const decoded = JSON.parse(raw);
-    return { width: decoded.width, height: decoded.height, pixels: bytesFromBase64(decoded.pixels) };
+    return { width: decoded.width, height: decoded.height, pixels: bytesFromBase64(decoded.pixels),
+      originClean: canvasElementSourceOriginClean(source) };
   }
 
   class ImageBitmap {
-    constructor(token, width, height, pixels) {
+    constructor(token, width, height, pixels, originClean = true) {
       if (token !== imageBitmapConstructionToken) throw new TypeError("Illegal constructor");
       this.__width = width;
       this.__height = height;
       this.__pixels = pixels;
+      this.__originClean = originClean;
       this.__detached = false;
     }
     get width() { return this.__detached ? 0 : this.__width; }
@@ -20108,41 +20814,37 @@ let omoikaneUserActivationState;
     getContext(type, options = undefined) {
       if (this.__detached) throw new DOMException("The OffscreenCanvas is detached", "InvalidStateError");
       const requested = String(type).toLowerCase();
-      if (requested !== "2d") return null;
+      if (requested !== "2d" && requested !== "webgl" && requested !== "webgl2") return null;
       if (this.__contextMode !== null && this.__contextMode !== requested) return null;
       this.__contextMode = requested;
       const state = canvasStateChecked(this);
-      if (!this.__context) this.__context = new OffscreenCanvasRenderingContext2D(this, options);
+      if (requested === "webgl" || requested === "webgl2") {
+        if (!this.__context) {
+          const constructor = requested === "webgl2" ? WebGL2RenderingContext : WebGLRenderingContext;
+          this.__context = new constructor(this, webglContextConstructionToken, webglContextAttributes(options));
+        }
+        state.webgl = this.__context;
+        return this.__context;
+      }
+      const settings = canvas2dSettings(options);
+      if (!this.__context) this.__context = new OffscreenCanvasRenderingContext2D(canvasConstructionToken, this, settings);
       state.context = this.__context;
       return this.__context;
     }
     transferToImageBitmap() {
       if (this.__detached) throw new DOMException("The OffscreenCanvas is detached", "InvalidStateError");
       const snapshot = canvasSnapshot(this);
-      return new ImageBitmap(imageBitmapConstructionToken, snapshot.width, snapshot.height, snapshot.pixels);
+      return new ImageBitmap(imageBitmapConstructionToken, snapshot.width, snapshot.height, snapshot.pixels, snapshot.originClean);
     }
     convertToBlob(options = {}) {
       if (this.__detached) return Promise.reject(new DOMException("The OffscreenCanvas is detached", "InvalidStateError"));
       const requested = String(options && options.type || "image/png").toLowerCase();
       const type = requested === "image/png" ? requested : "image/png";
       const snapshot = canvasSnapshot(this);
+      if (!snapshot.originClean) return Promise.reject(new DOMException("The canvas is not origin-clean.", "SecurityError"));
       if (snapshot.width === 0 || snapshot.height === 0) return Promise.resolve(new Blob([], { type }));
-      const encodingError = () => Promise.reject(new DOMException("Unable to encode canvas", "EncodingError"));
-      if (typeof nativeCanvasPng !== "function") return encodingError();
-      let encoded;
-      try {
-        encoded = nativeCanvasPng(snapshot.width, snapshot.height, new Uint8Array(snapshot.pixels.buffer));
-      } catch (_) {
-        return encodingError();
-      }
-      if (typeof encoded !== "string") return encodingError();
-      const comma = encoded.indexOf(",");
-      if (comma < 0) return encodingError();
-      try {
-        return Promise.resolve(new Blob([bytesFromBase64(encoded.slice(comma + 1))], { type }));
-      } catch (_) {
-        return encodingError();
-      }
+      const blob = canvasPngBlob(snapshot);
+      return blob ? Promise.resolve(blob) : Promise.reject(new DOMException("Unable to encode canvas", "EncodingError"));
     }
     get [Symbol.toStringTag]() { return "OffscreenCanvas"; }
   }
@@ -20162,7 +20864,7 @@ let omoikaneUserActivationState;
         const from = ((cropY + y) * input.width + cropX) * 4;
         pixels.set(input.pixels.slice(from, from + cropWidth * 4), y * cropWidth * 4);
       }
-      return Promise.resolve(new ImageBitmap(imageBitmapConstructionToken, cropWidth, cropHeight, pixels));
+      return Promise.resolve(new ImageBitmap(imageBitmapConstructionToken, cropWidth, cropHeight, pixels, input.originClean));
     } catch (error) {
       return Promise.reject(error instanceof RangeError
         ? new DOMException("Canvas dimensions are too large", "IndexSizeError")
@@ -22687,10 +23389,17 @@ let omoikaneUserActivationState;
   globalThis.CanvasPattern = CanvasPattern;
   globalThis.Path2D = Path2D;
   globalThis.WebGLRenderingContext = WebGLRenderingContext;
+  globalThis.WebGL2RenderingContext = WebGL2RenderingContext;
+  globalThis.WebGLObject = WebGLObject;
   globalThis.WebGLBuffer = WebGLBuffer;
   globalThis.WebGLShader = WebGLShader;
   globalThis.WebGLProgram = WebGLProgram;
   globalThis.WebGLUniformLocation = WebGLUniformLocation;
+  globalThis.WebGLQuery = WebGLQuery;
+  globalThis.WebGLSampler = WebGLSampler;
+  globalThis.WebGLSync = WebGLSync;
+  globalThis.WebGLTransformFeedback = WebGLTransformFeedback;
+  globalThis.WebGLVertexArrayObject = WebGLVertexArrayObject;
   globalThis.__omoikane_webgl_lose_context = function(target) {
     const context = target instanceof WebGLRenderingContext ? target
       : target && target instanceof HTMLCanvasElement ? target.getContext("webgl") : null;
@@ -25504,9 +26213,746 @@ let omoikaneUserActivationState;
           return result;
         });
       }
+      getDirectory() { return Promise.resolve().then(() => opfsGetDirectory(storageManagerDocumentId(this))); }
       get [Symbol.toStringTag]() { return "StorageManager"; }
     };
     globalThis.StorageManager = StorageManager;
+  }
+
+  const mediaTrackState = new WeakMap();
+  const mediaStreamState = new WeakMap();
+  let nextMediaStreamId = 1;
+  let nextMediaTrackId = 1;
+  function mediaIdentifier(sequence) {
+    const suffix = Number(sequence).toString(16).padStart(12, "0").slice(-12);
+    return `00000000-0000-4000-8000-${suffix}`;
+  }
+  function illegalInvocation() { throw new TypeError("Illegal invocation"); }
+  // EventTarget/Event are installed later in this bootstrap. Capture objects
+  // are constructed only after that point, while this bridge keeps Navigator
+  // construction free of temporal-dead-zone dependencies.
+  class MediaEventTarget {
+    constructor() { this._listeners = new Map(); }
+    addEventListener(...args) { return globalThis.EventTarget.prototype.addEventListener.call(this, ...args); }
+    removeEventListener(...args) { return globalThis.EventTarget.prototype.removeEventListener.call(this, ...args); }
+    dispatchEvent(...args) { return globalThis.EventTarget.prototype.dispatchEvent.call(this, ...args); }
+  }
+  function defineEventHandler(target, name) {
+    Object.defineProperty(target, "on" + name, {
+      configurable: true, enumerable: true,
+      get() { return this["__on" + name] || null; },
+      set(value) { this["__on" + name] = typeof value === "function" ? value : null; },
+    });
+  }
+  function dispatchMediaEvent(target, type, event = new Event(type)) {
+    const handler = target["on" + type];
+    if (typeof handler === "function") __omoikane_call_event_listener(handler, target, event);
+    target.dispatchEvent(event);
+  }
+  class MediaDeviceInfo {
+    constructor(token, data) {
+      if (token !== mediaCaptureToken) throw new TypeError("Illegal constructor");
+      for (const name of ["deviceId", "kind", "label", "groupId"]) {
+        Object.defineProperty(this, name, { enumerable: true, value: String(data[name] || "") });
+      }
+    }
+    toJSON() { return { deviceId: this.deviceId, kind: this.kind, label: this.label, groupId: this.groupId }; }
+    get [Symbol.toStringTag]() { return "MediaDeviceInfo"; }
+  }
+  class MediaStreamTrackEvent {
+    constructor(type, init = {}) {
+      if (!(init.track instanceof MediaStreamTrack)) throw new TypeError("track must be a MediaStreamTrack");
+      const event = new globalThis.Event(type, init);
+      Object.setPrototypeOf(event, MediaStreamTrackEvent.prototype);
+      Object.defineProperty(event, "track", { enumerable: true, value: init.track });
+      return event;
+    }
+    get [Symbol.toStringTag]() { return "MediaStreamTrackEvent"; }
+  }
+  class MediaStreamTrack extends MediaEventTarget {
+    constructor(token, data) {
+      super();
+      if (token !== mediaCaptureToken) throw new TypeError("Illegal constructor");
+      mediaTrackState.set(this, {
+        id: data.id || mediaIdentifier(nextMediaTrackId++),
+        kind: data.kind,
+        label: data.label || "",
+        deviceId: data.deviceId || "",
+        enabled: data.enabled === undefined ? true : !!data.enabled,
+        muted: !!data.muted,
+        readyState: data.readyState === "ended" ? "ended" : "live",
+      });
+    }
+    get kind() { return mediaTrackState.get(this)?.kind ?? illegalInvocation(); }
+    get id() { return mediaTrackState.get(this)?.id ?? illegalInvocation(); }
+    get label() { return mediaTrackState.get(this)?.label ?? illegalInvocation(); }
+    get enabled() { return mediaTrackState.get(this)?.enabled ?? illegalInvocation(); }
+    set enabled(value) { const state = mediaTrackState.get(this); if (!state) illegalInvocation(); state.enabled = !!value; }
+    get muted() { return mediaTrackState.get(this)?.muted ?? illegalInvocation(); }
+    get readyState() { return mediaTrackState.get(this)?.readyState ?? illegalInvocation(); }
+    get contentHint() { return ""; }
+    set contentHint(_value) {}
+    clone() {
+      const state = mediaTrackState.get(this); if (!state) illegalInvocation();
+      return new MediaStreamTrack(mediaCaptureToken, { ...state, id: mediaIdentifier(nextMediaTrackId++) });
+    }
+    stop() {
+      const state = mediaTrackState.get(this); if (!state) illegalInvocation();
+      if (state.readyState === "ended") return;
+      state.readyState = "ended";
+    }
+    getCapabilities() { const state = mediaTrackState.get(this); if (!state) illegalInvocation(); return { deviceId: state.deviceId }; }
+    getConstraints() { if (!mediaTrackState.has(this)) illegalInvocation(); return {}; }
+    getSettings() { const state = mediaTrackState.get(this); if (!state) illegalInvocation(); return { deviceId: state.deviceId }; }
+    applyConstraints(constraints = {}) {
+      const state = mediaTrackState.get(this);
+      if (!state) return Promise.reject(new TypeError("Illegal invocation"));
+      return Promise.resolve().then(() => {
+        const exact = requestedDeviceId(constraints);
+        if (exact && exact !== state.deviceId) {
+          const error = new DOMException("No device satisfies the constraints.", "OverconstrainedError");
+          Object.defineProperty(error, "constraint", { enumerable: true, value: "deviceId" });
+          throw error;
+        }
+      });
+    }
+    get [Symbol.toStringTag]() { return "MediaStreamTrack"; }
+  }
+  for (const type of ["ended", "mute", "unmute"]) defineEventHandler(MediaStreamTrack.prototype, type);
+  class MediaStream extends MediaEventTarget {
+    constructor(value = undefined) {
+      super();
+      let tracks = [];
+      if (value instanceof MediaStream) tracks = value.getTracks();
+      else if (value !== undefined) tracks = Array.from(value);
+      if (tracks.some(track => !(track instanceof MediaStreamTrack))) throw new TypeError("tracks must contain MediaStreamTrack values");
+      mediaStreamState.set(this, { id: mediaIdentifier(nextMediaStreamId++), tracks: tracks.slice() });
+    }
+    get id() { return mediaStreamState.get(this)?.id ?? illegalInvocation(); }
+    get active() { const state = mediaStreamState.get(this); if (!state) illegalInvocation(); return state.tracks.some(track => track.readyState === "live"); }
+    getTracks() { const state = mediaStreamState.get(this); if (!state) illegalInvocation(); return state.tracks.slice(); }
+    getAudioTracks() { return this.getTracks().filter(track => track.kind === "audio"); }
+    getVideoTracks() { return this.getTracks().filter(track => track.kind === "video"); }
+    getTrackById(id) { const key = String(id); return this.getTracks().find(track => track.id === key) || null; }
+    addTrack(track) {
+      const state = mediaStreamState.get(this); if (!state) illegalInvocation();
+      if (!(track instanceof MediaStreamTrack)) throw new TypeError("track must be a MediaStreamTrack");
+      if (state.tracks.includes(track)) return;
+      state.tracks.push(track); dispatchMediaEvent(this, "addtrack", new MediaStreamTrackEvent("addtrack", { track }));
+    }
+    removeTrack(track) {
+      const state = mediaStreamState.get(this); if (!state) illegalInvocation();
+      const index = state.tracks.indexOf(track); if (index < 0) return;
+      state.tracks.splice(index, 1); dispatchMediaEvent(this, "removetrack", new MediaStreamTrackEvent("removetrack", { track }));
+    }
+    clone() { return new MediaStream(this.getTracks().map(track => track.clone())); }
+    get [Symbol.toStringTag]() { return "MediaStream"; }
+  }
+  for (const type of ["addtrack", "removetrack"]) defineEventHandler(MediaStream.prototype, type);
+  const canvasCaptureTrackState = new WeakMap();
+  /// A video track whose frames come from a canvas. Its settings follow the
+  /// canvas's current size; frames are not encoded because no consumer reads
+  /// captured video yet.
+  class CanvasCaptureMediaStreamTrack extends MediaStreamTrack {
+    constructor(token, canvas, frameRate) {
+      if (token !== mediaCaptureToken) throw new TypeError("Illegal constructor");
+      super(token, { kind: "video" });
+      canvasCaptureTrackState.set(this, { canvas, frameRate });
+    }
+    get canvas() { return canvasCaptureTrackState.get(this)?.canvas ?? illegalInvocation(); }
+    requestFrame() { if (!canvasCaptureTrackState.has(this)) illegalInvocation(); }
+    getSettings() {
+      const state = canvasCaptureTrackState.get(this); if (!state) illegalInvocation();
+      const settings = { width: state.canvas.width, height: state.canvas.height };
+      if (state.frameRate !== undefined) settings.frameRate = state.frameRate;
+      return settings;
+    }
+    clone() {
+      const state = canvasCaptureTrackState.get(this); if (!state) illegalInvocation();
+      const track = new CanvasCaptureMediaStreamTrack(mediaCaptureToken, state.canvas, state.frameRate);
+      if (!this.enabled) track.enabled = false;
+      if (this.readyState === "ended") track.stop();
+      return track;
+    }
+    get [Symbol.toStringTag]() { return "CanvasCaptureMediaStreamTrack"; }
+  }
+  /// Implements `HTMLCanvasElement.captureStream(frameRequestRate)`: a new
+  /// stream holding one canvas capture track. A negative rate is rejected.
+  function canvasCaptureStream(canvas, frameRequestRate) {
+    let frameRate;
+    if (frameRequestRate !== undefined) {
+      frameRate = Number(frameRequestRate);
+      if (!Number.isFinite(frameRate)) throw new TypeError("frameRequestRate must be a finite number");
+      if (frameRate < 0) throw new DOMException("frameRequestRate must not be negative", "NotSupportedError");
+    }
+    return new MediaStream([new CanvasCaptureMediaStreamTrack(mediaCaptureToken, canvas, frameRate)]);
+  }
+  const mediaCaptureToken = {};
+  function mediaSnapshot() { return JSON.parse(String(nativeMediaCaptureSnapshot(__omoikane_document_id))); }
+  function requestedDeviceId(value) {
+    if (value == null || value === true) return null;
+    if (value === false) return false;
+    const object = Object(value);
+    const deviceId = object.deviceId;
+    if (deviceId == null) return null;
+    if (typeof deviceId === "object" && deviceId.exact !== undefined) return String(deviceId.exact);
+    return typeof deviceId === "string" ? deviceId : null;
+  }
+  function captureTracks(constraints, display) {
+    if (!nativeIsSecureContext()) throw new DOMException("Media capture requires a secure context.", "NotAllowedError");
+    const snapshot = mediaSnapshot();
+    if (!snapshot.permission) throw new DOMException("Media capture permission was denied.", "NotAllowedError");
+    const value = constraints == null ? {} : Object(constraints);
+    const requested = display ? [["video", value.video === undefined ? true : value.video]] : [["audio", value.audio], ["video", value.video]];
+    if (!requested.some(([, constraint]) => constraint !== undefined && constraint !== false)) throw new TypeError("At least one media kind must be requested");
+    return requested.flatMap(([kind, constraint]) => {
+      if (constraint === undefined || constraint === false) return [];
+      const deviceKind = kind === "audio" ? "audioinput" : "videoinput";
+      const exact = requestedDeviceId(constraint);
+      const device = snapshot.devices.find(item => item.kind === deviceKind && (exact == null || item.deviceId === exact));
+      if (!device) throw new DOMException(exact == null ? "No capture device is available." : "No device satisfies the constraints.", exact == null ? "NotFoundError" : "OverconstrainedError");
+      return [new MediaStreamTrack(mediaCaptureToken, { kind, label: device.label, deviceId: device.deviceId })];
+    });
+  }
+  class MediaDevices extends MediaEventTarget {
+    constructor(token) { super(); if (token !== mediaCaptureToken) throw new TypeError("Illegal constructor"); }
+    enumerateDevices() { return Promise.resolve().then(() => mediaSnapshot().devices.map(device => new MediaDeviceInfo(mediaCaptureToken, device))); }
+    getUserMedia(constraints) { return Promise.resolve().then(() => new MediaStream(captureTracks(constraints, false))); }
+    getDisplayMedia(constraints = { video: true }) { return Promise.resolve().then(() => new MediaStream(captureTracks(constraints, true))); }
+    getSupportedConstraints() { return { deviceId: true, groupId: true, width: true, height: true, frameRate: true, sampleRate: true, channelCount: true }; }
+    get [Symbol.toStringTag]() { return "MediaDevices"; }
+  }
+  defineEventHandler(MediaDevices.prototype, "devicechange");
+  class BlobEvent {
+    constructor(type, init) { if (!init || !(init.data instanceof Blob)) throw new TypeError("BlobEvent requires data"); const event = new globalThis.Event(type, init); Object.setPrototypeOf(event, BlobEvent.prototype); Object.defineProperties(event, { data: { enumerable: true, value: init.data }, timecode: { enumerable: true, value: init.timecode === undefined ? NaN : Number(init.timecode) } }); return event; }
+    get [Symbol.toStringTag]() { return "BlobEvent"; }
+  }
+  const recorderState = new WeakMap();
+  class MediaRecorder extends MediaEventTarget {
+    constructor(stream, options = {}) {
+      super(); if (!(stream instanceof MediaStream)) throw new TypeError("MediaRecorder requires a MediaStream");
+      const init = options == null ? {} : Object(options); const mimeType = init.mimeType === undefined ? "" : String(init.mimeType);
+      if (mimeType && !MediaRecorder.isTypeSupported(mimeType)) throw new DOMException("Unsupported recording MIME type.", "NotSupportedError");
+      const audioBitsPerSecond = init.audioBitsPerSecond === undefined ? 128000 : Number(init.audioBitsPerSecond) >>> 0;
+      const videoBitsPerSecond = init.videoBitsPerSecond === undefined ? 2500000 : Number(init.videoBitsPerSecond) >>> 0;
+      recorderState.set(this, { stream, state: "inactive", mimeType, sequence: 0, timer: 0, audioBitsPerSecond, videoBitsPerSecond });
+    }
+    get stream() { return recorderState.get(this)?.stream ?? illegalInvocation(); }
+    get state() { return recorderState.get(this)?.state ?? illegalInvocation(); }
+    get mimeType() { return recorderState.get(this)?.mimeType ?? illegalInvocation(); }
+    get audioBitsPerSecond() { return recorderState.get(this)?.audioBitsPerSecond ?? illegalInvocation(); }
+    get videoBitsPerSecond() { return recorderState.get(this)?.videoBitsPerSecond ?? illegalInvocation(); }
+    get audioBitrateMode() { if (!recorderState.has(this)) illegalInvocation(); return "variable"; }
+    start(timeslice = undefined) { const state = recorderState.get(this); if (!state) illegalInvocation(); if (state.state !== "inactive") throw new DOMException("Recorder is not inactive.", "InvalidStateError"); if (!state.stream.active) throw new DOMException("The stream has no live tracks.", "NotSupportedError"); state.state = "recording"; const interval = timeslice === undefined ? 0 : Math.max(0, Number(timeslice) || 0); if (interval > 0) this.__scheduleSlice(interval); queueMicrotask(() => dispatchMediaEvent(this, "start")); }
+    stop() { const state = recorderState.get(this); if (!state) illegalInvocation(); if (state.state === "inactive") return; state.state = "inactive"; if (state.timer) { clearTimeout(state.timer); state.timer = 0; } queueMicrotask(() => { this.__emitData(); dispatchMediaEvent(this, "stop"); }); }
+    pause() { const state = recorderState.get(this); if (!state) illegalInvocation(); if (state.state !== "recording") throw new DOMException("Recorder is not recording.", "InvalidStateError"); state.state = "paused"; queueMicrotask(() => dispatchMediaEvent(this, "pause")); }
+    resume() { const state = recorderState.get(this); if (!state) illegalInvocation(); if (state.state !== "paused") throw new DOMException("Recorder is not paused.", "InvalidStateError"); state.state = "recording"; queueMicrotask(() => dispatchMediaEvent(this, "resume")); }
+    requestData() { const state = recorderState.get(this); if (!state) illegalInvocation(); if (state.state === "inactive") throw new DOMException("Recorder is inactive.", "InvalidStateError"); queueMicrotask(() => this.__emitData()); }
+    __scheduleSlice(interval) { const state = recorderState.get(this); state.timer = setTimeout(() => { state.timer = 0; if (state.state !== "inactive") { if (state.state === "recording") this.__emitData(); this.__scheduleSlice(interval); } }, interval); }
+    __emitData() { const state = recorderState.get(this); const bytes = new TextEncoder().encode(`OMOIKANE-MEDIA-${state.sequence++}`); const type = state.mimeType || (state.stream.getVideoTracks().length ? "video/webm" : "audio/webm"); dispatchMediaEvent(this, "dataavailable", new BlobEvent("dataavailable", { data: new Blob([bytes], { type }), timecode: state.sequence })); }
+    static isTypeSupported(type) { const value = String(type).toLowerCase().replace(/\s+/g, ""); return value === "" || value === "video/webm" || value === "audio/webm" || value === "video/webm;codecs=vp8" || value === "audio/webm;codecs=opus"; }
+    get [Symbol.toStringTag]() { return "MediaRecorder"; }
+  }
+  for (const type of ["start", "stop", "dataavailable", "pause", "resume", "error"]) defineEventHandler(MediaRecorder.prototype, type);
+
+  const webCodecChunkState = new WeakMap();
+  function ownedBufferSource(value, label = "data") {
+    if (value instanceof ArrayBuffer) return new Uint8Array(value).slice();
+    if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+    throw new TypeError(`${label} must be a BufferSource`);
+  }
+  function copyOwnedBytes(bytes, destination) {
+    let target;
+    if (destination instanceof ArrayBuffer) target = new Uint8Array(destination);
+    else if (ArrayBuffer.isView(destination)) target = new Uint8Array(destination.buffer, destination.byteOffset, destination.byteLength);
+    else throw new TypeError("destination must be a BufferSource");
+    if (target.byteLength < bytes.byteLength) throw new TypeError("destination is not large enough");
+    target.set(bytes);
+  }
+  class EncodedVideoChunk {
+    constructor(init) {
+      const value = Object(init); const type = String(value.type);
+      if (type !== "key" && type !== "delta") throw new TypeError("Invalid encoded video chunk type");
+      if (value.timestamp === undefined || value.data === undefined) throw new TypeError("EncodedVideoChunk requires timestamp and data");
+      webCodecChunkState.set(this, { type, timestamp: Number(value.timestamp), duration: value.duration === undefined ? null : Number(value.duration), bytes: ownedBufferSource(value.data) });
+    }
+    __state() { return webCodecChunkState.get(this) || illegalInvocation(); }
+    get type() { return this.__state().type; } get timestamp() { return this.__state().timestamp; }
+    get duration() { return this.__state().duration; } get byteLength() { return this.__state().bytes.byteLength; }
+    copyTo(destination) { copyOwnedBytes(this.__state().bytes, destination); }
+    get [Symbol.toStringTag]() { return "EncodedVideoChunk"; }
+  }
+  class EncodedAudioChunk {
+    constructor(init) {
+      const value = Object(init); const type = String(value.type);
+      if (type !== "key" && type !== "delta") throw new TypeError("Invalid encoded audio chunk type");
+      if (value.timestamp === undefined || value.data === undefined) throw new TypeError("EncodedAudioChunk requires timestamp and data");
+      webCodecChunkState.set(this, { type, timestamp: Number(value.timestamp), duration: value.duration === undefined ? null : Number(value.duration), bytes: ownedBufferSource(value.data) });
+    }
+    __state() { return webCodecChunkState.get(this) || illegalInvocation(); }
+    get type() { return this.__state().type; } get timestamp() { return this.__state().timestamp; }
+    get duration() { return this.__state().duration; } get byteLength() { return this.__state().bytes.byteLength; }
+    copyTo(destination) { copyOwnedBytes(this.__state().bytes, destination); }
+    get [Symbol.toStringTag]() { return "EncodedAudioChunk"; }
+  }
+  class VideoColorSpace {
+    constructor(init = {}) { const value = Object(init); for (const name of ["primaries", "transfer", "matrix", "fullRange"]) Object.defineProperty(this, name, { enumerable: true, value: value[name] === undefined ? null : value[name] }); }
+    toJSON() { return { primaries: this.primaries, transfer: this.transfer, matrix: this.matrix, fullRange: this.fullRange }; }
+    get [Symbol.toStringTag]() { return "VideoColorSpace"; }
+  }
+  const audioDataState = new WeakMap();
+  const audioFormats = Object.freeze({ u8: [Uint8Array, 1], "u8-planar": [Uint8Array, 1], s16: [Int16Array, 2], "s16-planar": [Int16Array, 2], s32: [Int32Array, 4], "s32-planar": [Int32Array, 4], f32: [Float32Array, 4], "f32-planar": [Float32Array, 4] });
+  class AudioData {
+    constructor(init) {
+      const value = Object(init);
+      for (const name of ["format", "sampleRate", "numberOfFrames", "numberOfChannels", "timestamp", "data"]) if (value[name] === undefined) throw new TypeError(`AudioData requires ${name}`);
+      const format = String(value.format), info = audioFormats[format];
+      const sampleRate = Number(value.sampleRate), numberOfFrames = Number(value.numberOfFrames) >>> 0, numberOfChannels = Number(value.numberOfChannels) >>> 0;
+      if (!info || !(sampleRate > 0) || !numberOfFrames || !numberOfChannels) throw new TypeError("Invalid AudioData initialization");
+      const bytes = ownedBufferSource(value.data); const required = numberOfFrames * numberOfChannels * info[1];
+      if (bytes.byteLength < required) throw new TypeError("AudioDataInit.data is too small");
+      audioDataState.set(this, { format, sampleRate, numberOfFrames, numberOfChannels, timestamp: Number(value.timestamp), duration: numberOfFrames / sampleRate * 1000000, bytes: bytes.slice(0, required), closed: false });
+    }
+    __state() { return audioDataState.get(this) || illegalInvocation(); }
+    get format() { const s=this.__state(); return s.closed ? null : s.format; } get sampleRate() { const s=this.__state(); return s.closed ? 0 : s.sampleRate; }
+    get numberOfFrames() { const s=this.__state(); return s.closed ? 0 : s.numberOfFrames; } get numberOfChannels() { const s=this.__state(); return s.closed ? 0 : s.numberOfChannels; }
+    get duration() { return this.__state().duration; } get timestamp() { return this.__state().timestamp; }
+    allocationSize(options) { const s=this.__state(); if (s.closed) throw new DOMException("AudioData is closed", "InvalidStateError"); const o=Object(options), plane=Number(o.planeIndex)>>>0; const planar=s.format.endsWith("-planar"); if ((!planar && plane) || plane>=s.numberOfChannels) throw new RangeError("Invalid planeIndex"); const offset=Number(o.frameOffset||0)>>>0, count=o.frameCount===undefined?s.numberOfFrames-offset:Number(o.frameCount)>>>0; if(offset+count>s.numberOfFrames) throw new RangeError("Invalid frame range"); return count*(planar?1:s.numberOfChannels)*audioFormats[s.format][1]; }
+    copyTo(destination, options) { const s=this.__state(); const size=this.allocationSize(options); const target=ownedDestination(destination, size); const o=Object(options), plane=Number(o.planeIndex)>>>0, offset=Number(o.frameOffset||0)>>>0, bps=audioFormats[s.format][1], planar=s.format.endsWith("-planar"); const start=(planar?plane*s.numberOfFrames+offset:offset*s.numberOfChannels)*bps; target.set(s.bytes.subarray(start,start+size)); }
+    clone() { const s=this.__state(); if(s.closed) throw new DOMException("AudioData is closed", "InvalidStateError"); return new AudioData({ format:s.format, sampleRate:s.sampleRate, numberOfFrames:s.numberOfFrames, numberOfChannels:s.numberOfChannels, timestamp:s.timestamp, data:s.bytes }); }
+    close() { this.__state().closed=true; } get [Symbol.toStringTag]() { return "AudioData"; }
+  }
+  function ownedDestination(value, minimum) { let out; if(value instanceof ArrayBuffer) out=new Uint8Array(value); else if(ArrayBuffer.isView(value)) out=new Uint8Array(value.buffer,value.byteOffset,value.byteLength); else throw new TypeError("destination must be a BufferSource"); if(out.byteLength<minimum) throw new RangeError("destination is too small"); return out; }
+  const videoFrameState = new WeakMap();
+  function videoFormatSize(format, width, height) { if(format==="RGBA"||format==="RGBX"||format==="BGRA"||format==="BGRX") return width*height*4; if(format==="I420") return width*height+2*Math.ceil(width/2)*Math.ceil(height/2); if(format==="NV12") return width*height+2*Math.ceil(width/2)*Math.ceil(height/2); throw new TypeError("Unsupported VideoFrame format"); }
+  class VideoFrame {
+    constructor(source, init = {}) {
+      if (source instanceof VideoFrame) { const s=source.__state(); if(s.closed) throw new DOMException("VideoFrame is closed", "InvalidStateError"); videoFrameState.set(this,{...s,bytes:s.bytes.slice(),closed:false,timestamp:init.timestamp===undefined?s.timestamp:Number(init.timestamp),duration:init.duration===undefined?s.duration:Number(init.duration)}); return; }
+      const value=Object(init); if(value.format===undefined||value.codedWidth===undefined||value.codedHeight===undefined||value.timestamp===undefined) throw new TypeError("Raw VideoFrame requires format, codedWidth, codedHeight and timestamp");
+      const format=String(value.format), codedWidth=Number(value.codedWidth)>>>0, codedHeight=Number(value.codedHeight)>>>0; if(!codedWidth||!codedHeight) throw new TypeError("Invalid VideoFrame dimensions"); const size=videoFormatSize(format,codedWidth,codedHeight), bytes=ownedBufferSource(source); if(bytes.byteLength<size) throw new TypeError("VideoFrame data is too small");
+      videoFrameState.set(this,{format,codedWidth,codedHeight,displayWidth:value.displayWidth===undefined?codedWidth:Number(value.displayWidth)>>>0,displayHeight:value.displayHeight===undefined?codedHeight:Number(value.displayHeight)>>>0,visibleRect:Object.freeze(value.visibleRect?{...value.visibleRect}:{x:0,y:0,width:codedWidth,height:codedHeight}),timestamp:Number(value.timestamp),duration:value.duration===undefined?null:Number(value.duration),colorSpace:new VideoColorSpace(value.colorSpace),bytes:bytes.slice(0,size),closed:false});
+    }
+    __state(){return videoFrameState.get(this)||illegalInvocation();} get format(){const s=this.__state();return s.closed?null:s.format;} get codedWidth(){const s=this.__state();return s.closed?0:s.codedWidth;} get codedHeight(){const s=this.__state();return s.closed?0:s.codedHeight;} get displayWidth(){const s=this.__state();return s.closed?0:s.displayWidth;} get displayHeight(){const s=this.__state();return s.closed?0:s.displayHeight;} get visibleRect(){const s=this.__state();return s.closed?null:s.visibleRect;} get timestamp(){return this.__state().timestamp;} get duration(){return this.__state().duration;} get colorSpace(){return this.__state().colorSpace;}
+    allocationSize(){const s=this.__state();if(s.closed)throw new DOMException("VideoFrame is closed","InvalidStateError");return s.bytes.byteLength;} copyTo(destination){const s=this.__state();const target=ownedDestination(destination,this.allocationSize());target.set(s.bytes);return Promise.resolve([{offset:0,stride:s.codedWidth*(s.format.startsWith("RGB")||s.format.startsWith("BGR")?4:1)}]);} clone(){return new VideoFrame(this);} close(){this.__state().closed=true;} metadata(){if(this.__state().closed)throw new DOMException("VideoFrame is closed","InvalidStateError");return {};} get [Symbol.toStringTag](){return "VideoFrame";}
+  }
+  const codecState = new WeakMap();
+  function codecConfig(kind, value) { const v=Object(value); if(v.codec===undefined||String(v.codec)==="") throw new TypeError("codec is required"); const out={kind,codec:String(v.codec)}; if(kind.startsWith("video")){ if(kind==="video-encoder"&&(v.width===undefined||v.height===undefined))throw new TypeError("VideoEncoder requires width and height"); out.codedWidth=Number(v.codedWidth===undefined?v.width:v.codedWidth)>>>0||undefined; out.codedHeight=Number(v.codedHeight===undefined?v.height:v.codedHeight)>>>0||undefined; } else { out.sampleRate=Number(v.sampleRate)>>>0||undefined; out.numberOfChannels=Number(v.numberOfChannels)>>>0||undefined; if(kind==="audio-encoder"&&(!out.sampleRate||!out.numberOfChannels))throw new TypeError("AudioEncoder requires sampleRate and numberOfChannels"); } return out; }
+  function codecSupport(kind, config) { let normalized; try{normalized=codecConfig(kind,config);}catch(error){return Promise.reject(error);} const supported=!!__omoikane_web_codecs("supports",JSON.stringify(normalized),"",new Uint8Array()); return Promise.resolve({supported,config:{...Object(config)}}); }
+  class CodecBase extends MediaEventTarget {
+    constructor(kind, init){super();const value=Object(init);if(typeof value.output!=="function"||typeof value.error!=="function")throw new TypeError("Codec requires output and error callbacks");codecState.set(this,{kind,state:"unconfigured",config:null,output:value.output,error:value.error,queue:0,generation:0,flushes:[]});}
+    __state(){return codecState.get(this)||illegalInvocation();} get state(){return this.__state().state;} get decodeQueueSize(){const s=this.__state();if(!s.kind.endsWith("decoder"))return undefined;return s.queue;} get encodeQueueSize(){const s=this.__state();if(!s.kind.endsWith("encoder"))return undefined;return s.queue;}
+    configure(config){const s=this.__state();if(s.state==="closed")throw new DOMException("Codec is closed","InvalidStateError");const normalized=codecConfig(s.kind,config);s.state="configured";s.config=normalized;s.generation++;const generation=s.generation;queueMicrotask(()=>{if(s.generation!==generation||s.state!=="configured")return;if(!__omoikane_web_codecs("supports",JSON.stringify(normalized),"",new Uint8Array()))this.__fail(new DOMException("Unsupported codec configuration","NotSupportedError"));});}
+    __submit(value, requestedKeyFrame=false){const s=this.__state();if(s.state!=="configured")throw new DOMException("Codec is not configured","InvalidStateError");let bytes,timestamp,duration,keyFrame=!!requestedKeyFrame;if(value instanceof EncodedVideoChunk||value instanceof EncodedAudioChunk){const c=webCodecChunkState.get(value);bytes=c.bytes;timestamp=c.timestamp;duration=c.duration;keyFrame=c.type==="key";}else if(value instanceof VideoFrame){const f=videoFrameState.get(value);if(f.closed)throw new DOMException("VideoFrame is closed","InvalidStateError");bytes=f.bytes;timestamp=f.timestamp;duration=f.duration;}else if(value instanceof AudioData){const a=audioDataState.get(value);if(a.closed)throw new DOMException("AudioData is closed","InvalidStateError");bytes=a.bytes;timestamp=a.timestamp;duration=a.duration;}else throw new TypeError("Invalid codec input");s.queue++;const generation=s.generation;queueMicrotask(()=>{if(s.generation!==generation||s.state!=="configured")return;try{const result=JSON.parse(String(__omoikane_web_codecs("process",JSON.stringify(s.config),JSON.stringify({kind:s.kind,codec:s.config.codec,timestamp,duration,keyFrame}),bytes)));let output;if(s.kind==="video-decoder")output=new VideoFrame(new Uint8Array(result.data),{format:"RGBA",codedWidth:s.config.codedWidth||1,codedHeight:s.config.codedHeight||Math.max(1,Math.floor(result.data.length/4)),timestamp:result.timestamp,duration:result.duration});else if(s.kind==="audio-decoder")output=new AudioData({format:"f32",sampleRate:s.config.sampleRate||48000,numberOfChannels:s.config.numberOfChannels||1,numberOfFrames:Math.max(1,Math.floor(result.data.length/4/(s.config.numberOfChannels||1))),timestamp:result.timestamp,data:new Uint8Array(result.data)});else if(s.kind==="video-encoder")output=new EncodedVideoChunk({type:keyFrame?"key":"delta",timestamp:result.timestamp,duration:result.duration,data:new Uint8Array(result.data)});else output=new EncodedAudioChunk({type:"key",timestamp:result.timestamp,duration:result.duration,data:new Uint8Array(result.data)});s.output(output,{});}catch(error){this.__fail(new DOMException(String(error),String(error).includes("NotSupportedError")?"NotSupportedError":"EncodingError"));return;}finally{if(s.queue>0){s.queue--;dispatchMediaEvent(this,"dequeue");}}this.__settleFlushes();});}
+    flush(){const s=this.__state();if(s.state!=="configured")return Promise.reject(new DOMException("Codec is not configured","InvalidStateError"));return new Promise((resolve,reject)=>{s.flushes.push({resolve,reject,generation:s.generation});this.__settleFlushes();});}
+    __settleFlushes(){const s=this.__state();if(s.queue)return;const list=s.flushes.splice(0);queueMicrotask(()=>list.forEach(item=>item.generation===s.generation?item.resolve():item.reject(new DOMException("Flush was reset","AbortError"))));}
+    reset(){const s=this.__state();if(s.state==="closed")throw new DOMException("Codec is closed","InvalidStateError");s.state="unconfigured";s.config=null;s.queue=0;s.generation++;this.__settleFlushes();}
+    close(){const s=this.__state();if(s.state==="closed")return;s.state="closed";s.config=null;s.queue=0;s.generation++;this.__settleFlushes();}
+    __fail(error){const s=this.__state();if(s.state==="closed")return;s.state="closed";s.queue=0;s.generation++;queueMicrotask(()=>s.error(error));this.__settleFlushes();}
+  }
+  defineEventHandler(CodecBase.prototype,"dequeue");
+  class VideoDecoder extends CodecBase{constructor(init){super("video-decoder",init);this.__state().keyRequired=true;}configure(config){super.configure(config);this.__state().keyRequired=true;}decode(chunk){if(!(chunk instanceof EncodedVideoChunk))throw new TypeError("decode requires EncodedVideoChunk");const s=this.__state();if(s.keyRequired&&chunk.type!=="key")throw new DOMException("A key chunk is required","DataError");s.keyRequired=false;this.__submit(chunk);}reset(){super.reset();this.__state().keyRequired=true;}static isConfigSupported(config){return codecSupport("video-decoder",config);}}
+  class VideoEncoder extends CodecBase{constructor(init){super("video-encoder",init);}encode(frame,options={}){if(!(frame instanceof VideoFrame))throw new TypeError("encode requires VideoFrame");this.__submit(frame,!!Object(options).keyFrame);}static isConfigSupported(config){return codecSupport("video-encoder",config);}}
+  class AudioDecoder extends CodecBase{constructor(init){super("audio-decoder",init);}decode(chunk){if(!(chunk instanceof EncodedAudioChunk))throw new TypeError("decode requires EncodedAudioChunk");this.__submit(chunk);}static isConfigSupported(config){return codecSupport("audio-decoder",config);}}
+  class AudioEncoder extends CodecBase{constructor(init){super("audio-encoder",init);}encode(data){if(!(data instanceof AudioData))throw new TypeError("encode requires AudioData");this.__submit(data);}static isConfigSupported(config){return codecSupport("audio-encoder",config);}}
+  const imageDecoderState = new WeakMap();
+  class ImageDecoder {
+    constructor(init) {
+      const value=Object(init); if(value.type===undefined||value.data===undefined)throw new TypeError("ImageDecoder requires type and data");
+      const type=String(value.type); if(type==="")throw new TypeError("ImageDecoder type must not be empty");
+      const data=ownedBufferSource(value.data); const config={kind:"image-decoder",codec:type,codedWidth:Number(value.desiredWidth)>>>0||undefined,codedHeight:Number(value.desiredHeight)>>>0||undefined};
+      const supported=!!__omoikane_web_codecs("supports",JSON.stringify(config),"",new Uint8Array());
+      const track=Object.freeze({animated:false,frameCount:supported?1:0,repetitionCount:0,selected:true});
+      const tracks=Object.freeze({ready:Promise.resolve(),selectedTrack:track,length:1,0:track});
+      imageDecoderState.set(this,{type,data,config,supported,closed:false,complete:true,tracks});
+      this.completed=supported?Promise.resolve():Promise.reject(new DOMException("Unsupported image type","NotSupportedError"));
+      this.completed.catch(()=>{});
+    }
+    __state(){return imageDecoderState.get(this)||illegalInvocation();}
+    get type(){return this.__state().type;} get complete(){return this.__state().complete;} get tracks(){return this.__state().tracks;}
+    decode(options={}){const s=this.__state();if(s.closed)return Promise.reject(new DOMException("ImageDecoder is closed","InvalidStateError"));if(!s.supported)return Promise.reject(new DOMException("Unsupported image type","NotSupportedError"));return Promise.resolve().then(()=>{const result=JSON.parse(String(__omoikane_web_codecs("process",JSON.stringify(s.config),JSON.stringify({kind:"image-decoder",codec:s.type,timestamp:0,duration:null,keyFrame:true}),s.data)));const width=s.config.codedWidth||1,height=s.config.codedHeight||Math.max(1,Math.floor(result.data.length/4));return {image:new VideoFrame(new Uint8Array(result.data),{format:"RGBA",codedWidth:width,codedHeight:height,timestamp:0}),complete:true};});}
+    reset(){const s=this.__state();if(s.closed)throw new DOMException("ImageDecoder is closed","InvalidStateError");}
+    close(){this.__state().closed=true;}
+    static isTypeSupported(type){const codec=String(type);if(codec==="")return Promise.reject(new TypeError("Image type must not be empty"));return Promise.resolve(!!__omoikane_web_codecs("supports",JSON.stringify({kind:"image-decoder",codec}),"",new Uint8Array()));}
+    get [Symbol.toStringTag](){return "ImageDecoder";}
+  }
+
+  const mediaSourceToken = {};
+  const mediaSourceObjectUrls = new Map();
+  const mediaSourceState = new WeakMap();
+  const sourceBufferState = new WeakMap();
+  class MediaTimeRanges {
+    constructor(ranges = []) { this.__ranges = ranges; }
+    get length() { return this.__ranges.length; }
+    start(index) { if (index < 0 || index >= this.length) throw new DOMException("Invalid range index.", "IndexSizeError"); return this.__ranges[index][0]; }
+    end(index) { if (index < 0 || index >= this.length) throw new DOMException("Invalid range index.", "IndexSizeError"); return this.__ranges[index][1]; }
+  }
+  class SourceBufferList extends MediaEventTarget {
+    constructor(token) { super(); if (token !== mediaSourceToken) throw new TypeError("Illegal constructor"); this.__items = []; }
+    get length() { return this.__items.length; }
+    __sync() { for (const key of Object.keys(this)) if (/^\d+$/.test(key)) delete this[key]; this.__items.forEach((item, index) => Object.defineProperty(this, index, { configurable: true, enumerable: true, value: item })); }
+    [Symbol.iterator]() { return this.__items[Symbol.iterator](); }
+  }
+  for (const type of ["addsourcebuffer", "removesourcebuffer"]) defineEventHandler(SourceBufferList.prototype, type);
+  class SourceBuffer extends MediaEventTarget {
+    constructor(token, owner, mimeType) { super(); if (token !== mediaSourceToken) throw new TypeError("Illegal constructor"); sourceBufferState.set(this, { owner, mimeType, updating: false, ranges: [], timestampOffset: 0, appendWindowStart: 0, appendWindowEnd: Infinity, mode: "segments" }); }
+    __state() { return sourceBufferState.get(this) || illegalInvocation(); }
+    get updating() { return this.__state().updating; }
+    get buffered() { return new MediaTimeRanges(this.__state().ranges.slice()); }
+    get timestampOffset() { return this.__state().timestampOffset; }
+    set timestampOffset(value) { const state = this.__state(); if (state.updating) throw new DOMException("SourceBuffer is updating.", "InvalidStateError"); state.timestampOffset = Number(value); }
+    get appendWindowStart() { return this.__state().appendWindowStart; }
+    set appendWindowStart(value) { const state = this.__state(); const next = Number(value); if (next < 0 || next >= state.appendWindowEnd) throw new TypeError("Invalid append window"); state.appendWindowStart = next; }
+    get appendWindowEnd() { return this.__state().appendWindowEnd; }
+    set appendWindowEnd(value) { const state = this.__state(); const next = Number(value); if (Number.isNaN(next) || next <= state.appendWindowStart) throw new TypeError("Invalid append window"); state.appendWindowEnd = next; }
+    get mode() { return this.__state().mode; }
+    set mode(value) { const state = this.__state(); const next = String(value); if (next !== "segments" && next !== "sequence") throw new TypeError("Invalid SourceBuffer mode"); if (state.updating) throw new DOMException("SourceBuffer is updating.", "InvalidStateError"); state.mode = next; }
+    appendBuffer(data) {
+      const state = this.__state();
+      if (state.updating || mediaSourceState.get(state.owner).readyState !== "open") throw new DOMException("SourceBuffer cannot append now.", "InvalidStateError");
+      let result;
+      try { result = JSON.parse(String(__omoikane_media_source("append", state.mimeType, data))); }
+      catch (error) { const text = String(error); const name = text.includes("QuotaExceededError") ? "QuotaExceededError" : text.includes("NotSupportedError") ? "NotSupportedError" : "EncodingError"; throw new DOMException(text, name); }
+      state.updating = true; dispatchMediaEvent(this, "updatestart");
+      queueMediaTask(() => { if (!state.updating) return; const start = state.mode === "sequence" && state.ranges.length ? state.ranges[state.ranges.length - 1][1] : state.timestampOffset; const end = Math.min(start + Number(result.duration), state.appendWindowEnd); if (end > state.appendWindowStart) state.ranges.push([Math.max(start, state.appendWindowStart), end]); state.updating = false; dispatchMediaEvent(this, "update"); dispatchMediaEvent(this, "updateend"); });
+    }
+    remove(start, end) { const state = this.__state(); const from = Number(start), to = Number(end); if (state.updating) throw new DOMException("SourceBuffer is updating.", "InvalidStateError"); if (from < 0 || !(to > from)) throw new TypeError("Invalid removal range"); state.updating = true; dispatchMediaEvent(this, "updatestart"); queueMediaTask(() => { state.ranges = state.ranges.flatMap(([a,b]) => b <= from || a >= to ? [[a,b]] : [[a, Math.min(b, from)], [Math.max(a, to), b]].filter(([x,y]) => y > x)); state.updating = false; dispatchMediaEvent(this, "update"); dispatchMediaEvent(this, "updateend"); }); }
+    abort() { const state = this.__state(); if (mediaSourceState.get(state.owner).readyState !== "open") throw new DOMException("MediaSource is not open.", "InvalidStateError"); if (state.updating) { state.updating = false; dispatchMediaEvent(this, "abort"); dispatchMediaEvent(this, "updateend"); } state.appendWindowStart = 0; state.appendWindowEnd = Infinity; }
+    changeType(type) { const state = this.__state(); const next = String(type); if (!MediaSource.isTypeSupported(next)) throw new DOMException("Unsupported media type.", "NotSupportedError"); if (state.updating) throw new DOMException("SourceBuffer is updating.", "InvalidStateError"); state.mimeType = next; }
+  }
+  for (const type of ["updatestart", "update", "updateend", "error", "abort"]) defineEventHandler(SourceBuffer.prototype, type);
+  class MediaSourceHandle { constructor(token, source) { if (token !== mediaSourceToken) throw new TypeError("Illegal constructor"); this.__source = source; } }
+  class MediaSource extends MediaEventTarget {
+    constructor() { super(); mediaSourceState.set(this, { readyState: "closed", duration: NaN, sourceBuffers: new SourceBufferList(mediaSourceToken), activeSourceBuffers: new SourceBufferList(mediaSourceToken), handle: null }); }
+    __state() { return mediaSourceState.get(this) || illegalInvocation(); }
+    get readyState() { return this.__state().readyState; }
+    get sourceBuffers() { return this.__state().sourceBuffers; }
+    get activeSourceBuffers() { return this.__state().activeSourceBuffers; }
+    get duration() { return this.__state().duration; }
+    set duration(value) { const state = this.__state(); const next = Number(value); if (state.readyState !== "open" || Number.isNaN(next) || next < 0) throw new DOMException("Invalid duration.", "InvalidStateError"); state.duration = next; }
+    get handle() { const state = this.__state(); return state.handle || (state.handle = new MediaSourceHandle(mediaSourceToken, this)); }
+    addSourceBuffer(type) { const state = this.__state(); const mimeType = String(type); if (state.readyState !== "open") throw new DOMException("MediaSource is not open.", "InvalidStateError"); if (!MediaSource.isTypeSupported(mimeType)) throw new DOMException("Unsupported media type.", "NotSupportedError"); const buffer = new SourceBuffer(mediaSourceToken, this, mimeType); state.sourceBuffers.__items.push(buffer); state.activeSourceBuffers.__items.push(buffer); state.sourceBuffers.__sync(); state.activeSourceBuffers.__sync(); dispatchMediaEvent(state.sourceBuffers, "addsourcebuffer"); return buffer; }
+    removeSourceBuffer(buffer) { const state = this.__state(); const index = state.sourceBuffers.__items.indexOf(buffer); if (index < 0) throw new DOMException("SourceBuffer is not attached.", "NotFoundError"); state.sourceBuffers.__items.splice(index, 1); state.activeSourceBuffers.__items = state.activeSourceBuffers.__items.filter(item => item !== buffer); state.sourceBuffers.__sync(); state.activeSourceBuffers.__sync(); sourceBufferState.delete(buffer); dispatchMediaEvent(state.sourceBuffers, "removesourcebuffer"); }
+    endOfStream(error = undefined) { const state = this.__state(); if (state.readyState !== "open" || state.sourceBuffers.__items.some(buffer => buffer.updating)) throw new DOMException("MediaSource cannot end now.", "InvalidStateError"); if (error !== undefined && error !== "network" && error !== "decode") throw new TypeError("Invalid endOfStream error"); state.readyState = "ended"; dispatchMediaEvent(this, "sourceended"); }
+    setLiveSeekableRange(start, end) { const state = this.__state(); if (state.readyState !== "open") throw new DOMException("MediaSource is not open.", "InvalidStateError"); state.liveRange = [Number(start), Number(end)]; }
+    clearLiveSeekableRange() { const state = this.__state(); if (state.readyState !== "open") throw new DOMException("MediaSource is not open.", "InvalidStateError"); state.liveRange = null; }
+    static isTypeSupported(type) { const value = String(type); return value !== "" && __omoikane_media_source("supports", value, new Uint8Array()); }
+    static get canConstructInDedicatedWorker() { return true; }
+  }
+  for (const type of ["sourceopen", "sourceended", "sourceclose"]) defineEventHandler(MediaSource.prototype, type);
+  class ManagedMediaSource extends MediaSource { get streaming() { return false; } }
+  function attachMediaSource(source, element, loadId) { const state = mediaSourceState.get(source); if (!state || state.readyState !== "closed") { element.__mediaFailure(loadId, MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED, "NotSupportedError", "MediaSource cannot be attached."); return; } state.readyState = "open"; state.element = element; element.__attachedMediaSource = source; queueMediaTask(() => { if (element.__mediaLoadId === loadId) dispatchMediaEvent(source, "sourceopen"); }); }
+  function detachMediaSource(source, element) { const state = mediaSourceState.get(source); if (!state || state.element !== element) return; state.readyState = "closed"; state.duration = NaN; state.element = null; element.__attachedMediaSource = null; state.sourceBuffers.__items = []; state.activeSourceBuffers.__items = []; state.sourceBuffers.__sync(); state.activeSourceBuffers.__sync(); queueMediaTask(() => dispatchMediaEvent(source, "sourceclose")); }
+
+  const mediaSessionToken = {};
+  const mediaMetadataState = new WeakMap();
+  const mediaSessionState = new WeakMap();
+  function mediaImageResource(value) {
+    const item = Object(value);
+    if (item.src === undefined) throw new TypeError("MediaImage requires src");
+    return Object.freeze({
+      src: new URL(String(item.src), document.URL).href,
+      sizes: item.sizes === undefined ? "" : String(item.sizes),
+      type: item.type === undefined ? "" : String(item.type),
+    });
+  }
+  function frozenArtwork(value) {
+    if (value === undefined) return Object.freeze([]);
+    return Object.freeze(Array.from(value, mediaImageResource));
+  }
+  function frozenChapters(value) {
+    if (value === undefined) return Object.freeze([]);
+    return Object.freeze(Array.from(value, chapter => {
+      const item = Object(chapter);
+      return Object.freeze({
+        title: item.title === undefined ? "" : String(item.title),
+        startTime: Number(item.startTime),
+        artwork: frozenArtwork(item.artwork),
+      });
+    }));
+  }
+  function publishMediaSession(session) {
+    const state = mediaSessionState.get(session);
+    if (!state) return;
+    const metadataState = state.metadata ? mediaMetadataState.get(state.metadata) : null;
+    const metadata = metadataState ? {
+      title: metadataState.title,
+      artist: metadataState.artist,
+      album: metadataState.album,
+      artwork: metadataState.artwork.map(item => ({ src: item.src, sizes: item.sizes, mediaType: item.type })),
+    } : null;
+    __omoikane_media_session("publish", JSON.stringify({
+      metadata,
+      playbackState: state.playbackState,
+      positionState: state.positionState,
+      handledActions: Array.from(state.handlers.keys()).sort(),
+    }));
+  }
+  function publishMetadataOwners(metadata) {
+    const state = mediaMetadataState.get(metadata);
+    if (state) for (const session of state.owners) publishMediaSession(session);
+  }
+  class MediaMetadata {
+    constructor(init = {}) {
+      if (init === null) init = {};
+      if (typeof init !== "object") throw new TypeError("MediaMetadata init must be a dictionary");
+      mediaMetadataState.set(this, {
+        title: init.title === undefined ? "" : String(init.title),
+        artist: init.artist === undefined ? "" : String(init.artist),
+        album: init.album === undefined ? "" : String(init.album),
+        artwork: frozenArtwork(init.artwork),
+        chapterInfo: frozenChapters(init.chapterInfo),
+        owners: new Set(),
+      });
+    }
+    __state() { return mediaMetadataState.get(this) || illegalInvocation(); }
+    get title() { return this.__state().title; }
+    set title(value) { this.__state().title = String(value); publishMetadataOwners(this); }
+    get artist() { return this.__state().artist; }
+    set artist(value) { this.__state().artist = String(value); publishMetadataOwners(this); }
+    get album() { return this.__state().album; }
+    set album(value) { this.__state().album = String(value); publishMetadataOwners(this); }
+    get artwork() { return this.__state().artwork; }
+    set artwork(value) { this.__state().artwork = frozenArtwork(value); publishMetadataOwners(this); }
+    get chapterInfo() { return this.__state().chapterInfo; }
+    get [Symbol.toStringTag]() { return "MediaMetadata"; }
+  }
+  class MediaSession {
+    constructor(token) {
+      if (token !== mediaSessionToken) throw new TypeError("Illegal constructor");
+      mediaSessionState.set(this, { metadata: null, playbackState: "none", positionState: null, handlers: new Map() });
+    }
+    __state() { return mediaSessionState.get(this) || illegalInvocation(); }
+    get metadata() { return this.__state().metadata; }
+    set metadata(value) {
+      if (value !== null && !(value instanceof MediaMetadata)) throw new TypeError("metadata must be MediaMetadata or null");
+      const state = this.__state();
+      if (state.metadata) mediaMetadataState.get(state.metadata).owners.delete(this);
+      state.metadata = value;
+      if (value) mediaMetadataState.get(value).owners.add(this);
+      publishMediaSession(this);
+    }
+    get playbackState() { return this.__state().playbackState; }
+    set playbackState(value) {
+      const next = String(value);
+      if (!new Set(["none", "paused", "playing"]).has(next)) return;
+      this.__state().playbackState = next;
+      publishMediaSession(this);
+    }
+    setActionHandler(action, handler) {
+      const name = String(action);
+      if (!__omoikane_media_session("supports", name)) throw new TypeError("Unsupported Media Session action");
+      if (handler !== null && typeof handler !== "function") throw new TypeError("handler must be callable or null");
+      const state = this.__state();
+      if (handler === null) state.handlers.delete(name); else state.handlers.set(name, handler);
+      publishMediaSession(this);
+    }
+    setPositionState(value = {}) {
+      const state = this.__state();
+      if (value === null) { state.positionState = null; publishMediaSession(this); return; }
+      const init = Object(value);
+      if (init.duration === undefined && init.position === undefined && init.playbackRate === undefined) { state.positionState = null; publishMediaSession(this); return; }
+      if (init.duration === undefined) throw new TypeError("duration is required");
+      const duration = Number(init.duration);
+      const position = init.position === undefined ? 0 : Number(init.position);
+      const playbackRate = init.playbackRate === undefined ? 1 : Number(init.playbackRate);
+      if (!Number.isFinite(duration) || duration < 0) throw new TypeError("duration must be non-negative and finite");
+      if (!Number.isFinite(position) || position < 0 || position > duration) throw new TypeError("position must be within duration");
+      if (!Number.isFinite(playbackRate) || playbackRate === 0) throw new TypeError("playbackRate must be finite and non-zero");
+      state.positionState = { duration, position, playbackRate };
+      publishMediaSession(this);
+    }
+    get [Symbol.toStringTag]() { return "MediaSession"; }
+  }
+  const mediaSession = new MediaSession(mediaSessionToken);
+  globalThis.__omoikane_dispatch_media_session_action = function(action, details = {}) {
+    const state = mediaSessionState.get(mediaSession);
+    const handler = state.handlers.get(String(action));
+    if (!handler) return false;
+    const event = Object.freeze({ ...Object(details), action: String(action) });
+    __omoikane_call_event_listener(handler, undefined, event);
+    return true;
+  };
+  globalThis.__omoikane_fetch_media_session_artwork = function(index) {
+    const metadata = mediaSessionState.get(mediaSession).metadata;
+    const artwork = metadata && mediaMetadataState.get(metadata).artwork[Number(index)];
+    if (!artwork) throw new RangeError("Media Session artwork index is out of range");
+    Promise.resolve(fetch(artwork.src)).then(response => {
+      if (!response.ok && response.status !== 0) throw new Error(`Artwork fetch failed with status ${response.status}`);
+      return response.arrayBuffer();
+    }).then(buffer => {
+      __omoikane_media_session("artwork-success", artwork.src, new Uint8Array(buffer));
+    }, error => {
+      __omoikane_media_session("artwork-error", artwork.src, String(error));
+    });
+  };
+
+  const gamepadToken = {};
+  const gamepadState = new WeakMap();
+  const gamepadButtonState = new WeakMap();
+  const gamepadActuatorState = new WeakMap();
+  const gamepadEventState = new WeakMap();
+  const gamepadSlots = [];
+  function gamepadStateOf(value) { return gamepadState.get(value) || illegalInvocation(); }
+  class GamepadButton {
+    constructor(token, value) {
+      if (token !== gamepadToken) throw new TypeError("Illegal constructor");
+      gamepadButtonState.set(this, value);
+    }
+    __state() { return gamepadButtonState.get(this) || illegalInvocation(); }
+    get pressed() { return this.__state().pressed; }
+    get touched() { return this.__state().touched; }
+    get value() { return this.__state().value; }
+    get [Symbol.toStringTag]() { return "GamepadButton"; }
+  }
+  class GamepadHapticActuator {
+    constructor(token, gamepad) {
+      if (token !== gamepadToken) throw new TypeError("Illegal constructor");
+      gamepadActuatorState.set(this, gamepad);
+    }
+    __gamepad() { return gamepadActuatorState.get(this) || illegalInvocation(); }
+    get effects() { return gamepadStateOf(this.__gamepad()).hapticEffects; }
+    playEffect(type, params = {}) {
+      return Promise.resolve().then(() => {
+        const gamepad = this.__gamepad();
+        const state = gamepadStateOf(gamepad);
+        const effect = String(type);
+        if (!state.connected || !state.hapticEffects.includes(effect)) {
+          throw new DOMException("The haptic effect is unavailable.", "NotSupportedError");
+        }
+        const init = Object(params);
+        const request = {
+          effect,
+          duration: Number(init.duration ?? 0),
+          startDelay: Number(init.startDelay ?? 0),
+          strongMagnitude: Number(init.strongMagnitude ?? 0),
+          weakMagnitude: Number(init.weakMagnitude ?? 0),
+          leftTrigger: Number(init.leftTrigger ?? 0),
+          rightTrigger: Number(init.rightTrigger ?? 0),
+        };
+        try { return String(__omoikane_gamepad("play", __omoikane_document_id, state.index, JSON.stringify(request))); }
+        catch (error) { throw new DOMException(String(error), "NotSupportedError"); }
+      });
+    }
+    reset() {
+      return Promise.resolve().then(() => {
+        const state = gamepadStateOf(this.__gamepad());
+        if (!state.connected) return "complete";
+        try { return String(__omoikane_gamepad("reset", __omoikane_document_id, state.index, "")); }
+        catch (error) { throw new DOMException(String(error), "NotSupportedError"); }
+      });
+    }
+    get [Symbol.toStringTag]() { return "GamepadHapticActuator"; }
+  }
+  class Gamepad {
+    constructor(token, snapshot) {
+      if (token !== gamepadToken) throw new TypeError("Illegal constructor");
+      const state = { index: snapshot.index, actuator: null };
+      gamepadState.set(this, state);
+      updateGamepad(this, snapshot);
+      state.actuator = new GamepadHapticActuator(gamepadToken, this);
+    }
+    __state() { return gamepadStateOf(this); }
+    get id() { return this.__state().id; }
+    get index() { return this.__state().index; }
+    get connected() { return this.__state().connected; }
+    get timestamp() { return this.__state().timestamp; }
+    get mapping() { return this.__state().mapping; }
+    get axes() { return this.__state().axes; }
+    get buttons() { return this.__state().buttons; }
+    get touches() { return this.__state().touches; }
+    get vibrationActuator() { return this.__state().actuator; }
+    get hapticActuators() { return Object.freeze([this.__state().actuator]); }
+    get [Symbol.toStringTag]() { return "Gamepad"; }
+  }
+  function updateGamepad(gamepad, snapshot) {
+    const state = gamepadStateOf(gamepad);
+    state.id = String(snapshot.id);
+    state.connected = !!snapshot.connected;
+    state.timestamp = Number(snapshot.timestamp);
+    state.mapping = String(snapshot.mapping || "");
+    state.axes = Object.freeze(Array.from(snapshot.axes || [], Number));
+    state.buttons = Object.freeze(Array.from(snapshot.buttons || [], value => new GamepadButton(gamepadToken, Object.freeze({
+      pressed: !!value.pressed,
+      touched: !!value.touched,
+      value: Number(value.value),
+    }))));
+    state.touches = Object.freeze([]);
+    state.hapticEffects = Object.freeze(Array.from(snapshot.hapticEffects || [], String));
+  }
+  class GamepadEvent extends Event {
+    constructor(type, init = {}) {
+      super(type, init);
+      const value = Object(init).gamepad;
+      if (value !== undefined && value !== null && !(value instanceof Gamepad)) throw new TypeError("gamepad must be a Gamepad or null");
+      gamepadEventState.set(this, value ?? null);
+    }
+    get gamepad() { return gamepadEventState.has(this) ? gamepadEventState.get(this) : illegalInvocation(); }
+    get [Symbol.toStringTag]() { return "GamepadEvent"; }
+  }
+  function dispatchGamepadTransition(type, gamepad) {
+    queueMicrotask(() => {
+      const event = new GamepadEvent(type, { gamepad });
+      const handler = globalThis["on" + type];
+      if (typeof handler === "function") __omoikane_call_event_listener(handler, globalThis, event);
+      globalThis.dispatchEvent(event);
+    });
+  }
+  function pollGamepads(dispatchTransitions = false) {
+    let snapshots;
+    try { snapshots = JSON.parse(String(__omoikane_gamepad("snapshot", __omoikane_document_id, 0, ""))); }
+    catch (error) {
+      if (String(error).includes("SecurityError")) throw new DOMException("Gamepad access is disallowed by Permissions Policy.", "SecurityError");
+      throw error;
+    }
+    const seen = new Set();
+    for (const snapshot of snapshots) {
+      const index = Number(snapshot.index) >>> 0;
+      if (seen.has(index)) continue;
+      seen.add(index);
+      const previous = gamepadSlots[index] || null;
+      if (!snapshot.connected) {
+        if (previous && gamepadStateOf(previous).connected) {
+          gamepadStateOf(previous).connected = false;
+          if (dispatchTransitions) dispatchGamepadTransition("gamepaddisconnected", previous);
+        }
+        gamepadSlots[index] = null;
+        continue;
+      }
+      const gamepad = previous || new Gamepad(gamepadToken, { ...snapshot, index });
+      const wasConnected = previous ? gamepadStateOf(previous).connected : false;
+      updateGamepad(gamepad, { ...snapshot, index });
+      gamepadSlots[index] = gamepad;
+      if (!wasConnected && dispatchTransitions) dispatchGamepadTransition("gamepadconnected", gamepad);
+    }
+    for (let index = 0; index < gamepadSlots.length; index++) {
+      const gamepad = gamepadSlots[index];
+      if (!gamepad || seen.has(index)) continue;
+      if (gamepadStateOf(gamepad).connected) {
+        gamepadStateOf(gamepad).connected = false;
+        if (dispatchTransitions) dispatchGamepadTransition("gamepaddisconnected", gamepad);
+      }
+      gamepadSlots[index] = null;
+    }
+    while (gamepadSlots.length && gamepadSlots[gamepadSlots.length - 1] == null) gamepadSlots.pop();
+    return Array.from(gamepadSlots, value => value || null);
+  }
+  globalThis.__omoikane_poll_gamepads = pollGamepads;
+  for (const constructor of [Gamepad, GamepadButton, GamepadHapticActuator]) {
+    Object.defineProperty(constructor, "length", { value: 0 });
+  }
+  for (const [constructor, members] of [
+    [Gamepad, ["id", "index", "connected", "timestamp", "mapping", "axes", "buttons", "touches", "vibrationActuator"]],
+    [GamepadButton, ["pressed", "touched", "value"]],
+    [GamepadHapticActuator, ["effects", "playEffect", "reset"]],
+    [GamepadEvent, ["gamepad"]],
+  ]) {
+    for (const member of members) {
+      const descriptor = Object.getOwnPropertyDescriptor(constructor.prototype, member);
+      Object.defineProperty(constructor.prototype, member, { ...descriptor, enumerable: true });
+    }
+  }
+  for (const [name, constructor] of Object.entries({ Gamepad, GamepadButton, GamepadEvent, GamepadHapticActuator })) {
+    Object.defineProperty(globalThis, name, { configurable: true, enumerable: false, writable: true, value: constructor });
   }
 
   class Navigator {
@@ -25521,6 +26967,8 @@ let omoikaneUserActivationState;
       this.plugins = new PluginArray(navigatorConstructionToken);
       this.mimeTypes = new MimeTypeArray(navigatorConstructionToken);
       this.geolocation = new Geolocation(geolocationConstructionToken);
+      this.mediaDevices = new MediaDevices(mediaCaptureToken);
+      this.mediaSession = mediaSession;
       this.serviceWorker = new ServiceWorkerContainer(serviceWorkerContainerConstructionToken);
       // The Permissions object is installed after EventTarget is defined
       // below.  Keep the property present while Navigator is constructed so
@@ -25536,8 +26984,16 @@ let omoikaneUserActivationState;
         });
       }
     }
+    getGamepads() {
+      if (!(this instanceof Navigator)) throw new TypeError("Illegal invocation");
+      return pollGamepads(false);
+    }
     get [Symbol.toStringTag]() { return "Navigator"; }
   }
+  Object.defineProperty(Navigator.prototype, "getGamepads", {
+    ...Object.getOwnPropertyDescriptor(Navigator.prototype, "getGamepads"),
+    enumerable: true,
+  });
   globalThis.PluginArray = PluginArray;
   globalThis.MimeTypeArray = MimeTypeArray;
   globalThis.Navigator = Navigator;
@@ -25545,6 +27001,44 @@ let omoikaneUserActivationState;
   globalThis.GeolocationCoordinates = GeolocationCoordinates;
   globalThis.GeolocationPosition = GeolocationPosition;
   globalThis.GeolocationPositionError = GeolocationPositionError;
+  globalThis.MediaDeviceInfo = MediaDeviceInfo;
+  globalThis.MediaDevices = MediaDevices;
+  globalThis.MediaStream = MediaStream;
+  globalThis.MediaStreamTrack = MediaStreamTrack;
+  // WebIDL shape: a non-enumerable interface object of length 0 with
+  // enumerable members, and an enumerable HTMLCanvasElement operation.
+  Object.defineProperty(CanvasCaptureMediaStreamTrack, "length", { value: 0 });
+  for (const [prototype, member] of [
+    [CanvasCaptureMediaStreamTrack.prototype, "canvas"],
+    [CanvasCaptureMediaStreamTrack.prototype, "requestFrame"],
+    [HTMLCanvasElement.prototype, "captureStream"],
+  ]) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, member);
+    Object.defineProperty(prototype, member, { ...descriptor, enumerable: true });
+  }
+  Object.defineProperty(globalThis, "CanvasCaptureMediaStreamTrack", {
+    configurable: true, enumerable: false, writable: true, value: CanvasCaptureMediaStreamTrack,
+  });
+  globalThis.MediaStreamTrackEvent = MediaStreamTrackEvent;
+  globalThis.MediaRecorder = MediaRecorder;
+  globalThis.BlobEvent = BlobEvent;
+  globalThis.MediaMetadata = MediaMetadata;
+  globalThis.MediaSession = MediaSession;
+  globalThis.MediaSource = MediaSource;
+  globalThis.ManagedMediaSource = ManagedMediaSource;
+  globalThis.MediaSourceHandle = MediaSourceHandle;
+  globalThis.SourceBuffer = SourceBuffer;
+  globalThis.SourceBufferList = SourceBufferList;
+  globalThis.EncodedVideoChunk = EncodedVideoChunk;
+  globalThis.EncodedAudioChunk = EncodedAudioChunk;
+  globalThis.VideoColorSpace = VideoColorSpace;
+  globalThis.VideoFrame = VideoFrame;
+  globalThis.AudioData = AudioData;
+  globalThis.VideoDecoder = VideoDecoder;
+  globalThis.VideoEncoder = VideoEncoder;
+  globalThis.AudioDecoder = AudioDecoder;
+  globalThis.AudioEncoder = AudioEncoder;
+  globalThis.ImageDecoder = ImageDecoder;
   globalThis.navigator = new Navigator(navigatorConstructionToken);
   Object.defineProperty(globalThis, "isSecureContext", {
     configurable: true,
@@ -26064,15 +27558,6 @@ let omoikaneUserActivationState;
   const nativeScreenMetrics = __omoikane_screen_metrics;
   const parseScreenMetrics = JSON.parse;
   const screenMetric = name => parseScreenMetrics(nativeScreenMetrics())[name];
-  globalThis.screen = Object.defineProperties({}, {
-    width: {enumerable: true, configurable: true, get() { return screenMetric('width'); }},
-    height: {enumerable: true, configurable: true, get() { return screenMetric('height'); }},
-    availWidth: {enumerable: true, configurable: true, get() { return screenMetric('width'); }},
-    availHeight: {enumerable: true, configurable: true, get() { return screenMetric('height'); }},
-    colorDepth: {enumerable: true, configurable: true, get() { return screenMetric('colorDepth'); }},
-    pixelDepth: {enumerable: true, configurable: true, get() { return screenMetric('pixelDepth'); }},
-  });
-
   // Origin-scoped Web Storage. The backing areas live in the browser host so
   // localStorage survives Runtime replacement and sessionStorage follows the
   // top-level browsing session. Wrappers remain document/window specific.
@@ -29083,6 +30568,471 @@ let omoikaneUserActivationState;
     }
   }
 
+  const screenToken = {};
+  const screenBrands = new WeakSet();
+  const screenOrientationState = new WeakMap();
+  const orientationLockTypes = new Set([
+    "any", "natural", "landscape", "portrait", "portrait-primary", "portrait-secondary",
+    "landscape-primary", "landscape-secondary",
+  ]);
+  function orientationResult(operation, request = "") {
+    const result = JSON.parse(String(__omoikane_screen_orientation(
+      operation, __omoikane_document_id, request,
+    )));
+    if (result.error) throw new DOMException(result.message || result.error, result.error);
+    return result.snapshot;
+  }
+  function updateOrientationObject(orientation, snapshot, dispatch) {
+    const state = screenOrientationState.get(orientation) || illegalInvocation();
+    const nextType = String(snapshot.orientationType);
+    const nextAngle = Number(snapshot.angle) >>> 0;
+    const changed = state.type !== nextType || state.angle !== nextAngle;
+    state.type = nextType;
+    state.angle = nextAngle;
+    if (changed && dispatch) orientation.dispatchEvent(new Event("change"));
+  }
+  class ScreenOrientation extends EventTarget {
+    constructor(token) {
+      if (token !== screenToken) throw new TypeError("Illegal constructor");
+      super();
+      screenOrientationState.set(this, { type: "landscape-primary", angle: 0, onchange: null });
+      updateOrientationObject(this, orientationResult("snapshot"), false);
+    }
+    get type() { return (screenOrientationState.get(this) || illegalInvocation()).type; }
+    get angle() { return (screenOrientationState.get(this) || illegalInvocation()).angle; }
+    get onchange() { return (screenOrientationState.get(this) || illegalInvocation()).onchange; }
+    set onchange(value) {
+      const state = screenOrientationState.get(this) || illegalInvocation();
+      if (state.onchange) this.removeEventListener("change", state.onchange);
+      state.onchange = typeof value === "function" ? value : null;
+      if (state.onchange) this.addEventListener("change", state.onchange);
+    }
+    lock(value) {
+      let request;
+      try {
+        if (arguments.length === 0) throw new TypeError("Orientation lock type is required");
+        request = String(value);
+        if (!orientationLockTypes.has(request)) throw new TypeError("Invalid orientation lock type");
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      let token;
+      try {
+        const prepared = String(__omoikane_screen_orientation("prepare", __omoikane_document_id, "", ""));
+        if (prepared.startsWith("{")) {
+          const result = JSON.parse(prepared);
+          throw new DOMException(result.message || result.error, result.error);
+        }
+        token = Number(prepared);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return Promise.resolve().then(() => {
+        const result = JSON.parse(String(__omoikane_screen_orientation(
+          "commit", __omoikane_document_id, token, request,
+        )));
+        if (result.error) throw new DOMException(result.message || result.error, result.error);
+        updateOrientationObject(this, result.snapshot, true);
+      });
+    }
+    unlock() {
+      updateOrientationObject(this, orientationResult("unlock"), true);
+    }
+    get [Symbol.toStringTag]() { return "ScreenOrientation"; }
+  }
+  const screenOrientation = new ScreenOrientation(screenToken);
+  class Screen {
+    constructor(token) {
+      if (token !== screenToken) throw new TypeError("Illegal constructor");
+      screenBrands.add(this);
+    }
+    __brand() { if (!screenBrands.has(this)) illegalInvocation(); }
+    get width() { this.__brand(); return screenMetric("width"); }
+    get height() { this.__brand(); return screenMetric("height"); }
+    get availWidth() { this.__brand(); return screenMetric("width"); }
+    get availHeight() { this.__brand(); return screenMetric("height"); }
+    get colorDepth() { this.__brand(); return screenMetric("colorDepth"); }
+    get pixelDepth() { this.__brand(); return screenMetric("pixelDepth"); }
+    get orientation() { this.__brand(); return screenOrientation; }
+    get [Symbol.toStringTag]() { return "Screen"; }
+  }
+  Object.defineProperty(ScreenOrientation, "length", { value: 0 });
+  Object.defineProperty(globalThis, "Screen", { configurable: true, enumerable: false, writable: true, value: Screen });
+  Object.defineProperty(globalThis, "ScreenOrientation", { configurable: true, enumerable: false, writable: true, value: ScreenOrientation });
+  Object.defineProperty(globalThis, "screen", { configurable: true, enumerable: true, value: new Screen(screenToken) });
+  globalThis.__omoikane_update_screen_orientation = snapshot => {
+    updateOrientationObject(screenOrientation, snapshot, true);
+  };
+  for (const [constructor, members] of [
+    [Screen, ["width", "height", "availWidth", "availHeight", "colorDepth", "pixelDepth", "orientation"]],
+    [ScreenOrientation, ["lock", "unlock", "type", "angle", "onchange"]],
+  ]) {
+    for (const member of members) {
+      const descriptor = Object.getOwnPropertyDescriptor(constructor.prototype, member);
+      Object.defineProperty(constructor.prototype, member, { ...descriptor, enumerable: true });
+    }
+  }
+
+  if (globalThis.isSecureContext) {
+    const wakeLockToken = {};
+    const wakeLockSentinelState = new WeakMap();
+    const liveWakeLockSentinels = new Set();
+    function finishWakeLockRelease(sentinel) {
+      const state = wakeLockSentinelState.get(sentinel) || illegalInvocation();
+      if (state.released) return;
+      state.released = true;
+      liveWakeLockSentinels.delete(sentinel);
+      __omoikane_wake_lock("release", __omoikane_document_id);
+      const event = new Event("release");
+      Object.defineProperty(event, Symbol.toStringTag, { configurable: true, value: "Event" });
+      event.isTrusted = true;
+      sentinel.dispatchEvent(event);
+    }
+    class WakeLockSentinel extends EventTarget {
+      constructor(token) {
+        if (token !== wakeLockToken) throw new TypeError("Illegal constructor");
+        super();
+        wakeLockSentinelState.set(this, { released: false, onrelease: null });
+        liveWakeLockSentinels.add(this);
+      }
+      get released() { return (wakeLockSentinelState.get(this) || illegalInvocation()).released; }
+      get type() { wakeLockSentinelState.get(this) || illegalInvocation(); return "screen"; }
+      get onrelease() { return (wakeLockSentinelState.get(this) || illegalInvocation()).onrelease; }
+      set onrelease(value) {
+        const state = wakeLockSentinelState.get(this) || illegalInvocation();
+        if (state.onrelease) this.removeEventListener("release", state.onrelease);
+        state.onrelease = typeof value === "function" ? value : null;
+        if (state.onrelease) this.addEventListener("release", state.onrelease);
+      }
+      release() {
+        try { wakeLockSentinelState.get(this) || illegalInvocation(); }
+        catch (error) { return Promise.reject(error); }
+        finishWakeLockRelease(this);
+        return Promise.resolve();
+      }
+      get [Symbol.toStringTag]() { return "WakeLockSentinel"; }
+    }
+    class WakeLock {
+      constructor(token) { if (token !== wakeLockToken) throw new TypeError("Illegal constructor"); }
+      request(type = "screen") {
+        let requested;
+        try {
+          requested = String(type);
+          if (requested !== "screen") throw new TypeError("Invalid wake lock type");
+        } catch (error) {
+          return Promise.reject(error);
+        }
+        return Promise.resolve().then(() => {
+          const result = String(__omoikane_wake_lock("request", __omoikane_document_id));
+          if (result !== "ok") {
+            throw new DOMException(
+              result === "NotAllowedError" ? "Screen wake lock is not allowed." : result,
+              "NotAllowedError",
+            );
+          }
+          return new WakeLockSentinel(wakeLockToken);
+        });
+      }
+      get [Symbol.toStringTag]() { return "WakeLock"; }
+    }
+    const wakeLock = new WakeLock(wakeLockToken);
+    Object.defineProperty(WakeLock, "length", { value: 0 });
+    Object.defineProperty(WakeLockSentinel, "length", { value: 0 });
+    Object.defineProperty(globalThis, "WakeLock", { configurable: true, writable: true, value: WakeLock });
+    Object.defineProperty(globalThis, "WakeLockSentinel", { configurable: true, writable: true, value: WakeLockSentinel });
+    const navigatorWakeLockDescriptor = Object.getOwnPropertyDescriptor({
+      get wakeLock() { if (this !== navigator) illegalInvocation(); return wakeLock; },
+    }, "wakeLock");
+    Object.defineProperty(Object.getPrototypeOf(navigator), "wakeLock", {
+      ...navigatorWakeLockDescriptor, configurable: true, enumerable: true,
+    });
+    globalThis.__omoikane_release_wake_locks = () => {
+      for (const sentinel of Array.from(liveWakeLockSentinels)) finishWakeLockRelease(sentinel);
+    };
+    for (const [constructor, members] of [
+      [WakeLock, ["request"]],
+      [WakeLockSentinel, ["released", "type", "onrelease", "release"]],
+    ]) {
+      for (const member of members) {
+        const descriptor = Object.getOwnPropertyDescriptor(constructor.prototype, member);
+        Object.defineProperty(constructor.prototype, member, { ...descriptor, enumerable: true });
+      }
+    }
+  }
+
+  const speechUtteranceState = new WeakMap();
+  const speechRecognitionState = new WeakMap();
+  const speechRecognitionSessions = new Map();
+  let nextSpeechUtteranceId = 1;
+  let nextSpeechRecognitionId = 1;
+  const speechErrorCodes = new Set([
+    "canceled", "interrupted", "audio-busy", "audio-hardware", "network",
+    "synthesis-unavailable", "synthesis-failed", "language-unavailable",
+    "voice-unavailable", "text-too-long", "invalid-argument", "not-allowed",
+  ]);
+  const recognitionErrorCodes = new Set([
+    "no-speech", "aborted", "audio-capture", "network", "not-allowed",
+    "service-not-allowed", "bad-grammar", "language-not-supported",
+  ]);
+  function speechEventHandler(prototype, type) {
+    const key = `__on_${type}`;
+    Object.defineProperty(prototype, `on${type}`, {
+      enumerable: true, configurable: true,
+      get() { return this[key] || null; },
+      set(value) {
+        if (this[key]) this.removeEventListener(type, this[key]);
+        this[key] = typeof value === "function" ? value : null;
+        if (this[key]) this.addEventListener(type, this[key]);
+      },
+    });
+  }
+  class SpeechSynthesisVoice {
+    constructor(token, init) {
+      if (token !== speechConstructionToken) throw new TypeError("Illegal constructor");
+      Object.defineProperties(this, {
+        voiceURI: { value: String(init.voiceUri), enumerable: true },
+        name: { value: String(init.name), enumerable: true },
+        lang: { value: String(init.lang), enumerable: true },
+        localService: { value: Boolean(init.localService), enumerable: true },
+        default: { value: Boolean(init.default), enumerable: true },
+      });
+    }
+    get [Symbol.toStringTag]() { return "SpeechSynthesisVoice"; }
+  }
+  const speechConstructionToken = {};
+  class SpeechSynthesisUtterance extends EventTarget {
+    constructor(text = "") {
+      super();
+      speechUtteranceState.set(this, {
+        id: nextSpeechUtteranceId++, text: String(text), lang: "", voice: null,
+        volume: 1, rate: 1, pitch: 1, queued: false,
+      });
+    }
+    __state() { return speechUtteranceState.get(this) || illegalInvocation(); }
+    get text() { return this.__state().text; }
+    set text(value) { this.__state().text = String(value); }
+    get lang() { return this.__state().lang; }
+    set lang(value) { this.__state().lang = String(value); }
+    get voice() { return this.__state().voice; }
+    set voice(value) {
+      if (value !== null && !(value instanceof SpeechSynthesisVoice)) throw new TypeError("Invalid voice");
+      this.__state().voice = value;
+    }
+    get volume() { return this.__state().volume; }
+    set volume(value) { const n = Number(value); if (Number.isFinite(n) && n >= 0 && n <= 1) this.__state().volume = n; }
+    get rate() { return this.__state().rate; }
+    set rate(value) { const n = Number(value); if (Number.isFinite(n) && n >= 0.1 && n <= 10) this.__state().rate = n; }
+    get pitch() { return this.__state().pitch; }
+    set pitch(value) { const n = Number(value); if (Number.isFinite(n) && n >= 0 && n <= 2) this.__state().pitch = n; }
+    get [Symbol.toStringTag]() { return "SpeechSynthesisUtterance"; }
+  }
+  class SpeechSynthesisEvent extends Event {
+    constructor(type, init) {
+      if (arguments.length < 2 || init == null || init.utterance === undefined) throw new TypeError("utterance is required");
+      if (!(init.utterance instanceof SpeechSynthesisUtterance)) throw new TypeError("Invalid utterance");
+      super(String(type), init);
+      this.utterance = init.utterance;
+      this.charIndex = init.charIndex === undefined ? 0 : Number(init.charIndex) >>> 0;
+      this.charLength = init.charLength === undefined ? 0 : Number(init.charLength) >>> 0;
+      this.elapsedTime = init.elapsedTime === undefined ? 0 : Number(init.elapsedTime);
+      this.name = init.name === undefined ? "" : String(init.name);
+    }
+    get [Symbol.toStringTag]() { return "SpeechSynthesisEvent"; }
+  }
+  class SpeechSynthesisErrorEvent extends SpeechSynthesisEvent {
+    constructor(type, init) {
+      if (init == null || init.error === undefined) throw new TypeError("error is required");
+      const error = String(init.error);
+      if (!speechErrorCodes.has(error)) throw new TypeError("Invalid speech synthesis error");
+      super(type, init);
+      this.error = error;
+    }
+    get [Symbol.toStringTag]() { return "SpeechSynthesisErrorEvent"; }
+  }
+  class SpeechGrammar {
+    constructor(token, src, weight) {
+      if (token !== speechConstructionToken) throw new TypeError("Illegal constructor");
+      this.src = src; this.weight = weight;
+    }
+    get [Symbol.toStringTag]() { return "SpeechGrammar"; }
+  }
+  class SpeechGrammarList {
+    constructor() { this.__items = []; }
+    get length() { return this.__items.length; }
+    item(index) { return this.__items[Number(index) >>> 0] || null; }
+    addFromURI(src, weight = 1) { this.__add(String(src), weight); }
+    addFromString(src, weight = 1) { this.__add(String(src), weight); }
+    __add(src, weight) {
+      const n = Number(weight);
+      if (!Number.isFinite(n) || n < 0 || n > 1) throw new TypeError("Invalid grammar weight");
+      const grammar = new SpeechGrammar(speechConstructionToken, src, n);
+      const index = this.__items.length;
+      this.__items.push(grammar);
+      Object.defineProperty(this, index, { value: grammar, enumerable: true, configurable: true });
+    }
+    get [Symbol.toStringTag]() { return "SpeechGrammarList"; }
+  }
+  class SpeechRecognitionPhrase {
+    constructor(phrase, boost = 1) {
+      if (arguments.length < 1) throw new TypeError("phrase is required");
+      this.phrase = String(phrase);
+      this.boost = Number(boost);
+      if (!Number.isFinite(this.boost) || this.boost <= 0) throw new TypeError("Invalid phrase boost");
+    }
+    get [Symbol.toStringTag]() { return "SpeechRecognitionPhrase"; }
+  }
+  class SpeechRecognitionAlternative {
+    constructor(token, transcript, confidence) {
+      if (token !== speechConstructionToken) throw new TypeError("Illegal constructor");
+      this.transcript = transcript; this.confidence = confidence;
+    }
+  }
+  class SpeechRecognitionResult {
+    constructor(token, alternatives, isFinal) {
+      if (token !== speechConstructionToken) throw new TypeError("Illegal constructor");
+      alternatives.forEach((value, index) => Object.defineProperty(this, index, { value, enumerable: true }));
+      this.length = alternatives.length; this.isFinal = isFinal;
+    }
+    item(index) { return this[Number(index) >>> 0] || null; }
+  }
+  class SpeechRecognitionResultList {
+    constructor(token, results) {
+      if (token !== speechConstructionToken) throw new TypeError("Illegal constructor");
+      results.forEach((value, index) => Object.defineProperty(this, index, { value, enumerable: true }));
+      this.length = results.length;
+    }
+    item(index) { return this[Number(index) >>> 0] || null; }
+  }
+  class SpeechRecognitionEvent extends Event {
+    constructor(type, init = {}) {
+      super(String(type), init);
+      this.resultIndex = init.resultIndex === undefined ? 0 : Number(init.resultIndex) >>> 0;
+      this.results = init.results || new SpeechRecognitionResultList(speechConstructionToken, []);
+      this.interpretation = init.interpretation === undefined ? null : init.interpretation;
+      this.emma = init.emma === undefined ? null : init.emma;
+    }
+  }
+  class SpeechRecognitionErrorEvent extends Event {
+    constructor(type, init = {}) {
+      super(String(type), init);
+      const error = init.error === undefined ? "network" : String(init.error);
+      if (!recognitionErrorCodes.has(error)) throw new TypeError("Invalid recognition error");
+      this.error = error; this.message = init.message === undefined ? "" : String(init.message);
+    }
+  }
+  class SpeechRecognition extends EventTarget {
+    constructor() {
+      super();
+      speechRecognitionState.set(this, {
+        id: nextSpeechRecognitionId++, grammars: new SpeechGrammarList(), lang: "",
+        continuous: false, interimResults: false, maxAlternatives: 1,
+        processLocally: false, phrases: [], active: false,
+      });
+    }
+    __state() { return speechRecognitionState.get(this) || illegalInvocation(); }
+    get grammars() { return this.__state().grammars; }
+    set grammars(value) { if (!(value instanceof SpeechGrammarList)) throw new TypeError("Invalid grammars"); this.__state().grammars = value; }
+    get lang() { return this.__state().lang; } set lang(v) { this.__state().lang = String(v); }
+    get continuous() { return this.__state().continuous; } set continuous(v) { this.__state().continuous = Boolean(v); }
+    get interimResults() { return this.__state().interimResults; } set interimResults(v) { this.__state().interimResults = Boolean(v); }
+    get maxAlternatives() { return this.__state().maxAlternatives; }
+    set maxAlternatives(v) { this.__state().maxAlternatives = Number(v) >>> 0; }
+    get processLocally() { return this.__state().processLocally; } set processLocally(v) { this.__state().processLocally = Boolean(v); }
+    get phrases() { return this.__state().phrases; }
+    set phrases(v) { this.__state().phrases = Array.from(v, p => p instanceof SpeechRecognitionPhrase ? p : new SpeechRecognitionPhrase(p.phrase, p.boost)); }
+    start() {
+      const state = this.__state();
+      if (state.active) throw new DOMException("Recognition is already active", "InvalidStateError");
+      state.active = true; speechRecognitionSessions.set(state.id, this);
+      const error = __omoikane_web_speech("command", JSON.stringify({
+        kind: "start-recognition", id: state.id, lang: state.lang, continuous: state.continuous,
+        interimResults: state.interimResults, maxAlternatives: state.maxAlternatives,
+        processLocally: state.processLocally,
+        phrases: state.phrases.map(p => ({ phrase: p.phrase, boost: p.boost })),
+      }));
+      if (error) __omoikane_queue_dom_manipulation_task(() => {
+        if (!state.active) return;
+        this.dispatchEvent(new SpeechRecognitionErrorEvent("error", { error }));
+        this.__finish();
+      });
+    }
+    stop() { const s = this.__state(); if (s.active) __omoikane_web_speech("command", JSON.stringify({kind:"stop-recognition", id:s.id})); }
+    abort() { const s = this.__state(); if (s.active) { __omoikane_web_speech("command", JSON.stringify({kind:"abort-recognition", id:s.id})); this.__finish(); } }
+    __finish(emitEnd = true) { const s = this.__state(); if (!s.active) return; s.active = false; speechRecognitionSessions.delete(s.id); if (emitEnd) this.dispatchEvent(new Event("end")); }
+  }
+  for (const type of ["audiostart", "audioend", "end", "error", "nomatch", "result", "soundstart", "soundend", "speechstart", "speechend", "start"]) speechEventHandler(SpeechRecognition.prototype, type);
+  for (const type of ["boundary", "end", "error", "mark", "pause", "resume", "start"]) speechEventHandler(SpeechSynthesisUtterance.prototype, type);
+
+  const speechSynthesisQueue = [];
+  let speechSynthesisCurrent = null;
+  let speechSynthesisPaused = false;
+  function speechCommand(command) { return __omoikane_web_speech("command", JSON.stringify(command)); }
+  function startNextUtterance() {
+    if (speechSynthesisCurrent || speechSynthesisPaused || !speechSynthesisQueue.length) return;
+    speechSynthesisCurrent = speechSynthesisQueue[0];
+    const state = speechUtteranceState.get(speechSynthesisCurrent);
+    speechCommand({ kind:"speak", id:state.id, text:state.text, lang:state.lang,
+      voiceUri:state.voice ? state.voice.voiceURI : null, volume:state.volume, rate:state.rate, pitch:state.pitch });
+  }
+  const speechSynthesis = new class SpeechSynthesis extends EventTarget {
+    get pending() { return speechSynthesisQueue.length > (speechSynthesisCurrent ? 1 : 0); }
+    get speaking() { return speechSynthesisCurrent !== null; }
+    get paused() { return speechSynthesisPaused; }
+    getVoices() { return JSON.parse(__omoikane_web_speech("voices", "")).map(v => new SpeechSynthesisVoice(speechConstructionToken, v)); }
+    speak(utterance) {
+      const state = speechUtteranceState.get(utterance);
+      if (!state) throw new TypeError("speak requires SpeechSynthesisUtterance");
+      if (state.queued) throw new DOMException("Utterance is already queued", "InvalidStateError");
+      state.queued = true; speechSynthesisQueue.push(utterance); startNextUtterance();
+    }
+    cancel() {
+      speechCommand({kind:"cancel-synthesis"});
+      for (const utterance of speechSynthesisQueue.splice(0)) {
+        speechUtteranceState.get(utterance).queued = false;
+        utterance.dispatchEvent(new SpeechSynthesisErrorEvent("error", {utterance, error:"canceled"}));
+      }
+      speechSynthesisCurrent = null; speechSynthesisPaused = false;
+    }
+    pause() { if (!speechSynthesisPaused) { speechSynthesisPaused = true; speechCommand({kind:"pause-synthesis"}); } }
+    resume() { if (speechSynthesisPaused) { speechSynthesisPaused = false; speechCommand({kind:"resume-synthesis"}); startNextUtterance(); } }
+  }();
+  speechEventHandler(Object.getPrototypeOf(speechSynthesis), "voiceschanged");
+  globalThis.__omoikane_dispatch_speech_synthesis_event = function(type, details = {}) {
+    const utterance = speechSynthesisCurrent;
+    if (!utterance) return false;
+    const event = type === "error"
+      ? new SpeechSynthesisErrorEvent(type, {...details, utterance, error:details.error || "synthesis-failed"})
+      : new SpeechSynthesisEvent(type, {...details, utterance});
+    utterance.dispatchEvent(event);
+    if (type === "pause") speechSynthesisPaused = true;
+    if (type === "resume") speechSynthesisPaused = false;
+    if (type === "end" || type === "error") {
+      speechUtteranceState.get(utterance).queued = false;
+      if (speechSynthesisQueue[0] === utterance) speechSynthesisQueue.shift();
+      speechSynthesisCurrent = null; startNextUtterance();
+    }
+    return true;
+  };
+  globalThis.__omoikane_dispatch_speech_recognition_event = function(id, type, details = {}) {
+    const recognition = speechRecognitionSessions.get(Number(id));
+    if (!recognition) return false;
+    let event;
+    if (type === "error") event = new SpeechRecognitionErrorEvent(type, details);
+    else if (type === "result") {
+      const results = (details.results || []).map(result => new SpeechRecognitionResult(speechConstructionToken,
+        (result.alternatives || []).map(a => new SpeechRecognitionAlternative(speechConstructionToken, String(a.transcript || ""), Number(a.confidence || 0))), Boolean(result.isFinal)));
+      event = new SpeechRecognitionEvent(type, {...details, results:new SpeechRecognitionResultList(speechConstructionToken, results)});
+    } else event = new Event(type);
+    recognition.dispatchEvent(event);
+    if (type === "end") recognition.__finish(false);
+    else if (type === "error") recognition.__finish();
+    return true;
+  };
+  Object.assign(globalThis, { SpeechSynthesisUtterance, SpeechSynthesisEvent, SpeechSynthesisErrorEvent,
+    SpeechSynthesisVoice, SpeechGrammar, SpeechGrammarList, SpeechRecognition, SpeechRecognitionPhrase,
+    SpeechRecognitionEvent, SpeechRecognitionErrorEvent, SpeechRecognitionAlternative,
+    SpeechRecognitionResult, SpeechRecognitionResultList, speechSynthesis });
+
   const textTrackElementObjects = new WeakMap();
   const textTrackListObjects = new WeakMap();
   const cueConstructionToken = {};
@@ -30347,6 +32297,7 @@ let omoikaneUserActivationState;
       this.__destination = new AudioDestinationNode(audioConstructionToken, this);
       this.listener = Object.create(null);
       this.onstatechange = null;
+      this.audioWorklet = new AudioWorklet(workletConstructionToken);
     }
     get state() { return this.__state; }
     get currentTime() { return audioNow(this); }
@@ -30406,7 +32357,303 @@ let omoikaneUserActivationState;
     }
     createGain() { if (this.__state === "closed") throw new DOMException("The AudioContext is closed.", "InvalidStateError"); return new GainNode(this); }
     createOscillator() { if (this.__state === "closed") throw new DOMException("The AudioContext is closed.", "InvalidStateError"); return new OscillatorNode(this); }
+    createBuffer(numberOfChannels, length, sampleRate) {
+      return new AudioBuffer({numberOfChannels, length, sampleRate});
+    }
+    decodeAudioData(audioData, successCallback = undefined, errorCallback = undefined) {
+      let result;
+      try {
+        if (!(audioData instanceof ArrayBuffer)) throw new TypeError("decodeAudioData requires an ArrayBuffer");
+        const bytes = new Uint8Array(audioData.slice(0));
+        const view = new DataView(bytes.buffer);
+        const tag = offset => String.fromCharCode(bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]);
+        if (bytes.length < 44 || tag(0) !== "RIFF" || tag(8) !== "WAVE") throw new DOMException("Unsupported audio data.", "EncodingError");
+        let format = null;
+        let dataOffset = 0;
+        let dataLength = 0;
+        for (let offset = 12; offset + 8 <= bytes.length;) {
+          const name = tag(offset);
+          const size = view.getUint32(offset + 4, true);
+          const payload = offset + 8;
+          if (payload + size > bytes.length) throw new DOMException("Truncated audio data.", "EncodingError");
+          if (name === "fmt " && size >= 16) {
+            format = {
+              encoding:view.getUint16(payload, true), channels:view.getUint16(payload + 2, true),
+              sampleRate:view.getUint32(payload + 4, true), blockAlign:view.getUint16(payload + 12, true),
+              bits:view.getUint16(payload + 14, true),
+            };
+          } else if (name === "data") {
+            dataOffset = payload;
+            dataLength = size;
+          }
+          offset = payload + size + (size & 1);
+        }
+        if (!format || !dataOffset || !format.channels || !format.sampleRate || !format.blockAlign ||
+            !((format.encoding === 1 && [8, 16, 24, 32].includes(format.bits)) || (format.encoding === 3 && format.bits === 32))) {
+          throw new DOMException("Unsupported audio encoding.", "EncodingError");
+        }
+        const sourceFrames = Math.floor(dataLength / format.blockAlign);
+        if (!sourceFrames) throw new DOMException("Audio data contains no frames.", "EncodingError");
+        const frames = Math.max(1, Math.ceil(sourceFrames * this.sampleRate / format.sampleRate));
+        const buffer = new AudioBuffer({numberOfChannels:format.channels, length:frames, sampleRate:this.sampleRate});
+        const width = format.bits / 8;
+        const readSample = (frame, channel) => {
+          const offset = dataOffset + frame * format.blockAlign + channel * width;
+          let sample;
+          if (format.encoding === 3) sample = view.getFloat32(offset, true);
+          else if (format.bits === 8) sample = (view.getUint8(offset) - 128) / 128;
+          else if (format.bits === 16) sample = view.getInt16(offset, true) / 32768;
+          else if (format.bits === 24) {
+            let value = view.getUint8(offset) | (view.getUint8(offset + 1) << 8) | (view.getUint8(offset + 2) << 16);
+            if (value & 0x800000) value |= 0xff000000;
+            sample = value / 8388608;
+          } else sample = view.getInt32(offset, true) / 2147483648;
+          return Math.max(-1, Math.min(1, sample));
+        };
+        for (let frame = 0; frame < frames; frame++) for (let channel = 0; channel < format.channels; channel++) {
+          const position = frame * format.sampleRate / this.sampleRate;
+          const before = Math.min(sourceFrames - 1, Math.floor(position));
+          const after = Math.min(sourceFrames - 1, before + 1);
+          const mix = position - before;
+          buffer.__channels[channel][frame] = readSample(before, channel) * (1 - mix) + readSample(after, channel) * mix;
+        }
+        result = Promise.resolve(buffer);
+      } catch (error) { result = Promise.reject(error); }
+      if (typeof successCallback === "function") result.then(successCallback);
+      if (typeof errorCallback === "function") result.catch(errorCallback);
+      return result;
+    }
     get [Symbol.toStringTag]() { return "AudioContext"; }
+  }
+  class AudioBuffer {
+    constructor(options) {
+      const init = Object(options);
+      const numberOfChannels = Number(init.numberOfChannels) >>> 0;
+      const length = Number(init.length) >>> 0;
+      const sampleRate = audioNumber(init.sampleRate, "AudioBuffer sampleRate");
+      if (!numberOfChannels || numberOfChannels > 32 || !length || sampleRate <= 0) {
+        throw new DOMException("Invalid AudioBuffer dimensions.", "NotSupportedError");
+      }
+      Object.defineProperties(this, {
+        numberOfChannels: { enumerable: true, value: numberOfChannels },
+        length: { enumerable: true, value: length },
+        sampleRate: { enumerable: true, value: sampleRate },
+        duration: { enumerable: true, value: length / sampleRate },
+      });
+      this.__channels = Array.from({length:numberOfChannels}, () => new Float32Array(length));
+    }
+    getChannelData(channel) {
+      const index = Number(channel) >>> 0;
+      if (index >= this.numberOfChannels) throw new DOMException("Invalid channel.", "IndexSizeError");
+      return this.__channels[index];
+    }
+    copyFromChannel(destination, channelNumber, startInChannel = 0) {
+      const source = this.getChannelData(channelNumber);
+      const start = Number(startInChannel) >>> 0;
+      destination.set(source.subarray(start, start + destination.length));
+    }
+    copyToChannel(source, channelNumber, startInChannel = 0) {
+      const destination = this.getChannelData(channelNumber);
+      const start = Number(startInChannel) >>> 0;
+      destination.set(source.subarray(0, destination.length - start), start);
+    }
+    get [Symbol.toStringTag]() { return "AudioBuffer"; }
+  }
+
+  function audioNodeReaches(node, target, seen = new Set()) {
+    if (node === target) return true;
+    if (seen.has(node)) return false;
+    seen.add(node);
+    return node.__connections.some(connection =>
+      connection.destination instanceof AudioNode && audioNodeReaches(connection.destination, target, seen));
+  }
+
+  class OfflineAudioCompletionEvent extends Event {
+    constructor(type, init) {
+      super(type, init);
+      if (!init || !(init.renderedBuffer instanceof AudioBuffer)) {
+        throw new TypeError("OfflineAudioCompletionEvent requires renderedBuffer");
+      }
+      Object.defineProperty(this, "renderedBuffer", { enumerable:true, value:init.renderedBuffer });
+    }
+  }
+
+  class OfflineAudioContext extends AudioContext {
+    constructor(numberOfChannelsOrOptions, length, sampleRate) {
+      const dictionaryConstructor = arguments.length === 1 && numberOfChannelsOrOptions !== null &&
+        typeof numberOfChannelsOrOptions === "object";
+      if (!dictionaryConstructor && arguments.length !== 3) throw new TypeError("OfflineAudioContext requires one options dictionary or three arguments");
+      const init = dictionaryConstructor ? Object(numberOfChannelsOrOptions) :
+        {numberOfChannels:numberOfChannelsOrOptions, length, sampleRate};
+      if (init.sampleRate === undefined) throw new TypeError("OfflineAudioContext sampleRate is required");
+      const channelValue = init.numberOfChannels === undefined ? 1 : Number(init.numberOfChannels);
+      const lengthValue = init.length === undefined || init.length === null ? null : Number(init.length);
+      const channels = Math.trunc(channelValue);
+      const frames = lengthValue === null ? null : Math.trunc(lengthValue);
+      const rate = audioNumber(init.sampleRate, "OfflineAudioContext sampleRate");
+      if (!Number.isFinite(channelValue) || channels !== channelValue || channels < 1 || channels > 32 ||
+          (lengthValue !== null && (!Number.isFinite(lengthValue) || frames !== lengthValue || frames < 1)) ||
+          rate < 8000 || rate > 192000) {
+        throw new DOMException("Invalid offline rendering dimensions.", "NotSupportedError");
+      }
+      const renderSizeHint = init.renderSizeHint === undefined || init.renderSizeHint === "default" ? 128 : Number(init.renderSizeHint);
+      if (!Number.isInteger(renderSizeHint) || renderSizeHint < 1) throw new DOMException("Invalid renderSizeHint.", "NotSupportedError");
+      super({sampleRate:rate});
+      this.destination.channelCount = channels;
+      this.destination.channelCountMode = "explicit";
+      Object.defineProperties(this, {
+        length: { enumerable:true, value:frames },
+        __offlineChannels: { value:channels, writable:false },
+      });
+      this.oncomplete = null;
+      this.__renderStarted = false;
+      this.__renderQuantumSize = renderSizeHint;
+      this.__committedFrames = 0;
+      this.__renderQueue = Promise.resolve();
+      this.__suspensions = [];
+      this.__resumeRendering = null;
+    }
+    get currentTime() { return this.__currentTime; }
+    suspend(suspendTime) {
+      if (this.__renderStarted || this.__state === "closed") return Promise.reject(new DOMException("Rendering has started.", "InvalidStateError"));
+      const time = audioTime(suspendTime, "OfflineAudioContext suspend time");
+      if ((this.length !== null && time >= this.length / this.sampleRate) || this.__suspensions.some(entry => entry.time === time)) {
+        return Promise.reject(new DOMException("Invalid suspend time.", "InvalidStateError"));
+      }
+      return new Promise(resolve => this.__suspensions.push({time, resolve}));
+    }
+    resume() {
+      if (this.__state !== "suspended" || !this.__renderStarted) {
+        return Promise.reject(new DOMException("Offline rendering is not suspended.", "InvalidStateError"));
+      }
+      this.__state = "running";
+      const resumeRendering = this.__resumeRendering;
+      this.__resumeRendering = null;
+      if (resumeRendering) resumeRendering();
+      return Promise.resolve();
+    }
+    startRendering(chunkSize = null) {
+      if (this.__state === "closed") return Promise.reject(new DOMException("Rendering already completed.", "InvalidStateError"));
+      const requested = chunkSize === null || chunkSize === undefined ? null : Number(chunkSize);
+      if (requested !== null && (!Number.isInteger(requested) || requested < 1)) {
+        return Promise.reject(new DOMException("Invalid render chunk size.", "NotSupportedError"));
+      }
+      const quantum = this.__renderQuantumSize;
+      const rounded = requested === null ? quantum : Math.ceil(requested / quantum) * quantum;
+      const remaining = this.length === null ? rounded : this.length - this.__committedFrames;
+      if (remaining <= 0) return Promise.reject(new DOMException("Rendering already committed.", "InvalidStateError"));
+      const frameCount = this.length !== null && requested === null ? remaining : Math.min(remaining, rounded);
+      const firstFrame = this.__committedFrames;
+      this.__committedFrames += frameCount;
+      this.__renderStarted = true;
+      const renderChunk = () => {
+        if (this.__state !== "suspended") this.__state = "running";
+        const output = new AudioBuffer({numberOfChannels:this.__offlineChannels, length:frameCount, sampleRate:this.sampleRate});
+        const lastFrame = firstFrame + frameCount;
+        const suspensions = this.__suspensions.filter(entry => entry.time * this.sampleRate < lastFrame)
+          .sort((left, right) => left.time - right.time);
+        this.__suspensions = this.__suspensions.filter(entry => !suspensions.includes(entry));
+        let frame = firstFrame;
+        const renderUntil = endFrame => {
+          for (; frame < endFrame; frame++) {
+            const time = frame / this.sampleRate;
+            let sample = 0;
+            for (const node of this.__nodes) {
+              if (node instanceof AudioWorkletNode && audioNodeReaches(node, this.destination)) {
+                sample += node.__sample(frame);
+                continue;
+              }
+              if (!(node instanceof OscillatorNode) || !node.__started || !audioNodeReaches(node, this.destination)) continue;
+              if (time < node.__startRequested || (node.__stopRequested !== undefined && time >= node.__stopRequested)) continue;
+              const frequency = node.frequency.__valueAt(time) * Math.pow(2, node.detune.__valueAt(time) / 1200);
+              let value = Math.sin(2 * Math.PI * frequency * (time - node.__startRequested));
+              const gainConnection = node.__connections.find(connection => connection.destination instanceof GainNode);
+              if (gainConnection) value *= gainConnection.destination.gain.__valueAt(time);
+              sample += value;
+            }
+            for (const channel of output.__channels) channel[frame - firstFrame] = Math.max(-1, Math.min(1, sample));
+          }
+          this.__currentTime = frame / this.sampleRate;
+        };
+        const continueRendering = () => Promise.resolve().then(() => {
+          const suspension = suspensions.shift();
+          if (suspension) {
+            // Web Audio schedules offline suspensions at the start of the render
+            // quantum containing the requested time.
+            const suspendFrame = Math.min(lastFrame, Math.floor(suspension.time * this.sampleRate / quantum) * quantum);
+            renderUntil(suspendFrame);
+            this.__state = "suspended";
+            suspension.resolve();
+            return new Promise(resolve => { this.__resumeRendering = resolve; }).then(continueRendering);
+          }
+          renderUntil(lastFrame);
+          this.__currentTime = Math.ceil(lastFrame / quantum) * quantum / this.sampleRate;
+          this.__state = this.length !== null && lastFrame >= this.length ? "closed" : "running";
+          const event = new OfflineAudioCompletionEvent("complete", {renderedBuffer:output});
+          if (typeof this.oncomplete === "function") __omoikane_call_event_listener(this.oncomplete, this, event);
+          this.dispatchEvent(event);
+          return output;
+        });
+        return continueRendering();
+      };
+      const result = this.__renderQueue.then(renderChunk);
+      this.__renderQueue = result.then(() => undefined, () => undefined);
+      return result;
+    }
+    get [Symbol.toStringTag]() { return "OfflineAudioContext"; }
+  }
+
+  class AudioWorkletNode extends AudioNode {
+    constructor(context, name, options = {}) {
+      const owner = audioContextValue(context);
+      const processorName = String(name);
+      if (!owner.audioWorklet || !owner.audioWorklet.registeredNames.includes(processorName)) {
+        throw new DOMException("AudioWorklet processor is not registered.", "InvalidStateError");
+      }
+      const init = Object(options);
+      super(audioConstructionToken, owner, Number(init.numberOfInputs ?? 1) >>> 0, Number(init.numberOfOutputs ?? 1) >>> 0);
+      const channel = new MessageChannel();
+      Object.defineProperty(this, "port", { enumerable:true, value:channel.port1 });
+      this.__processorPort = channel.port2;
+      this.onprocessorerror = null;
+      this.parameters = new Map();
+      this.__processorName = processorName;
+      this.__processorOptions = init.processorOptions === undefined ? {} : init.processorOptions;
+      const outputChannelCount = init.outputChannelCount === undefined
+        ? Array.from({length:this.numberOfOutputs}, () => 1)
+        : Array.from(init.outputChannelCount, value => Number(value) >>> 0);
+      if (outputChannelCount.length !== this.numberOfOutputs || outputChannelCount.some(value => value < 1 || value > 32)) {
+        throw new DOMException("Invalid outputChannelCount.", "NotSupportedError");
+      }
+      this.__outputChannelCount = outputChannelCount;
+      this.__renderQuantum = -1;
+      this.__renderedOutputs = [];
+    }
+    __sample(frame, output = 0, channel = 0) {
+      const quantum = Math.floor(frame / 128);
+      if (quantum !== this.__renderQuantum) {
+        const request = JSON.stringify({
+          name:this.__processorName,
+          frames:128,
+          currentFrame:quantum * 128,
+          sampleRate:this.context.sampleRate,
+          outputChannelCount:this.__outputChannelCount,
+          processorOptions:this.__processorOptions,
+        });
+        try {
+          const response = JSON.parse(nativeWorkletProcess(this.context.audioWorklet.__id, request));
+          this.__renderedOutputs = response && response.ok ? response.outputs : [];
+        } catch (error) {
+          this.__renderedOutputs = [];
+          const event = new Event("processorerror");
+          if (typeof this.onprocessorerror === "function") __omoikane_call_event_listener(this.onprocessorerror, this, event);
+          this.dispatchEvent(event);
+        }
+        this.__renderQuantum = quantum;
+      }
+      return Number(this.__renderedOutputs[output]?.[channel]?.[frame % 128] ?? 0);
+    }
+    get [Symbol.toStringTag]() { return "AudioWorkletNode"; }
   }
   globalThis.AudioParam = AudioParam;
   globalThis.AudioNode = AudioNode;
@@ -30414,6 +32661,10 @@ let omoikaneUserActivationState;
   globalThis.GainNode = GainNode;
   globalThis.OscillatorNode = OscillatorNode;
   globalThis.AudioContext = AudioContext;
+  globalThis.AudioBuffer = AudioBuffer;
+  globalThis.OfflineAudioCompletionEvent = OfflineAudioCompletionEvent;
+  globalThis.OfflineAudioContext = OfflineAudioContext;
+  globalThis.AudioWorkletNode = AudioWorkletNode;
   function notificationOptionString(options, name, fallback = "") {
     const value = options && options[name];
     return value === undefined ? fallback : String(value);
@@ -30525,7 +32776,8 @@ let omoikaneUserActivationState;
   let permissionLifecycleActive = true;
   const supportedPermissionNames = Object.freeze([
     "notifications", "geolocation", "clipboard-read", "clipboard-write", "persistent-storage",
-    "accelerometer", "gyroscope", "magnetometer", "storage-access",
+    "accelerometer", "gyroscope", "magnetometer", "storage-access", "camera", "microphone",
+    "screen-wake-lock",
   ]);
 
   function permissionDescriptorName(descriptor) {
@@ -30541,6 +32793,9 @@ let omoikaneUserActivationState;
   }
 
   function permissionStateFor(name) {
+    if (name === "screen-wake-lock") {
+      return String(__omoikane_wake_lock("permission", __omoikane_document_id));
+    }
     if (name === "storage-access") {
       return String(nativeStorageAccessPermission(__omoikane_document_id));
     }
@@ -30565,6 +32820,9 @@ let omoikaneUserActivationState;
       } catch (_) {
         return "denied";
       }
+    }
+    if (name === "camera" || name === "microphone") {
+      try { return mediaSnapshot().permission ? "granted" : "denied"; } catch (_) { return "denied"; }
     }
     try {
       return nativeIsSecureContext() && nativeClipboardPermission() ? "granted" : "denied";
@@ -32058,6 +34316,12 @@ let omoikaneUserActivationState;
     if (visualScroll) visualViewport.dispatchEvent(new Event("scroll"));
   };
   globalThis.EventTarget = EventTarget;
+  Object.setPrototypeOf(MediaEventTarget.prototype, EventTarget.prototype);
+  Object.setPrototypeOf(MediaEventTarget, EventTarget);
+  Object.setPrototypeOf(MediaStreamTrackEvent.prototype, Event.prototype);
+  Object.setPrototypeOf(MediaStreamTrackEvent, Event);
+  Object.setPrototypeOf(BlobEvent.prototype, Event.prototype);
+  Object.setPrototypeOf(BlobEvent, Event);
   for (const constructor of [TextTrack, TextTrackList, TextTrackCue, TextTrackCueList, VTTCue, VTTRegion]) {
     globalThis[constructor.name] = constructor;
   }
@@ -32189,6 +34453,271 @@ let omoikaneUserActivationState;
   Object.setPrototypeOf(GPUEventTarget.prototype, EventTarget.prototype);
   globalThis.AbortSignal = AbortSignal;
   globalThis.AbortController = AbortController;
+
+  if (globalThis.isSecureContext) {
+    const credentialToken = {};
+    const credentialState = new WeakMap();
+    const responseState = new WeakMap();
+    const publicKeyCredentialState = new WeakMap();
+    const webAuthnBytes = value => Uint8Array.from(value || []).buffer;
+    const webAuthnBase64Url = value => cryptoBytesToBase64Url(Array.from(new Uint8Array(value)));
+    const webAuthnDecodeBase64Url = value => {
+      try { return Uint8Array.from(cryptoBase64UrlToBytes(String(value))).buffer; }
+      catch (_) { throw new DOMException("The value is not valid base64url", "EncodingError"); }
+    };
+    const webAuthnDecodePrf = extensions => {
+      if (extensions === undefined) return undefined;
+      const output = { ...Object(extensions) };
+      if (output.largeBlob && output.largeBlob.write !== undefined) output.largeBlob = { ...output.largeBlob, write: webAuthnDecodeBase64Url(output.largeBlob.write) };
+      if (output.credBlob !== undefined) output.credBlob = webAuthnDecodeBase64Url(output.credBlob);
+      if (output.prf) {
+        output.prf = { ...output.prf };
+        const convert = values => values === undefined ? undefined : { first: webAuthnDecodeBase64Url(values.first), ...(values.second === undefined ? {} : { second: webAuthnDecodeBase64Url(values.second) }) };
+        if (output.prf.eval !== undefined) output.prf.eval = convert(output.prf.eval);
+        if (output.prf.evalByCredential !== undefined) output.prf.evalByCredential = Object.fromEntries(Object.entries(output.prf.evalByCredential).map(([id, values]) => [id, convert(values)]));
+      }
+      return output;
+    };
+    const webAuthnCapabilities = () => Array.from(JSON.parse(String(__omoikane_web_authn("capabilities", __omoikane_document_id, ""))).capabilities || []);
+    const webAuthnEnum = (value, allowed, fallback, name) => {
+      const selected = value === undefined ? fallback : String(value);
+      if (!allowed.includes(selected)) throw new TypeError(`Invalid ${name}`);
+      return selected;
+    };
+    const webAuthnSequence = (value, name) => {
+      if (value === undefined) return [];
+      if (value === null || typeof value === "string" || typeof value[Symbol.iterator] !== "function") {
+        throw new TypeError(`${name} must be a sequence`);
+      }
+      return Array.from(value);
+    };
+    class Credential {
+      constructor(token, id, type) {
+        if (token !== credentialToken) throw new TypeError("Illegal constructor");
+        credentialState.set(this, { id, type });
+      }
+      get id() { return (credentialState.get(this) || illegalInvocation()).id; }
+      get type() { return (credentialState.get(this) || illegalInvocation()).type; }
+      get [Symbol.toStringTag]() { return "Credential"; }
+    }
+    class AuthenticatorResponse {
+      constructor(token, state) {
+        if (token !== credentialToken) throw new TypeError("Illegal constructor");
+        responseState.set(this, state);
+      }
+      get clientDataJSON() { return (responseState.get(this) || illegalInvocation()).clientDataJSON; }
+      get [Symbol.toStringTag]() { return "AuthenticatorResponse"; }
+    }
+    class AuthenticatorAttestationResponse extends AuthenticatorResponse {
+      constructor(token, data) {
+        const state = {
+          clientDataJSON: webAuthnBytes(data.clientDataJson),
+          attestationObject: webAuthnBytes(data.attestationObject),
+          authenticatorData: webAuthnBytes(data.authenticatorData),
+          publicKey: data.publicKey == null ? null : webAuthnBytes(data.publicKey),
+          publicKeyAlgorithm: Number(data.publicKeyAlgorithm),
+          transports: Object.freeze(Array.from(data.transports || [], String)),
+        };
+        super(token, state);
+      }
+      get attestationObject() { return (responseState.get(this) || illegalInvocation()).attestationObject; }
+      getTransports() { return Array.from((responseState.get(this) || illegalInvocation()).transports); }
+      getAuthenticatorData() { return (responseState.get(this) || illegalInvocation()).authenticatorData.slice(0); }
+      getPublicKey() {
+        const value = (responseState.get(this) || illegalInvocation()).publicKey;
+        return value === null ? null : value.slice(0);
+      }
+      getPublicKeyAlgorithm() { return (responseState.get(this) || illegalInvocation()).publicKeyAlgorithm; }
+      get [Symbol.toStringTag]() { return "AuthenticatorAttestationResponse"; }
+    }
+    class AuthenticatorAssertionResponse extends AuthenticatorResponse {
+      constructor(token, data) {
+        super(token, {
+          clientDataJSON: webAuthnBytes(data.clientDataJson),
+          authenticatorData: webAuthnBytes(data.authenticatorData),
+          signature: webAuthnBytes(data.signature),
+          userHandle: data.userHandle == null ? null : webAuthnBytes(data.userHandle),
+        });
+      }
+      get authenticatorData() { return (responseState.get(this) || illegalInvocation()).authenticatorData; }
+      get signature() { return (responseState.get(this) || illegalInvocation()).signature; }
+      get userHandle() { return (responseState.get(this) || illegalInvocation()).userHandle; }
+      get [Symbol.toStringTag]() { return "AuthenticatorAssertionResponse"; }
+    }
+    class PublicKeyCredential extends Credential {
+      constructor(token, data, response, kind) {
+        const rawId = webAuthnBytes(data.credentialId);
+        super(token, webAuthnBase64Url(rawId), "public-key");
+        publicKeyCredentialState.set(this, {
+          rawId, response, kind,
+          authenticatorAttachment: data.authenticatorAttachment == null ? null : String(data.authenticatorAttachment),
+          extensions: Object.freeze({ ...(data.clientExtensionResults || {}) }),
+        });
+      }
+      get rawId() { return (publicKeyCredentialState.get(this) || illegalInvocation()).rawId; }
+      get response() { return (publicKeyCredentialState.get(this) || illegalInvocation()).response; }
+      get authenticatorAttachment() { return (publicKeyCredentialState.get(this) || illegalInvocation()).authenticatorAttachment; }
+      getClientExtensionResults() { return { ...(publicKeyCredentialState.get(this) || illegalInvocation()).extensions }; }
+      toJSON() {
+        const state = publicKeyCredentialState.get(this) || illegalInvocation();
+        const base = {
+          id: this.id, rawId: webAuthnBase64Url(state.rawId), type: this.type,
+          authenticatorAttachment: state.authenticatorAttachment,
+          clientExtensionResults: { ...state.extensions },
+        };
+        const response = responseState.get(state.response);
+        if (state.kind === "creation") {
+          base.response = {
+            clientDataJSON: webAuthnBase64Url(response.clientDataJSON),
+            authenticatorData: webAuthnBase64Url(response.authenticatorData),
+            transports: Array.from(response.transports),
+            publicKeyAlgorithm: response.publicKeyAlgorithm,
+            attestationObject: webAuthnBase64Url(response.attestationObject),
+          };
+          if (response.publicKey !== null) base.response.publicKey = webAuthnBase64Url(response.publicKey);
+        } else {
+          base.response = {
+            clientDataJSON: webAuthnBase64Url(response.clientDataJSON),
+            authenticatorData: webAuthnBase64Url(response.authenticatorData),
+            signature: webAuthnBase64Url(response.signature),
+          };
+          if (response.userHandle !== null) base.response.userHandle = webAuthnBase64Url(response.userHandle);
+        }
+        return base;
+      }
+      static isUserVerifyingPlatformAuthenticatorAvailable() {
+        return Promise.resolve(webAuthnCapabilities().includes("userVerifyingPlatformAuthenticator"));
+      }
+      static isConditionalMediationAvailable() {
+        return Promise.resolve(webAuthnCapabilities().includes("conditionalGet"));
+      }
+      static getClientCapabilities() {
+        const output = {};
+        for (const capability of webAuthnCapabilities().sort()) output[capability] = true;
+        return Promise.resolve(output);
+      }
+      static parseCreationOptionsFromJSON(options) {
+        if (options === null || typeof options !== "object") throw new TypeError("Options must be a dictionary");
+        const copy = { ...options, challenge: webAuthnDecodeBase64Url(options.challenge), user: { ...options.user, id: webAuthnDecodeBase64Url(options.user.id) } };
+        copy.excludeCredentials = webAuthnSequence(options.excludeCredentials, "excludeCredentials").map(item => ({ ...item, id: webAuthnDecodeBase64Url(item.id) }));
+        if (copy.attestation === undefined) copy.attestation = "none";
+        if (copy.hints === undefined) copy.hints = [];
+        if (options.extensions !== undefined) copy.extensions = webAuthnDecodePrf(options.extensions);
+        return copy;
+      }
+      static parseRequestOptionsFromJSON(options) {
+        if (options === null || typeof options !== "object") throw new TypeError("Options must be a dictionary");
+        const copy = { ...options, challenge: webAuthnDecodeBase64Url(options.challenge), allowCredentials: webAuthnSequence(options.allowCredentials, "allowCredentials").map(item => ({ ...item, id: webAuthnDecodeBase64Url(item.id) })) };
+        if (options.extensions !== undefined) copy.extensions = webAuthnDecodePrf(options.extensions);
+        return copy;
+      }
+      static signalUnknownCredential(options) { void options; return Promise.reject(new DOMException("Credential signaling is not supported", "NotSupportedError")); }
+      static signalAllAcceptedCredentials(options) { void options; return Promise.reject(new DOMException("Credential signaling is not supported", "NotSupportedError")); }
+      static signalCurrentUserDetails(options) { void options; return Promise.reject(new DOMException("Credential signaling is not supported", "NotSupportedError")); }
+      get [Symbol.toStringTag]() { return "PublicKeyCredential"; }
+    }
+    const normalizeCredentialDescriptors = (items, name) => webAuthnSequence(items, name).map(item => {
+      if (item === null || typeof item !== "object" || String(item.type) !== "public-key") throw new TypeError(`Invalid ${name} entry`);
+      return copyBufferSourceBytes(item.id);
+    });
+    function normalizeCreationOptions(options) {
+      if (options === null || typeof options !== "object" || options.publicKey === undefined) throw new TypeError("publicKey options are required");
+      const value = options.publicKey;
+      if (value === null || typeof value !== "object") throw new TypeError("publicKey must be a dictionary");
+      const rp = value.rp, user = value.user;
+      if (rp === null || typeof rp !== "object" || rp.name === undefined) throw new TypeError("rp.name is required");
+      if (user === null || typeof user !== "object" || user.id === undefined || user.name === undefined || user.displayName === undefined) throw new TypeError("user fields are required");
+      const challenge = copyBufferSourceBytes(value.challenge);
+      if (challenge.length === 0) throw new TypeError("challenge must not be empty");
+      const userId = copyBufferSourceBytes(user.id);
+      if (userId.length === 0 || userId.length > 64) throw new TypeError("user.id must contain 1 to 64 bytes");
+      const params = webAuthnSequence(value.pubKeyCredParams, "pubKeyCredParams");
+      if (params.length === 0) throw new TypeError("pubKeyCredParams must not be empty");
+      const selection = value.authenticatorSelection == null ? {} : Object(value.authenticatorSelection);
+      return {
+        origin: "", rpId: value.rp.id === undefined ? location.hostname : String(value.rp.id), rpName: String(rp.name), challenge,
+        userId, userName: String(user.name), userDisplayName: String(user.displayName),
+        algorithms: params.map(param => { if (String(param.type) !== "public-key") throw new TypeError("Invalid credential type"); const alg = Number(param.alg); if (!Number.isInteger(alg)) throw new TypeError("Invalid COSE algorithm"); return alg; }),
+        excludeCredentials: normalizeCredentialDescriptors(value.excludeCredentials, "excludeCredentials"),
+        userVerification: webAuthnEnum(selection.userVerification, ["required", "preferred", "discouraged"], "preferred", "userVerification"),
+        residentKey: webAuthnEnum(selection.residentKey, ["required", "preferred", "discouraged"], selection.requireResidentKey ? "required" : "discouraged", "residentKey"),
+        authenticatorAttachment: selection.authenticatorAttachment === undefined ? null : webAuthnEnum(selection.authenticatorAttachment, ["platform", "cross-platform"], "", "authenticatorAttachment"),
+        attestation: webAuthnEnum(value.attestation, ["none", "indirect", "direct", "enterprise"], "none", "attestation"),
+        hints: webAuthnSequence(value.hints, "hints").map(String),
+        timeout: value.timeout === undefined ? null : Math.min(0xffffffff, Math.max(0, Math.trunc(Number(value.timeout)) || 0)),
+        transientUserActivation: navigator.userActivation.isActive,
+      };
+    }
+    function normalizeAssertionOptions(options) {
+      if (options === null || typeof options !== "object" || options.publicKey === undefined) throw new TypeError("publicKey options are required");
+      const value = options.publicKey;
+      if (value === null || typeof value !== "object") throw new TypeError("publicKey must be a dictionary");
+      const challenge = copyBufferSourceBytes(value.challenge);
+      if (challenge.length === 0) throw new TypeError("challenge must not be empty");
+      return {
+        origin: "", rpId: value.rpId === undefined ? location.hostname : String(value.rpId), challenge,
+        allowCredentials: normalizeCredentialDescriptors(value.allowCredentials, "allowCredentials"),
+        userVerification: webAuthnEnum(value.userVerification, ["required", "preferred", "discouraged"], "preferred", "userVerification"),
+        mediation: webAuthnEnum(options.mediation, ["silent", "optional", "required", "conditional"], "optional", "mediation"),
+        hints: webAuthnSequence(value.hints, "hints").map(String),
+        timeout: value.timeout === undefined ? null : Math.min(0xffffffff, Math.max(0, Math.trunc(Number(value.timeout)) || 0)),
+      };
+    }
+    function credentialOperation(kind, options) {
+      let normalized, signal;
+      try {
+        normalized = kind === "create" ? normalizeCreationOptions(options) : normalizeAssertionOptions(options);
+        signal = options.signal;
+        if (signal !== undefined && !(signal instanceof AbortSignal)) throw new TypeError("signal must be an AbortSignal");
+        if (signal && signal.aborted) return Promise.reject(signal.reason);
+      } catch (error) { return Promise.reject(error); }
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        const abort = () => { if (!settled) { settled = true; reject(signal.reason); } };
+        if (signal) signal.addEventListener("abort", abort, { once: true });
+        queueMicrotask(() => {
+          if (settled) return;
+          try {
+            const result = JSON.parse(String(__omoikane_web_authn(kind, __omoikane_document_id, JSON.stringify(normalized))));
+            if (result.error) throw new DOMException(result.message || "The authenticator request failed", result.error);
+            const data = result[kind === "create" ? "creation" : "assertion"];
+            const response = kind === "create" ? new AuthenticatorAttestationResponse(credentialToken, data) : new AuthenticatorAssertionResponse(credentialToken, data);
+            settled = true;
+            resolve(new PublicKeyCredential(credentialToken, data, response, kind === "create" ? "creation" : "assertion"));
+          } catch (error) { settled = true; reject(error); }
+          finally { if (signal) signal.removeEventListener("abort", abort); }
+        });
+      });
+    }
+    class CredentialsContainer {
+      constructor(token) { if (token !== credentialToken) throw new TypeError("Illegal constructor"); }
+      create(options = {}) { return credentialOperation("create", options); }
+      get(options = {}) { return credentialOperation("get", options); }
+      store() { return Promise.reject(new DOMException("Credential storage is not supported", "NotSupportedError")); }
+      preventSilentAccess() { return Promise.resolve(); }
+      get [Symbol.toStringTag]() { return "CredentialsContainer"; }
+    }
+    const credentials = new CredentialsContainer(credentialToken);
+    Object.defineProperty(Object.getPrototypeOf(navigator), "credentials", { configurable: true, enumerable: true, get() { if (this !== navigator) illegalInvocation(); return credentials; } });
+    for (const constructor of [Credential, CredentialsContainer, PublicKeyCredential, AuthenticatorResponse, AuthenticatorAttestationResponse, AuthenticatorAssertionResponse]) {
+      Object.defineProperty(constructor, "length", { value: 0 });
+      Object.defineProperty(globalThis, constructor.name, { configurable: true, writable: true, value: constructor });
+    }
+    for (const [target, members] of [
+      [Credential.prototype, ["id", "type"]],
+      [CredentialsContainer.prototype, ["create", "get", "store", "preventSilentAccess"]],
+      [PublicKeyCredential.prototype, ["rawId", "response", "authenticatorAttachment", "getClientExtensionResults", "toJSON"]],
+      [PublicKeyCredential, ["isUserVerifyingPlatformAuthenticatorAvailable", "isConditionalMediationAvailable", "getClientCapabilities", "parseCreationOptionsFromJSON", "parseRequestOptionsFromJSON", "signalUnknownCredential", "signalAllAcceptedCredentials", "signalCurrentUserDetails"]],
+      [AuthenticatorResponse.prototype, ["clientDataJSON"]],
+      [AuthenticatorAttestationResponse.prototype, ["attestationObject", "getTransports", "getAuthenticatorData", "getPublicKey", "getPublicKeyAlgorithm"]],
+      [AuthenticatorAssertionResponse.prototype, ["authenticatorData", "signature", "userHandle"]],
+    ]) {
+      for (const member of members) {
+        const descriptor = Object.getOwnPropertyDescriptor(target, member);
+        Object.defineProperty(target, member, { ...descriptor, enumerable: true });
+      }
+    }
+  }
 
   const cookieStoreOwners = new WeakMap();
   const cookieStoreToken = {};
@@ -32420,9 +34949,13 @@ let omoikaneUserActivationState;
       const transferable = list[index];
       if (safeWeakMapHas(customStateSetObjects, transferable)) throw dataCloneError();
       const port = transferable instanceof MessagePort;
-      if ((nativeArrayBufferInfo(transferable) === null && !port) ||
+      const media = transferable instanceof VideoFrame || transferable instanceof AudioData;
+      if ((nativeArrayBufferInfo(transferable) === null && !port && !media) ||
           (port && transferable._closed) || hasSetValue(seen, transferable)) {
         throw dataCloneError("The transfer list contains an invalid or duplicate object.");
+      }
+      if (media && transferable.__state().closed) {
+        throw dataCloneError("A closed media resource cannot be transferred.");
       }
       addSetValue(seen, transferable);
     }
@@ -32456,6 +34989,18 @@ let omoikaneUserActivationState;
         throw dataCloneError("A MessagePort must be transferred to be cloned.");
       }
       state.nodes[id] = ["P", value];
+    } else if (value instanceof FileSystemHandle) {
+      const handle = opfsHandleState(value);
+      state.nodes[id] = ["H", handle.kind, handle.documentId, handle.path.slice()];
+    } else if (value instanceof EncodedVideoChunk || value instanceof EncodedAudioChunk) {
+      const chunk = webCodecChunkState.get(value);
+      state.nodes[id] = ["C", value instanceof EncodedVideoChunk, chunk.type,
+        chunk.timestamp, chunk.duration, chunk.bytes.slice()];
+    } else if (value instanceof VideoFrame || value instanceof AudioData) {
+      const media = value.__state();
+      if (media.closed) throw dataCloneError("A closed media resource cannot be cloned.");
+      state.nodes[id] = [value instanceof VideoFrame ? "F" : "A", value,
+        safeMapHas(state.transferSet, value)];
     } else if (value instanceof IntrinsicDate) {
       state.nodes[id] = ["d", intrinsicDateGetTime(value)];
     } else if (value instanceof IntrinsicRegExp) {
@@ -32534,6 +35079,16 @@ let omoikaneUserActivationState;
         case "x": objects[index] = new IntrinsicRegExp(node[1], node[2]); break;
         case "b": objects[index] = node[2] ? safeMapGet(transferred, node[1]) : node[1]; break;
         case "P": objects[index] = safeMapGet(transferred, node[1]); break;
+        case "H": objects[index] = opfsHandle(node[1], node[2], node[3]); break;
+        case "C": {
+          const Constructor = node[1] ? EncodedVideoChunk : EncodedAudioChunk;
+          objects[index] = new Constructor({
+            type: node[2], timestamp: node[3], duration: node[4], data: node[5],
+          });
+          break;
+        }
+        case "F": objects[index] = node[2] ? safeMapGet(transferred, node[1]) : node[1].clone(); break;
+        case "A": objects[index] = node[2] ? safeMapGet(transferred, node[1]) : node[1].clone(); break;
         case "m": objects[index] = new IntrinsicMap(); break;
         case "t": objects[index] = new IntrinsicSet(); break;
         case "a": objects[index] = new IntrinsicArray(node[1]); break;
@@ -32604,6 +35159,12 @@ let omoikaneUserActivationState;
         if (transferList[index]._closed) throw dataCloneError("A closed MessagePort cannot be transferred.");
         continue;
       }
+      if (transferList[index] instanceof VideoFrame || transferList[index] instanceof AudioData) {
+        if (transferList[index].__state().closed) {
+          throw dataCloneError("A closed media resource cannot be transferred.");
+        }
+        continue;
+      }
       const info = nativeArrayBufferInfo(transferList[index]);
       if (info === null || info[0]) throw dataCloneError("A detached ArrayBuffer cannot be transferred.");
     }
@@ -32631,6 +35192,9 @@ let omoikaneUserActivationState;
         source._pendingMessages = [];
         source._closed = true;
         if (transferredPorts) transferredPorts.push(target);
+      } else if (source instanceof VideoFrame || source instanceof AudioData) {
+        target = source.clone();
+        source.close();
       } else {
         try { target = nativeTransferArrayBuffer(source); }
         catch (_) { throw dataCloneError("The ArrayBuffer could not be transferred."); }
@@ -34869,6 +37433,7 @@ let omoikaneUserActivationState;
       "PopStateEvent", "HashChangeEvent", "PageTransitionEvent", "BeforeUnloadEvent", "SubmitEvent", "FormDataEvent", "ClipboardEvent",
       "Touch", "TouchList", "TouchEvent", "ContentVisibilityAutoStateChangeEvent", "DeviceOrientationEvent", "DeviceMotionEvent",
       "DeviceMotionEventAcceleration", "DeviceMotionEventRotationRate", "HTMLFrameSetElement", "event",
+      "CanvasCaptureMediaStreamTrack",
     ]) {
       try { delete globalThis[domName]; } catch (_) { globalThis[domName] = undefined; }
     }
@@ -34913,6 +37478,10 @@ let omoikaneUserActivationState;
     globalThis.WorkerGlobalScope = Object;
     globalThis.DedicatedWorkerGlobalScope = Object;
     globalThis.FileReaderSync = FileReaderSync;
+    if (storageManagerAvailable) {
+      Object.defineProperty(globalThis, "FileSystemSyncAccessHandle", { configurable: true, writable: true, value: FileSystemSyncAccessHandle });
+      Object.defineProperty(FileSystemFileHandle.prototype, "createSyncAccessHandle", { ...opfsCreateSyncAccessHandleDescriptor, enumerable: true });
+    }
     const WorkerDOMException = DOMException;
     globalThis.importScripts = function(...urls) {
       // Both Array.prototype.map and @@iterator are writable by worker code.
@@ -35299,7 +37868,17 @@ let omoikaneUserActivationState;
     terminate() { return this.teardown(); }
     get [Symbol.toStringTag]() { return "Worklet"; }
   }
+  class AudioWorklet extends Worklet {
+    constructor(token) {
+      super(token);
+      const channel = new MessageChannel();
+      Object.defineProperty(this, "port", { enumerable:true, value:channel.port1 });
+      this.__globalPort = channel.port2;
+    }
+    get [Symbol.toStringTag]() { return "AudioWorklet"; }
+  }
   globalThis.Worklet = Worklet;
+  globalThis.AudioWorklet = AudioWorklet;
   globalThis.WorkletGlobalScope = WorkletGlobalScope;
 
   // CSS.paintWorklet is a stable Worklet instance.  Keep this assignment near
@@ -35362,6 +37941,42 @@ let omoikaneUserActivationState;
         throw new DOMException("WorkletGlobalScope has been torn down.", "InvalidStateError");
       }
       registrations.set(key, Object.freeze({ name: key, value }));
+    };
+    globalThis.AudioWorkletProcessor = class AudioWorkletProcessor {
+      constructor() {
+        const channel = new MessageChannel();
+        Object.defineProperty(this, "port", { enumerable:true, value:channel.port1 });
+      }
+    };
+    globalThis.registerProcessor = function(name, processorCtor) {
+      const key = String(name);
+      if (!key) throw new DOMException("A processor name is required.", "NotSupportedError");
+      if (typeof processorCtor !== "function") throw new TypeError("Processor constructor must be callable");
+      if (registrations.has(key)) throw new DOMException("Processor name already registered.", "NotSupportedError");
+      if (typeof nativeRegister !== "function" || !nativeRegister(workletId, key)) {
+        throw new DOMException("AudioWorkletGlobalScope has been torn down.", "InvalidStateError");
+      }
+      registrations.set(key, Object.freeze({ name:key, constructor:processorCtor }));
+    };
+    const audioProcessorInstances = new Map();
+    globalThis.__omoikane_audio_process = function(encodedRequest) {
+      const request = JSON.parse(String(encodedRequest));
+      const registration = registrations.get(String(request.name));
+      if (!registration || typeof registration.constructor !== "function") return JSON.stringify({ok:false});
+      let processor = audioProcessorInstances.get(request.name);
+      if (!processor) {
+        processor = new registration.constructor({processorOptions:request.processorOptions ?? {}});
+        audioProcessorInstances.set(request.name, processor);
+      }
+      const frames = Number(request.frames) >>> 0;
+      globalThis.currentFrame = Number(request.currentFrame) || 0;
+      globalThis.currentTime = globalThis.currentFrame / Number(request.sampleRate);
+      globalThis.sampleRate = Number(request.sampleRate);
+      const outputs = Array.from(request.outputChannelCount ?? [], count =>
+        Array.from({length:Number(count) >>> 0}, () => new Float32Array(frames)));
+      const keepAlive = processor.process([], outputs, Object.create(null)) !== false;
+      if (!keepAlive) audioProcessorInstances.delete(request.name);
+      return JSON.stringify({ok:true, outputs:outputs.map(output => output.map(channel => Array.from(channel))), keepAlive});
     };
   };
 
@@ -35668,6 +38283,271 @@ let omoikaneUserActivationState;
     get lastModified() { return this.__lastModified; }
     get webkitRelativePath() { return ""; }
     get [Symbol.toStringTag]() { return "File"; }
+  }
+
+  const opfsConstructionToken = {};
+  const opfsState = new WeakMap();
+  function opfsError(name) {
+    if (name === "TypeError") return new TypeError("Invalid file system name");
+    return new DOMException("File system operation failed", name);
+  }
+  function opfsCall(operation, documentId, request = {}, bytes = new Uint8Array()) {
+    let result;
+    try { result = JSON.parse(String(nativeOpfs(operation, documentId, JSON.stringify(request), bytes))); }
+    catch (error) {
+      if (String(error).includes("OPFS requires")) throw new DOMException("OPFS is unavailable for this document", "SecurityError");
+      throw error;
+    }
+    if (result.error) throw opfsError(result.error);
+    return result;
+  }
+  function opfsHandleState(value, kind) {
+    const state = opfsState.get(value);
+    if (!state || (kind && state.kind !== kind)) throw new TypeError("Illegal invocation");
+    return state;
+  }
+  function opfsHandle(kind, documentId, path) {
+    return kind === "directory"
+      ? new FileSystemDirectoryHandle(opfsConstructionToken, documentId, path)
+      : new FileSystemFileHandle(opfsConstructionToken, documentId, path);
+  }
+  function opfsGetDirectory(documentId) {
+    return Promise.resolve().then(() => {
+      opfsCall("root", documentId);
+      return opfsHandle("directory", documentId, []);
+    });
+  }
+  class FileSystemHandle {
+    constructor(token, documentId, path, kind) {
+      if (token !== opfsConstructionToken) throw new TypeError("Illegal constructor");
+      opfsState.set(this, { documentId, path: path.slice(), kind });
+    }
+    get kind() { return opfsHandleState(this).kind; }
+    get name() { const path = opfsHandleState(this).path; return path.length ? path[path.length - 1] : ""; }
+    isSameEntry(other) {
+      return Promise.resolve().then(() => {
+        const left = opfsHandleState(this);
+        const right = opfsHandleState(other);
+        return left.documentId === right.documentId && left.kind === right.kind &&
+          left.path.length === right.path.length && left.path.every((part, index) => part === right.path[index]);
+      });
+    }
+    remove(options = {}) {
+      const state = opfsHandleState(this);
+      return Promise.resolve().then(() => {
+        if (!state.path.length) { for (const entry of opfsCall("list", state.documentId, {path: []}).entries) opfsCall("remove", state.documentId, {path: [], name: entry.name, recursive: true}); return; }
+        opfsCall("remove", state.documentId, { path: state.path.slice(0, -1), name: state.path.at(-1), recursive: !!Object(options).recursive });
+      });
+    }
+    get [Symbol.toStringTag]() { return "FileSystemHandle"; }
+  }
+  class FileSystemDirectoryHandle extends FileSystemHandle {
+    constructor(token, documentId, path) { super(token, documentId, path, "directory"); }
+    getDirectoryHandle(name, options = {}) {
+      const value = String(name), create = !!Object(options).create;
+      return Promise.resolve().then(() => {
+        const state = opfsHandleState(this, "directory");
+        opfsCall("handle", state.documentId, { path: state.path, name: value, directory: true, create });
+        return opfsHandle("directory", state.documentId, [...state.path, value]);
+      });
+    }
+    getFileHandle(name, options = {}) {
+      const value = String(name), create = !!Object(options).create;
+      return Promise.resolve().then(() => {
+        const state = opfsHandleState(this, "directory");
+        opfsCall("handle", state.documentId, { path: state.path, name: value, directory: false, create });
+        return opfsHandle("file", state.documentId, [...state.path, value]);
+      });
+    }
+    removeEntry(name, options = {}) {
+      const value = String(name), recursive = !!Object(options).recursive;
+      return Promise.resolve().then(() => { const state = opfsHandleState(this, "directory"); opfsCall("remove", state.documentId, { path: state.path, name: value, recursive }); });
+    }
+    resolve(possibleDescendant) {
+      return Promise.resolve().then(() => {
+        const state = opfsHandleState(this, "directory");
+        const other = opfsHandleState(possibleDescendant);
+        if (state.documentId !== other.documentId || state.path.some((part, index) => other.path[index] !== part)) return null;
+        return other.path.slice(state.path.length);
+      });
+    }
+    entries() {
+      const state = opfsHandleState(this, "directory");
+      const entries = opfsCall("list", state.documentId, { path: state.path }).entries;
+      let index = 0;
+      return { next: async () => index < entries.length ? { value: [entries[index].name, opfsHandle(entries[index].kind, state.documentId, [...state.path, entries[index++].name])], done: false } : { value: undefined, done: true }, [Symbol.asyncIterator]() { return this; } };
+    }
+    keys() { const iterator = this.entries(); return { next: async () => { const item = await iterator.next(); return item.done ? item : { value: item.value[0], done: false }; }, [Symbol.asyncIterator]() { return this; } }; }
+    values() { const iterator = this.entries(); return { next: async () => { const item = await iterator.next(); return item.done ? item : { value: item.value[1], done: false }; }, [Symbol.asyncIterator]() { return this; } }; }
+    [Symbol.asyncIterator]() { return this.entries(); }
+    get [Symbol.toStringTag]() { return "FileSystemDirectoryHandle"; }
+  }
+  class FileSystemFileHandle extends FileSystemHandle {
+    constructor(token, documentId, path) { super(token, documentId, path, "file"); }
+    getFile() {
+      return Promise.resolve().then(() => {
+        const state = opfsHandleState(this, "file");
+        const value = opfsCall("file", state.documentId, { path: state.path });
+        const file = new File([Uint8Array.from(value.bytes)], state.path.at(-1), { lastModified: value.modified });
+        Object.defineProperty(file, "__opfsSource", { value: { documentId: state.documentId, path: state.path.slice() } });
+        return file;
+      });
+    }
+    createWritable(options = {}) {
+      const keep = !!Object(options).keepExistingData;
+      return Promise.resolve().then(() => {
+        const state = opfsHandleState(this, "file");
+        const mode = String(Object(options).mode ?? "siloed");
+        const { lockId } = opfsCall("lock", state.documentId, { path: state.path, mode });
+        try {
+          const current = opfsCall("file", state.documentId, { path: state.path });
+          return new FileSystemWritableFileStream(opfsConstructionToken, state.documentId, state.path, keep ? Uint8Array.from(current.bytes) : new Uint8Array(), lockId);
+        } catch (error) { opfsCall("unlock", state.documentId, { lockId }); throw error; }
+      });
+    }
+    move(destinationOrName, optionalName = undefined) {
+      return Promise.resolve().then(() => {
+        const state = opfsHandleState(this, "file");
+        let destination, name;
+        if (typeof destinationOrName === "string") {
+          destination = state.path.slice(0, -1); name = String(destinationOrName);
+        } else {
+          destination = opfsHandleState(destinationOrName, "directory").path;
+          name = optionalName === undefined ? state.path.at(-1) : String(optionalName);
+        }
+        opfsCall("move", state.documentId, { path: state.path, destination, name });
+        state.path = [...destination, name];
+      });
+    }
+    createSyncAccessHandle() {
+      const state = opfsHandleState(this, "file");
+      if (typeof document !== "undefined") return Promise.reject(new DOMException("Sync access handles require a dedicated worker", "NotSupportedError"));
+      return Promise.resolve().then(() => new FileSystemSyncAccessHandle(opfsConstructionToken, state.documentId, state.path));
+    }
+    get [Symbol.toStringTag]() { return "FileSystemFileHandle"; }
+  }
+  class FileSystemWritableFileStream extends WritableStream {
+    constructor(token, documentId, path, initial, lockId) {
+      if (token !== opfsConstructionToken) throw new TypeError("Illegal constructor");
+      const state = { documentId, path: path.slice(), bytes: initial.slice(), position: 0, closed: false, lockId };
+      let owner;
+      super({ write: chunk => owner.__write(chunk), close: () => owner.__commit(), abort: () => owner.__abort() });
+      owner = this;
+      opfsState.set(this, state);
+    }
+    async __data(value) {
+      if (value instanceof Blob) {
+        if (value.__opfsSource) opfsCall("file", value.__opfsSource.documentId, { path: value.__opfsSource.path });
+        return value.__bytes.slice();
+      }
+      if (value instanceof ArrayBuffer) return new Uint8Array(value).slice();
+      if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+      return blobTextEncoder.encode(String(value));
+    }
+    async __write(chunk) {
+      const state = opfsState.get(this);
+      if (!state || state.closed) throw new TypeError("The stream is closed");
+      try {
+      const params = chunk !== null && typeof chunk === "object" && !(chunk instanceof Blob) && !(chunk instanceof ArrayBuffer) && !ArrayBuffer.isView(chunk);
+      const command = params ? String(chunk.type) : "write";
+      if (command === "seek") {
+        if (!("position" in chunk)) throw new DOMException("seek requires position", "SyntaxError");
+        const position = Number(chunk.position);
+        if (!Number.isSafeInteger(position) || position < 0) throw new TypeError("position must be a non-negative integer");
+        state.position = position;
+        return;
+      }
+      if (command === "truncate") {
+        if (!("size" in chunk)) throw new DOMException("truncate requires size", "SyntaxError");
+        await this.truncate(chunk.size);
+        return;
+      }
+      if (command !== "write" || (params && !("data" in chunk))) {
+        throw new DOMException("write requires data", "SyntaxError");
+      }
+      if ((params && chunk.data === null) || (!params && (chunk === undefined || chunk === null))) {
+        throw new TypeError("write requires valid data");
+      }
+      const data = await this.__data(params ? chunk.data : chunk);
+      const position = params && "position" in chunk ? Number(chunk.position) : state.position;
+      if (!Number.isSafeInteger(position) || position < 0) throw new TypeError("position must be a non-negative integer");
+      const length = Math.max(state.bytes.length, position + data.length);
+      if (length !== state.bytes.length) { const grown = new Uint8Array(length); grown.set(state.bytes); state.bytes = grown; }
+      state.bytes.set(data, position); state.position = position + data.length;
+      } catch (error) {
+        state.errored = true;
+        this.__release();
+        throw error;
+      }
+    }
+    write(data) { return Promise.resolve().then(() => this.__write(data)); }
+    seek(position) { return Promise.resolve().then(() => this.write({ type: "seek", position })); }
+    truncate(size) {
+      return Promise.resolve().then(() => {
+        const state = opfsState.get(this);
+        if (!state || state.closed) throw new TypeError("The stream is closed");
+        const length = Number(size);
+        if (!Number.isSafeInteger(length) || length < 0) throw new TypeError("size must be a non-negative integer");
+        const resized = new Uint8Array(length); resized.set(state.bytes.subarray(0, length)); state.bytes = resized; state.position = Math.min(state.position, length);
+      });
+    }
+    __commit() {
+      const state = opfsState.get(this);
+      if (!state || state.closed || state.errored) throw new TypeError("The stream is closed");
+      try { opfsCall("write", state.documentId, { path: state.path, modified: Date.now() }, state.bytes); }
+      finally { state.closed = true; this.__release(); }
+    }
+    __release() { const state = opfsState.get(this); if (state?.lockId) { opfsCall("unlock", state.documentId, { lockId: state.lockId }); state.lockId = 0; } }
+    __abort() { const state = opfsState.get(this); if (state && !state.closed) { state.closed = true; this.__release(); } }
+    close() { return Promise.resolve().then(() => this.__commit()); }
+    get [Symbol.toStringTag]() { return "FileSystemWritableFileStream"; }
+  }
+  class FileSystemSyncAccessHandle {
+    constructor(token, documentId, path) {
+      if (token !== opfsConstructionToken) throw new TypeError("Illegal constructor");
+      const { lockId } = opfsCall("lock", documentId, { path, mode: "sync" });
+      try {
+        const file = opfsCall("file", documentId, { path });
+        opfsState.set(this, { documentId, path: path.slice(), lockId, bytes: Uint8Array.from(file.bytes), closed: false, dirty: false });
+      } catch (error) { opfsCall("unlock", documentId, { lockId }); throw error; }
+    }
+    __state() { const state = opfsState.get(this); if (!state || state.closed) throw new DOMException("The handle is closed", "InvalidStateError"); return state; }
+    read(buffer, options = {}) {
+      const state = this.__state(); const target = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+      const at = Number(Object(options).at ?? 0); if (!Number.isSafeInteger(at) || at < 0) throw new TypeError("at must be non-negative");
+      const count = Math.min(target.byteLength, Math.max(0, state.bytes.length - at)); target.set(state.bytes.subarray(at, at + count)); return count;
+    }
+    write(buffer, options = {}) {
+      const state = this.__state(); const source = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+      const at = Number(Object(options).at ?? 0); if (!Number.isSafeInteger(at) || at < 0) throw new TypeError("at must be non-negative");
+      const length = Math.max(state.bytes.length, at + source.byteLength); if (length !== state.bytes.length) { const grown = new Uint8Array(length); grown.set(state.bytes); state.bytes = grown; }
+      state.bytes.set(source, at); state.dirty = true; return source.byteLength;
+    }
+    truncate(size) { const state = this.__state(); const length = Number(size); if (!Number.isSafeInteger(length) || length < 0) throw new TypeError("size must be non-negative"); const bytes = new Uint8Array(length); bytes.set(state.bytes.subarray(0, length)); state.bytes = bytes; state.dirty = true; }
+    getSize() { return this.__state().bytes.byteLength; }
+    flush() { const state = this.__state(); if (state.dirty) { opfsCall("write", state.documentId, { path: state.path, modified: Date.now() }, state.bytes); state.dirty = false; } }
+    close() { const state = this.__state(); try { this.flush(); } finally { state.closed = true; opfsCall("unlock", state.documentId, { lockId: state.lockId }); state.lockId = 0; } }
+    get [Symbol.toStringTag]() { return "FileSystemSyncAccessHandle"; }
+  }
+  const opfsCreateSyncAccessHandleDescriptor = Object.getOwnPropertyDescriptor(FileSystemFileHandle.prototype, "createSyncAccessHandle");
+  delete FileSystemFileHandle.prototype.createSyncAccessHandle;
+  for (const constructor of [FileSystemHandle, FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemWritableFileStream, FileSystemSyncAccessHandle]) {
+    Object.defineProperty(constructor, "length", { value: 0 });
+  }
+  if (storageManagerAvailable) {
+    for (const constructor of [FileSystemHandle, FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemWritableFileStream]) {
+      Object.defineProperty(globalThis, constructor.name, { configurable: true, writable: true, value: constructor });
+    }
+    for (const [target, members] of [
+      [FileSystemHandle.prototype, ["kind", "name", "isSameEntry"]],
+      [FileSystemFileHandle.prototype, ["getFile", "createWritable", "move"]],
+      [FileSystemDirectoryHandle.prototype, ["getFileHandle", "getDirectoryHandle", "removeEntry", "resolve"]],
+      [FileSystemWritableFileStream.prototype, ["write", "seek", "truncate"]],
+      [StorageManager.prototype, ["getDirectory"]],
+    ]) for (const member of members) {
+      const descriptor = Object.getOwnPropertyDescriptor(target, member);
+      if (descriptor) Object.defineProperty(target, member, { ...descriptor, enumerable: true });
+    }
   }
 
   // Read-only, index-accessible list of files. The list itself is immutable from
@@ -36022,22 +38902,26 @@ let omoikaneUserActivationState;
   }
 
   function createObjectURL(object) {
-    if (!(object instanceof Blob)) {
-      throw new TypeError("createObjectURL requires a Blob");
+    if (!(object instanceof Blob) && !(object instanceof MediaSource)) {
+      throw new TypeError("createObjectURL requires a Blob or MediaSource");
     }
     // about:blank and srcdoc can inherit an origin that differs from their
     // URL's `null` origin. Use the Document's security origin instead.
     const documentOrigin = __omoikane_storage_origin(__omoikane_document_id);
     const origin = documentOrigin === null ? "null" : new URL(documentOrigin).origin;
     const url = "blob:" + origin + "/" + crypto.randomUUID();
-    objectUrls.set(url, object);
-    __omoikane_register_object_url(url, object.__bytes, object.type);
+    if (object instanceof MediaSource) mediaSourceObjectUrls.set(url, object);
+    else {
+      objectUrls.set(url, object);
+      __omoikane_register_object_url(url, object.__bytes, object.type);
+    }
     return url;
   }
 
   function revokeObjectURL(url) {
     const key = String(url);
     objectUrls.delete(key);
+    mediaSourceObjectUrls.delete(key);
     __omoikane_revoke_object_url(key);
   }
 
@@ -38296,6 +41180,400 @@ let omoikaneUserActivationState;
     // Parser-authored attributes precede author scripts in a newly created Realm.
     wireInlineHandlers(globalThis.document);
   };
+  {
+    const moduleHandles = new WeakMap();
+    const instanceExports = new WeakMap();
+    class CompileError extends Error {
+      constructor(message) { super(message); this.name = "CompileError"; }
+    }
+    class LinkError extends Error {
+      constructor(message) { super(message); this.name = "LinkError"; }
+    }
+    class RuntimeError extends Error {
+      constructor(message) { super(message); this.name = "RuntimeError"; }
+    }
+    class WasmModule {
+      constructor(bytes) {
+        if (arguments.length === 0) throw new TypeError("WebAssembly.Module requires a BufferSource");
+        try { moduleHandles.set(this, nativeWasmCompile(bytes)); }
+        catch (error) {
+          if (error instanceof SyntaxError || error instanceof RangeError) throw new CompileError(error.message);
+          throw error;
+        }
+      }
+      static imports(module) {
+        const handle = moduleHandles.get(module);
+        if (handle === undefined) throw new TypeError("Argument 0 must be a WebAssembly.Module");
+        return JSON.parse(nativeWasmModuleMetadata(handle, "imports", ""));
+      }
+      static exports(module) {
+        const handle = moduleHandles.get(module);
+        if (handle === undefined) throw new TypeError("Argument 0 must be a WebAssembly.Module");
+        return JSON.parse(nativeWasmModuleMetadata(handle, "exports", ""));
+      }
+      static customSections(module, sectionName) {
+        const handle = moduleHandles.get(module);
+        if (handle === undefined) throw new TypeError("Argument 0 must be a WebAssembly.Module");
+        if (arguments.length < 2) throw new TypeError("WebAssembly.Module.customSections requires a section name");
+        const sections = JSON.parse(nativeWasmModuleMetadata(handle, "customSections", String(sectionName)));
+        return sections.map(bytes => Uint8Array.from(bytes).buffer);
+      }
+    }
+    Object.defineProperty(WasmModule, "name", { value: "Module" });
+    for (const name of ["imports", "exports", "customSections"]) {
+      Object.defineProperty(WasmModule, name, { ...Object.getOwnPropertyDescriptor(WasmModule, name), enumerable: true });
+    }
+    Object.defineProperty(WasmModule.prototype, Symbol.toStringTag, { value: "WebAssembly.Module", configurable: true });
+    const wasmIndex = (value, name) => {
+      const number = Number(value);
+      if (!Number.isFinite(number) || number < 0 || Math.floor(number) !== number || number > 0xffffffff) {
+        throw new TypeError(`${name} must be a non-negative integer`);
+      }
+      return number;
+    };
+    const resourceWrappers = new WeakMap();
+    const memoryHandles = new WeakMap();
+    class WasmMemory {
+      constructor(descriptor) {
+        if (descriptor === null || (typeof descriptor !== "object" && typeof descriptor !== "function")) {
+          throw new TypeError("WebAssembly.Memory descriptor must be an object");
+        }
+        if (descriptor.shared) throw new TypeError("Shared WebAssembly.Memory is not supported");
+        const initial = wasmIndex(descriptor.initial, "initial");
+        const maximumValue = descriptor.maximum;
+        const maximum = maximumValue === undefined ? undefined : wasmIndex(maximumValue, "maximum");
+        if (maximum !== undefined && initial > maximum) throw new RangeError("initial exceeds maximum");
+        const handle = nativeWasmMemoryNew(initial, maximum);
+        memoryHandles.set(this, handle);
+        resourceWrappers.set(handle, this);
+      }
+      get buffer() {
+        const handle = memoryHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Memory.buffer called on incompatible receiver");
+        return nativeWasmMemoryBuffer(handle);
+      }
+      grow(delta) {
+        const handle = memoryHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Memory.grow called on incompatible receiver");
+        return nativeWasmMemoryGrow(handle, wasmIndex(delta, "delta"));
+      }
+    }
+    Object.defineProperty(WasmMemory, "name", { value: "Memory" });
+    Object.defineProperty(WasmMemory.prototype, Symbol.toStringTag, { value: "WebAssembly.Memory", configurable: true });
+    const globalHandles = new WeakMap();
+    class WasmGlobal {
+      constructor(descriptor, ...values) {
+        if (descriptor === null || (typeof descriptor !== "object" && typeof descriptor !== "function")) {
+          throw new TypeError("WebAssembly.Global descriptor must be an object");
+        }
+        const mutable = Boolean(descriptor.mutable);
+        const type = String(descriptor.value);
+        if (!["i32", "i64", "f32", "f64"].includes(type)) throw new TypeError("Invalid WebAssembly.Global value type");
+        const value = values[0] === undefined ? (type === "i64" ? 0n : 0) : values[0];
+        const handle = nativeWasmGlobalNew(type, value, mutable);
+        globalHandles.set(this, handle);
+        resourceWrappers.set(handle, this);
+      }
+      get value() {
+        const handle = globalHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Global.value called on incompatible receiver");
+        return nativeWasmGlobalValue(handle);
+      }
+      set value(value) {
+        const handle = globalHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Global.value called on incompatible receiver");
+        nativeWasmGlobalValue(handle, value);
+      }
+      valueOf() {
+        const handle = globalHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Global.valueOf called on incompatible receiver");
+        return nativeWasmGlobalValue(handle);
+      }
+    }
+    Object.defineProperty(WasmGlobal, "name", { value: "Global" });
+    Object.defineProperty(WasmGlobal.prototype, Symbol.toStringTag, { value: "WebAssembly.Global", configurable: true });
+    const memoryFromHandle = handle => {
+      const existing = resourceWrappers.get(handle);
+      if (existing !== undefined) return existing;
+      const memory = Object.create(WasmMemory.prototype);
+      memoryHandles.set(memory, handle);
+      resourceWrappers.set(handle, memory);
+      return memory;
+    };
+    const globalFromHandle = handle => {
+      const existing = resourceWrappers.get(handle);
+      if (existing !== undefined) return existing;
+      const global = Object.create(WasmGlobal.prototype);
+      globalHandles.set(global, handle);
+      resourceWrappers.set(handle, global);
+      return global;
+    };
+    const tableHandles = new WeakMap();
+    const tableElements = new WeakMap();
+    const wasmFunctionHandles = new WeakMap();
+    class WasmTable {
+      constructor(descriptor, ...values) {
+        if (descriptor === null || (typeof descriptor !== "object" && typeof descriptor !== "function")) {
+          throw new TypeError("WebAssembly.Table descriptor must be an object");
+        }
+        const element = String(descriptor.element);
+        if (!["externref", "funcref", "anyfunc"].includes(element)) throw new TypeError("Invalid WebAssembly.Table element type");
+        const initial = wasmIndex(descriptor.initial, "initial");
+        const maximumValue = descriptor.maximum;
+        const maximum = maximumValue === undefined ? undefined : wasmIndex(maximumValue, "maximum");
+        if (maximum !== undefined && initial > maximum) throw new RangeError("initial exceeds maximum");
+        let value = values.length ? values[0] : (element === "externref" ? undefined : null);
+        if (element !== "externref" && value === undefined) value = null;
+        const functionHandle = element !== "externref" && value !== null ? wasmFunctionHandles.get(value) : undefined;
+        if (element !== "externref" && value !== null && functionHandle === undefined) throw new TypeError("funcref table values must be null or Wasm functions");
+        const handle = nativeWasmTableNew(element, initial, maximum, functionHandle ?? value, value);
+        tableHandles.set(this, handle);
+        resourceWrappers.set(handle, this);
+        tableElements.set(this, element === "externref" ? "externref" : "funcref");
+      }
+      get length() {
+        const handle = tableHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Table.length called on incompatible receiver");
+        return nativeWasmTableOp(handle, "length", 0, null);
+      }
+      get(index) {
+        const handle = tableHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Table.get called on incompatible receiver");
+        return nativeWasmTableOp(handle, "get", wasmIndex(index, "index"), null);
+      }
+      set(index, ...values) {
+        const handle = tableHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Table.set called on incompatible receiver");
+        const convertedIndex = wasmIndex(index, "index");
+        const value = values.length ? values[0] : (tableElements.get(this) === "externref" ? undefined : null);
+        const functionHandle = tableElements.get(this) === "funcref" && value !== null ? wasmFunctionHandles.get(value) : undefined;
+        if (tableElements.get(this) === "funcref" && value !== null && functionHandle === undefined) throw new TypeError("funcref value must be a Wasm function");
+        nativeWasmTableOp(handle, "set", convertedIndex, value, functionHandle ?? value);
+      }
+      grow(delta, ...values) {
+        const handle = tableHandles.get(this);
+        if (handle === undefined) throw new TypeError("WebAssembly.Table.grow called on incompatible receiver");
+        const value = values.length ? values[0] : (tableElements.get(this) === "externref" ? undefined : null);
+        const functionHandle = tableElements.get(this) === "funcref" && value !== null ? wasmFunctionHandles.get(value) : undefined;
+        if (tableElements.get(this) === "funcref" && value !== null && functionHandle === undefined) throw new TypeError("funcref value must be a Wasm function");
+        return nativeWasmTableOp(handle, "grow", wasmIndex(delta, "delta"), value, functionHandle ?? value);
+      }
+    }
+    Object.defineProperty(WasmTable, "name", { value: "Table" });
+    Object.defineProperty(WasmTable.prototype, Symbol.toStringTag, { value: "WebAssembly.Table", configurable: true });
+    const tableFromHandle = (handle, element) => {
+      const existing = resourceWrappers.get(handle);
+      if (existing !== undefined) return existing;
+      const table = Object.create(WasmTable.prototype);
+      tableHandles.set(table, handle);
+      tableElements.set(table, element);
+      resourceWrappers.set(handle, table);
+      return table;
+    };
+    class WasmInstance {
+      constructor(module, imports = undefined) {
+        const moduleHandle = moduleHandles.get(module);
+        if (moduleHandle === undefined) throw new TypeError("Argument 0 must be a WebAssembly.Module");
+        if (imports !== undefined && (imports === null || (typeof imports !== "object" && typeof imports !== "function"))) {
+          throw new TypeError("WebAssembly imports argument must be an object");
+        }
+        const descriptors = WasmModule.imports(module);
+        const signatures = JSON.parse(nativeWasmModuleMetadata(moduleHandle, "runtimeImports", ""));
+        const values = descriptors.map((descriptor, index) => {
+          const namespace = imports[descriptor.module];
+          if (namespace === null || (typeof namespace !== "object" && typeof namespace !== "function")) {
+            throw new TypeError(`WebAssembly import module ${descriptor.module} must be an object`);
+          }
+          const value = namespace[descriptor.name];
+          if (descriptor.kind === "memory") {
+            const handle = memoryHandles.get(value);
+            if (handle === undefined) throw new LinkError(`WebAssembly import ${descriptor.module}.${descriptor.name} must be a Memory`);
+            return handle;
+          }
+          if (descriptor.kind === "global") {
+            const handle = globalHandles.get(value);
+            if (handle === undefined) throw new LinkError(`WebAssembly import ${descriptor.module}.${descriptor.name} must be a Global`);
+            return handle;
+          }
+          if (descriptor.kind === "table") {
+            const handle = tableHandles.get(value);
+            if (handle === undefined) throw new LinkError(`WebAssembly import ${descriptor.module}.${descriptor.name} must be a Table`);
+            return handle;
+          }
+          if (descriptor.kind !== "function") return value;
+          if (typeof value !== "function") throw new LinkError(`WebAssembly import ${descriptor.module}.${descriptor.name} must be callable`);
+          if (signatures[index].results <= 1) return value;
+          return (...args) => collectHTMLRoots(value(...args));
+        });
+        let handle;
+        try { handle = nativeWasmInstantiate(moduleHandle, values); }
+        catch (error) {
+          if (error instanceof TypeError) throw new LinkError(error.message);
+          if (error instanceof Error && error.message.startsWith("__WASM_LINK__")) throw new LinkError(error.message.slice(13));
+          if (error instanceof Error && error.message.startsWith("__WASM_RUNTIME__")) throw new RuntimeError(error.message.slice(16));
+          throw error;
+        }
+        const exports = Object.create(null);
+        let exportIndex = 0;
+        for (const descriptor of JSON.parse(nativeWasmInstanceExports(handle))) {
+          const currentIndex = exportIndex++;
+          if (descriptor.kind !== "function") {
+            const nativeHandle = nativeWasmExportHandle(handle, currentIndex, descriptor.name, descriptor.kind);
+            const value = descriptor.kind === "memory" ? memoryFromHandle(nativeHandle) :
+              descriptor.kind === "global" ? globalFromHandle(nativeHandle) :
+              descriptor.kind === "table" ? tableFromHandle(nativeHandle, descriptor.element) : undefined;
+            if (value !== undefined) Object.defineProperty(exports, descriptor.name, { value, enumerable: true });
+            continue;
+          }
+          const exportedHandle = nativeWasmExportHandle(handle, currentIndex, descriptor.name, descriptor.kind);
+          if (typeof exportedHandle === "function") {
+            Object.defineProperty(exports, descriptor.name, { value: exportedHandle, enumerable: true });
+            continue;
+          }
+          const fn = (...args) => {
+            try { return nativeWasmCall(handle, descriptor.name, args); }
+            catch (error) {
+              if (error instanceof TypeError || error instanceof RangeError) throw error;
+              if (error instanceof Error && error.message.startsWith("__WASM_EXCEPTION__")) {
+                throw new WasmException(new WasmTag({ parameters: [] }), []);
+              }
+              if (error instanceof Error && error.message.startsWith("__WASM_RUNTIME__")) throw new RuntimeError(error.message.slice(16));
+              throw error;
+            }
+          };
+          Object.defineProperty(fn, "name", { value: descriptor.functionName, configurable: true });
+          Object.defineProperty(fn, "length", { value: descriptor.params, configurable: true });
+          wasmFunctionHandles.set(fn, exportedHandle);
+          Object.defineProperty(exports, descriptor.name, { value: fn, enumerable: true });
+        }
+        Object.preventExtensions(exports);
+        instanceExports.set(this, exports);
+      }
+      get exports() {
+        const exports = instanceExports.get(this);
+        if (exports === undefined) throw new TypeError("WebAssembly.Instance.exports called on incompatible receiver");
+        return exports;
+      }
+    }
+    Object.defineProperty(WasmInstance, "name", { value: "Instance" });
+    Object.defineProperty(WasmInstance.prototype, Symbol.toStringTag, { value: "WebAssembly.Instance", configurable: true });
+    const tagTypes = new WeakMap();
+    class WasmTag {
+      constructor(descriptor) {
+        if (descriptor === null || (typeof descriptor !== "object" && typeof descriptor !== "function")) {
+          throw new TypeError("WebAssembly.Tag descriptor must be an object");
+        }
+        const parameters = Array.from(descriptor.parameters, value => String(value));
+        if (parameters.some(type => !["i32", "i64", "f32", "f64", "externref", "funcref"].includes(type))) {
+          throw new TypeError("Invalid WebAssembly.Tag parameter type");
+        }
+        tagTypes.set(this, parameters);
+      }
+      type() {
+        const parameters = tagTypes.get(this);
+        if (parameters === undefined) throw new TypeError("WebAssembly.Tag.type called on incompatible receiver");
+        return { parameters: parameters.slice() };
+      }
+    }
+    Object.defineProperty(WasmTag, "name", { value: "Tag" });
+    Object.defineProperty(WasmTag.prototype, Symbol.toStringTag, { value: "WebAssembly.Tag", configurable: true });
+    const exceptionStates = new WeakMap();
+    const convertExceptionValue = (type, value) => {
+      if (type === "i64") return BigInt(value);
+      if (type === "externref") return value;
+      if (type === "funcref") {
+        if (value === null || wasmFunctionHandles.has(value)) return value;
+        throw new TypeError("WebAssembly.Exception funcref values must be null or Wasm functions");
+      }
+      if (typeof value === "bigint") throw new TypeError(`WebAssembly.Exception ${type} values must be numbers`);
+      const number = Number(value);
+      if (type === "i32") return number >> 0;
+      return type === "f32" ? Math.fround(number) : number;
+    };
+    const exceptionIndex = value => {
+      const number = Number(value);
+      if (!Number.isFinite(number) || number < 0 || Math.floor(number) !== number || number > 0xffffffff) {
+        throw new RangeError("WebAssembly.Exception argument index is out of range");
+      }
+      return number;
+    };
+    class WasmException {
+      constructor(tag, values, options = undefined) {
+        const parameters = tagTypes.get(tag);
+        if (parameters === undefined) throw new TypeError("Argument 0 must be a WebAssembly.Tag");
+        const payload = Array.from(values);
+        if (payload.length !== parameters.length) throw new TypeError("WebAssembly.Exception argument count does not match its tag");
+        exceptionStates.set(this, {
+          tag,
+          values: payload.map((value, index) => convertExceptionValue(parameters[index], value)),
+        });
+        if (options !== undefined && options !== null && Boolean(Object(options).traceStack)) {
+          Object.defineProperty(this, "stack", { value: new Error().stack, configurable: true, writable: true });
+        }
+      }
+      getArg(tag, index) {
+        const state = exceptionStates.get(this);
+        if (state === undefined) throw new TypeError("WebAssembly.Exception.getArg called on incompatible receiver");
+        if (arguments.length < 2) throw new TypeError("WebAssembly.Exception.getArg requires a tag and index");
+        if (!tagTypes.has(tag)) throw new TypeError("Argument 0 must be a WebAssembly.Tag");
+        const convertedIndex = exceptionIndex(index);
+        if (tag !== state.tag || convertedIndex >= state.values.length) {
+          throw new RangeError("WebAssembly.Exception argument index is out of range");
+        }
+        return state.values[convertedIndex];
+      }
+      is(tag) {
+        const state = exceptionStates.get(this);
+        if (state === undefined) throw new TypeError("WebAssembly.Exception.is called on incompatible receiver");
+        if (!tagTypes.has(tag)) throw new TypeError("Argument 0 must be a WebAssembly.Tag");
+        return tag === state.tag;
+      }
+    }
+    Object.defineProperty(WasmException, "name", { value: "Exception" });
+    Object.defineProperty(WasmException.prototype, Symbol.toStringTag, { value: "WebAssembly.Exception", configurable: true });
+    const WebAssembly = {};
+    const compile = bytes => Promise.resolve().then(() => new WasmModule(bytes));
+    const instantiate = (source, imports) => Promise.resolve().then(() => {
+      if (moduleHandles.has(source)) return new WasmInstance(source, imports);
+      const module = new WasmModule(source);
+      return { module, instance: new WasmInstance(module, imports) };
+    });
+    const streamingResponse = source => Promise.resolve(source).then(response => {
+      if (!(response instanceof Response)) throw new TypeError("WebAssembly streaming source must be a Response");
+      if (!response.ok) throw new TypeError("WebAssembly streaming response must have an ok status");
+      const contentType = response.headers.get("content-type");
+      if (contentType === null || contentType.toLowerCase() !== "application/wasm") {
+        throw new TypeError("WebAssembly streaming response must have Content-Type application/wasm");
+      }
+      return response.arrayBuffer();
+    });
+    const compileStreaming = source => streamingResponse(source).then(bytes => new WasmModule(bytes));
+    const instantiateStreaming = (source, imports) => compileStreaming(source).then(module => ({
+      module, instance: new WasmInstance(module, imports),
+    }));
+    Object.defineProperties(WebAssembly, {
+      Module: { value: WasmModule, writable: true, configurable: true },
+      Instance: { value: WasmInstance, writable: true, configurable: true },
+      Memory: { value: WasmMemory, writable: true, configurable: true },
+      Global: { value: WasmGlobal, writable: true, configurable: true },
+      Table: { value: WasmTable, writable: true, configurable: true },
+      Tag: { value: WasmTag, writable: true, configurable: true },
+      Exception: { value: WasmException, writable: true, configurable: true },
+      CompileError: { value: CompileError, writable: true, configurable: true },
+      LinkError: { value: LinkError, writable: true, configurable: true },
+      RuntimeError: { value: RuntimeError, writable: true, configurable: true },
+      validate: { value(bytes) {
+        if (arguments.length === 0) throw new TypeError("WebAssembly.validate requires a BufferSource");
+        return nativeWasmValidate(bytes);
+      }, writable: true, enumerable: true, configurable: true },
+      compile: { value: compile, writable: true, enumerable: true, configurable: true },
+      instantiate: { value: instantiate, writable: true, enumerable: true, configurable: true },
+      compileStreaming: { value: compileStreaming, writable: true, enumerable: true, configurable: true },
+      instantiateStreaming: { value: instantiateStreaming, writable: true, enumerable: true, configurable: true },
+      [Symbol.toStringTag]: { value: "WebAssembly", configurable: true },
+    });
+    Object.defineProperty(globalThis, "WebAssembly", { value: WebAssembly, writable: true, configurable: true });
+  }
   // The parser already reset each select's selectedness. Mirror it into the
   // selectedcontent elements before author scripts run.
   for (const selectedcontent of Array.from(globalThis.document.getElementsByTagName("selectedcontent"))) {
