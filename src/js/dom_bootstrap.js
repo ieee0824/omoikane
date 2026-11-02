@@ -174,6 +174,7 @@ let omoikaneUserActivationState;
   const nativeStorageManager = globalThis.__omoikane_storage_manager;
   const nativeOpfs = globalThis.__omoikane_opfs;
   const nativeWebShare = globalThis.__omoikane_web_share;
+  const nativePaymentRequest = globalThis.__omoikane_payment_request;
   const nativeCookieStoreAvailable = globalThis.__omoikane_cookie_store_available;
   const nativeCookieStoreQuery = globalThis.__omoikane_cookie_store_query;
   const nativeCookieStoreSubscriptions = globalThis.__omoikane_cookie_store_subscriptions;
@@ -30640,6 +30641,259 @@ let omoikaneUserActivationState;
         event.eventPhase = 0;
       }
       return !event.defaultPrevented;
+    }
+  }
+
+  const paymentRequestState = new WeakMap();
+  const paymentResponseState = new WeakMap();
+  let nextPaymentRequestId = 1;
+  function paymentNative(operation, data) {
+    const result = JSON.parse(String(nativePaymentRequest(
+      operation, __omoikane_document_id, JSON.stringify(data || {}),
+    )));
+    if (result.error) throw new DOMException(result.message || result.error, result.error);
+    return result;
+  }
+  function paymentAmount(value) {
+    const source = Object(value);
+    const currency = String(source.currency);
+    const amount = String(source.value);
+    if (!/^[A-Za-z]{3}$/.test(currency) || !/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(amount)) {
+      throw new TypeError("Invalid payment amount");
+    }
+    return { currency: currency.toUpperCase(), value: amount };
+  }
+  function paymentItem(value) {
+    const source = Object(value);
+    if (source.label === undefined || source.amount === undefined) throw new TypeError("Invalid payment item");
+    return { label: String(source.label), amount: paymentAmount(source.amount), pending: Boolean(source.pending) };
+  }
+  function paymentDetails(value) {
+    const source = Object(value);
+    if (source.total === undefined) throw new TypeError("PaymentDetailsInit.total is required");
+    const details = { total: paymentItem(source.total) };
+    if (details.total.amount.value.startsWith("-")) throw new TypeError("The total cannot be negative");
+    if (source.id !== undefined) details.id = String(source.id);
+    if (source.displayItems !== undefined) details.displayItems = Array.from(source.displayItems, paymentItem);
+    if (source.shippingOptions !== undefined) details.shippingOptions = Array.from(source.shippingOptions, option => {
+      const item = Object(option);
+      if (item.id === undefined || item.label === undefined || item.amount === undefined) throw new TypeError("Invalid shipping option");
+      return { id: String(item.id), label: String(item.label), amount: paymentAmount(item.amount), selected: Boolean(item.selected) };
+    });
+    if (source.modifiers !== undefined) details.modifiers = Array.from(source.modifiers, modifier => {
+      const item = Object(modifier);
+      if (item.supportedMethods === undefined) throw new TypeError("supportedMethods is required");
+      const normalized = { supportedMethods: String(item.supportedMethods) };
+      if (item.total !== undefined) normalized.total = paymentItem(item.total);
+      if (item.additionalDisplayItems !== undefined) normalized.additionalDisplayItems = Array.from(item.additionalDisplayItems, paymentItem);
+      if (item.data !== undefined) normalized.data = JSON.parse(JSON.stringify(item.data));
+      return normalized;
+    });
+    return details;
+  }
+  function paymentMethods(value) {
+    const sequence = Array.from(value);
+    if (!sequence.length) throw new TypeError("At least one payment method is required");
+    return sequence.map(entry => {
+      const source = Object(entry);
+      if (source.supportedMethods === undefined) throw new TypeError("supportedMethods is required");
+      const supportedMethods = String(source.supportedMethods);
+      if (!supportedMethods || (/^https?:/.test(supportedMethods) && !/^https:\/\//.test(supportedMethods))) {
+        throw new RangeError("Invalid payment method identifier");
+      }
+      const method = { supportedMethods };
+      if (source.data !== undefined) {
+        if ((typeof source.data !== "object" && typeof source.data !== "function") || source.data === null) {
+          throw new TypeError("PaymentMethodData.data must be an object");
+        }
+        if ((supportedMethods === "basic-card" || supportedMethods === "https://apple.com/apple-pay") &&
+            source.data.supportedNetworks !== undefined && !Array.isArray(source.data.supportedNetworks)) {
+          throw new TypeError("supportedNetworks must be a sequence");
+        }
+        method.data = JSON.parse(JSON.stringify(source.data));
+      }
+      return method;
+    });
+  }
+  function paymentOptions(value) {
+    const source = value === undefined ? {} : Object(value);
+    const shippingType = source.shippingType === undefined ? "shipping" : String(source.shippingType);
+    if (!["shipping", "delivery", "pickup"].includes(shippingType)) throw new TypeError("Invalid shipping type");
+    return {
+      requestPayerName: Boolean(source.requestPayerName),
+      requestBillingAddress: Boolean(source.requestBillingAddress),
+      requestPayerEmail: Boolean(source.requestPayerEmail),
+      requestPayerPhone: Boolean(source.requestPayerPhone),
+      requestShipping: Boolean(source.requestShipping),
+      shippingType,
+    };
+  }
+  function paymentEventHandler(prototype, name, stateMap) {
+    Object.defineProperty(prototype, name, {
+      configurable: true, enumerable: true,
+      get() { return (stateMap.get(this) || illegalInvocation())[name]; },
+      set(value) {
+        const state = stateMap.get(this) || illegalInvocation();
+        const type = name.slice(2);
+        if (state[name]) this.removeEventListener(type, state[name]);
+        state[name] = typeof value === "function" ? value : null;
+        if (state[name]) this.addEventListener(type, state[name]);
+      },
+    });
+  }
+  class PaymentResponse extends EventTarget {
+    constructor(token, request, selection) {
+      if (token !== paymentResponseState) throw new TypeError("Illegal constructor");
+      super();
+      paymentResponseState.set(this, { request, selection, complete: false, onpayerdetailchange: null });
+    }
+    __state() { return paymentResponseState.get(this) || illegalInvocation(); }
+    get requestId() { return this.__state().request.id; }
+    get methodName() { return String(this.__state().selection.methodName); }
+    get details() { return this.__state().selection.details; }
+    get shippingAddress() { this.__state(); return null; }
+    get shippingOption() { this.__state(); return null; }
+    get payerName() { return this.__state().selection.payerName ?? null; }
+    get payerEmail() { return this.__state().selection.payerEmail ?? null; }
+    get payerPhone() { return this.__state().selection.payerPhone ?? null; }
+    toJSON() {
+      return { requestId: this.requestId, methodName: this.methodName, details: this.details,
+        shippingAddress: null, shippingOption: null, payerName: this.payerName,
+        payerEmail: this.payerEmail, payerPhone: this.payerPhone };
+    }
+    complete(result = "unknown", details = {}) {
+      const state = this.__state();
+      if (state.complete) return Promise.reject(new DOMException("The response is already complete", "InvalidStateError"));
+      const status = String(result);
+      if (!["fail", "success", "unknown"].includes(status)) return Promise.reject(new TypeError("Invalid payment complete result"));
+      Object(details);
+      state.complete = true;
+      return Promise.resolve().then(() => { paymentNative("complete", { id: state.request.id, result: status }); });
+    }
+    retry(errorFields = {}) {
+      const state = this.__state();
+      if (state.complete) return Promise.reject(new DOMException("The response is already complete", "InvalidStateError"));
+      Object(errorFields);
+      return Promise.reject(new DOMException("The payment provider cannot retry this response", "NotSupportedError"));
+    }
+    get [Symbol.toStringTag]() { return "PaymentResponse"; }
+  }
+  class PaymentRequest extends EventTarget {
+    constructor(methodData, details, options = {}) {
+      if (arguments.length < 2) throw new TypeError("PaymentRequest requires methodData and details");
+      super();
+      const normalizedDetails = paymentDetails(details);
+      const request = {
+        id: normalizedDetails.id || `omoikane-payment-${nextPaymentRequestId++}`,
+        methods: paymentMethods(methodData), details: normalizedDetails, options: paymentOptions(options),
+      };
+      paymentRequestState.set(this, { request, state: "created", response: null, showReject: null,
+        onmerchantvalidation: null, onpaymentmethodchange: null, onshippingaddresschange: null,
+        onshippingoptionchange: null });
+    }
+    __state() { return paymentRequestState.get(this) || illegalInvocation(); }
+    get id() { return this.__state().request.id; }
+    get shippingAddress() { this.__state(); return null; }
+    get shippingOption() { this.__state(); return null; }
+    get shippingType() { const state = this.__state(); return state.request.options.requestShipping ? state.request.options.shippingType : null; }
+    canMakePayment() {
+      const state = this.__state();
+      if (state.state !== "created") return Promise.reject(new DOMException("The request is not in the created state", "InvalidStateError"));
+      return Promise.resolve().then(() => paymentNative("canMakePayment", state.request).supported === true);
+    }
+    show(detailsPromise = undefined) {
+      const state = this.__state();
+      if (state.state !== "created") return Promise.reject(new DOMException("The request cannot be shown", "InvalidStateError"));
+      if (!fullscreenTransientActivation) return Promise.reject(new DOMException("A user activation is required", "NotAllowedError"));
+      fullscreenTransientActivation = false;
+      state.state = "interactive";
+      const begin = update => {
+        if (update !== undefined) state.request.details = paymentDetails(update);
+        paymentNative("show", state.request);
+        return Promise.resolve().then(() => {
+          const selection = paymentNative("result");
+          if (selection.pending) {
+            return new Promise((resolve, reject) => { state.showReject = reject; });
+          }
+          state.state = "closed";
+          state.response = new PaymentResponse(paymentResponseState, state.request, selection);
+          return state.response;
+        });
+      };
+      let result;
+      try {
+        result = detailsPromise === undefined ? begin(undefined) : Promise.resolve(detailsPromise).then(begin);
+      } catch (error) {
+        state.state = "closed";
+        return Promise.reject(error);
+      }
+      return result.catch(error => {
+        state.state = "closed";
+        throw error;
+      });
+    }
+    abort() {
+      const state = this.__state();
+      if (state.state !== "interactive") return Promise.reject(new DOMException("The request is not interactive", "InvalidStateError"));
+      try {
+        paymentNative("abort");
+        state.state = "closed";
+        if (state.showReject) {
+          const reject = state.showReject;
+          state.showReject = null;
+          reject(new DOMException("The payment request was aborted", "AbortError"));
+        }
+        return Promise.resolve();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
+    get [Symbol.toStringTag]() { return "PaymentRequest"; }
+  }
+  class PaymentRequestUpdateEvent extends Event {
+    constructor(type, init = {}) { super(String(type), init); this.__updated = false; this.__detailsPromise = null; }
+    updateWith(detailsPromise) {
+      if (this.__updated) throw new DOMException("updateWith was already called", "InvalidStateError");
+      this.__updated = true;
+      this.__detailsPromise = Promise.resolve(detailsPromise).then(paymentDetails);
+    }
+    get [Symbol.toStringTag]() { return "PaymentRequestUpdateEvent"; }
+  }
+  class PaymentMethodChangeEvent extends PaymentRequestUpdateEvent {
+    constructor(type, init = {}) {
+      const source = Object(init);
+      super(type, source);
+      this.__methodName = source.methodName === undefined ? "" : String(source.methodName);
+      const details = source.methodDetails;
+      if (details !== undefined && details !== null && typeof details !== "object" && typeof details !== "function") {
+        throw new TypeError("methodDetails must be an object or null");
+      }
+      this.__methodDetails = details === undefined ? null : details;
+    }
+    get methodName() { return this.__methodName; }
+    get methodDetails() { return this.__methodDetails; }
+    get [Symbol.toStringTag]() { return "PaymentMethodChangeEvent"; }
+  }
+  for (const name of ["onshippingaddresschange", "onshippingoptionchange", "onpaymentmethodchange"]) {
+    paymentEventHandler(PaymentRequest.prototype, name, paymentRequestState);
+  }
+  paymentEventHandler(PaymentResponse.prototype, "onpayerdetailchange", paymentResponseState);
+  if (globalThis.isSecureContext) {
+    for (const constructor of [PaymentRequest, PaymentResponse, PaymentRequestUpdateEvent, PaymentMethodChangeEvent]) {
+      Object.defineProperty(constructor, "length", { value: constructor === PaymentRequest ? 2 : constructor === PaymentRequestUpdateEvent ? 1 : 0 });
+    }
+    Object.defineProperty(PaymentMethodChangeEvent, "length", { value: 1 });
+    for (const [name, constructor] of Object.entries({ PaymentRequest, PaymentResponse, PaymentRequestUpdateEvent, PaymentMethodChangeEvent })) {
+      Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: constructor });
+    }
+    for (const [constructor, members] of [
+      [PaymentRequest, ["id", "shippingAddress", "shippingOption", "shippingType", "canMakePayment", "show", "abort", "onshippingaddresschange", "onshippingoptionchange", "onpaymentmethodchange"]],
+      [PaymentResponse, ["requestId", "methodName", "details", "shippingAddress", "shippingOption", "payerName", "payerEmail", "payerPhone", "toJSON", "complete", "retry", "onpayerdetailchange"]],
+      [PaymentRequestUpdateEvent, ["updateWith"]],
+      [PaymentMethodChangeEvent, ["methodName", "methodDetails"]],
+    ]) for (const member of members) {
+      const descriptor = Object.getOwnPropertyDescriptor(constructor.prototype, member);
+      Object.defineProperty(constructor.prototype, member, { ...descriptor, enumerable: true });
     }
   }
 

@@ -19626,6 +19626,121 @@ fn web_share_enforces_secure_context_policy_provider_errors_and_retirement() {
 }
 
 #[test]
+fn payment_request_validates_and_passes_owned_data_to_provider() {
+    let provider = Arc::new(DeterministicPaymentProvider::default());
+    provider.set_supported(true);
+    provider.respond_to_next(Ok(PaymentSelection {
+        method_name: "basic-card".into(),
+        details: serde_json::json!({"token":"paid"}),
+        payer_name: Some("Ada".into()),
+        payer_email: None,
+        payer_phone: None,
+    }));
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_payment_provider(provider.clone());
+    runtime
+        .eval(
+            r#"
+      document.body.innerHTML = '<button id=pay>pay</button>';
+      const request = new PaymentRequest(
+        [{supportedMethods:'basic-card', data:{networks:['visa']}}],
+        {id:'order-7', total:{label:'Total', amount:{currency:'usd', value:'12.50'}}},
+        {requestPayerName:true}
+      );
+      globalThis.paymentResult = 'pending';
+      globalThis.canPay = 'pending';
+      request.canMakePayment().then(value => canPay = String(value));
+      __omoikane_dispatch_mouse_input(document.getElementById('pay').__id, 'mousedown', {}, true);
+      request.show().then(response => {
+        paymentResult = [response instanceof PaymentResponse, response.requestId,
+          response.methodName, response.details.token, response.payerName].join(':');
+        return response.complete('success');
+      });
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "canPay + ':' + paymentResult"),
+        "true:true:order-7:basic-card:paid:Ada"
+    );
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].origin, "http://localhost");
+    assert_eq!(requests[0].methods[0].supported_methods, "basic-card");
+    assert_eq!(requests[0].details["total"]["amount"]["currency"], "USD");
+    assert_eq!(
+        provider.completions(),
+        vec![("order-7".into(), "success".into())]
+    );
+}
+
+#[test]
+fn payment_request_requires_activation_handles_failure_and_retirement() {
+    let provider = Arc::new(DeterministicPaymentProvider::default());
+    provider.set_supported(true);
+    provider.respond_to_next(Err(PaymentError {
+        name: "OperationError".into(),
+        message: "provider failed".into(),
+    }));
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_payment_provider(provider.clone());
+    runtime
+        .eval(
+            r#"
+      document.body.innerHTML = '<button id=pay>pay</button>';
+      const details = {total:{label:'Total', amount:{currency:'USD', value:'1'}}};
+      globalThis.denied = 'pending'; globalThis.failed = 'pending';
+      new PaymentRequest([{supportedMethods:'basic-card'}], details).show()
+        .catch(error => denied = error.name);
+      __omoikane_dispatch_mouse_input(document.getElementById('pay').__id, 'mousedown', {}, true);
+      new PaymentRequest([{supportedMethods:'basic-card'}], details).show()
+        .catch(error => failed = error.name);
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "denied + ':' + failed"),
+        "NotAllowedError:OperationError"
+    );
+
+    provider.respond_to_next(Ok(PaymentSelection {
+        method_name: "basic-card".into(),
+        details: serde_json::json!({}),
+        payer_name: None,
+        payer_email: None,
+        payer_phone: None,
+    }));
+    runtime
+        .eval(
+            r#"
+      __omoikane_dispatch_mouse_input(document.getElementById('pay').__id, 'mousedown', {}, true);
+      globalThis.retiredPayment = 'pending';
+      new PaymentRequest([{supportedMethods:'basic-card'}], details).show()
+        .catch(error => retiredPayment = error.name);
+    "#,
+        )
+        .unwrap();
+    let document_id = runtime.document().identity();
+    runtime
+        .host_state
+        .borrow_mut()
+        .payment_request
+        .retire_document(document_id);
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "retiredPayment"), "AbortError");
+    assert!(!provider.aborted_requests().is_empty());
+
+    let mut insecure =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "http://example.test/").unwrap();
+    assert_eq!(
+        eval_str(&mut insecure, "typeof PaymentRequest"),
+        "undefined"
+    );
+}
+
+#[test]
 fn web_speech_synthesis_queues_owned_requests_and_advances_on_host_events() {
     let mut runtime = JsRuntime::new().unwrap();
     let provider = Arc::new(DeterministicWebSpeechProvider::new(vec![SpeechVoice {
