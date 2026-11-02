@@ -20,6 +20,189 @@ mod tests {
     use super::*;
     use omoikane::html::TreeBuilder;
 
+    fn scriptless_child_runtime() -> JsRuntime {
+        let document = TreeBuilder::parse("<!doctype html><body></body>").document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime.enable_test_automation().unwrap();
+        runtime
+            .eval("globalThis.test_driver_internal = {}")
+            .unwrap();
+        runtime.eval(VENDOR_SCRIPT).unwrap();
+        runtime
+            .eval(
+                r#"
+            var frame = document.createElement('iframe');
+            document.body.appendChild(frame);
+        "#,
+            )
+            .unwrap();
+        runtime.tick(0).unwrap();
+        runtime.eval(r#"
+            var child = frame.contentDocument;
+            child.body.innerHTML = '<button style="display:block;width:100px;height:40px">tap</button><input>';
+            var completed = false;
+            var failure = '';
+            if (frame.contentWindow.test_driver_internal !== undefined) {
+                throw Error('fixture must not preload a child test driver');
+            }
+        "#).unwrap();
+        runtime
+    }
+
+    #[test]
+    fn parent_click_routes_to_scriptless_child_input_queue() {
+        let mut runtime = scriptless_child_runtime();
+        runtime.eval(r#"
+            var button = child.querySelector('button');
+            button.addEventListener('click', event => {
+                child.documentElement.setAttribute('data-click', String(event.isTrusted));
+            });
+            var rect = button.getBoundingClientRect();
+            test_driver_internal.click(button, {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2})
+                .then(() => completed = true, error => failure = String(error));
+        "#).unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(runtime.eval("completed").unwrap().as_boolean(), Some(false));
+        for _ in 0..3 {
+            assert_eq!(runtime.advance_test_automation().unwrap(), Some(0));
+        }
+        assert_eq!(runtime.eval("completed && failure === '' && child.documentElement.getAttribute('data-click') === 'true'").unwrap().as_boolean(), Some(true));
+        assert_eq!(runtime.advance_test_automation().unwrap(), None);
+    }
+
+    #[test]
+    fn parent_send_keys_routes_to_scriptless_child_input_queue() {
+        let mut runtime = scriptless_child_runtime();
+        runtime
+            .eval(
+                r#"
+            var input = child.querySelector('input');
+            test_driver_internal.send_keys(input, 'ab\uE003')
+                .then(() => completed = true, error => failure = String(error));
+        "#,
+            )
+            .unwrap();
+        runtime.run_jobs().unwrap();
+        assert_eq!(
+            runtime
+                .eval("input.value === '' && !completed")
+                .unwrap()
+                .as_boolean(),
+            Some(true)
+        );
+        for _ in 0..6 {
+            assert_eq!(runtime.advance_test_automation().unwrap(), Some(0));
+        }
+        assert_eq!(runtime.eval("completed && failure === '' && input.value === 'a' && child.activeElement === input").unwrap().as_boolean(), Some(true));
+        assert_eq!(runtime.advance_test_automation().unwrap(), None);
+    }
+
+    #[test]
+    fn parent_input_rejects_forged_disconnected_and_retired_child_elements() {
+        for setup in [
+            "var real = child.querySelector('button'); var target = {__id: real.__id, ownerDocument: child, isConnected: true};",
+            "var target = child.querySelector('button'); target.remove();",
+            "var target = child.querySelector('button'); frame.remove();",
+        ] {
+            let mut runtime = scriptless_child_runtime();
+            runtime.eval(setup).unwrap();
+            runtime
+                .eval(
+                    r#"
+                var rejected = 0;
+                test_driver_internal.click(target, {x: 1, y: 1}).then(
+                    () => completed = true, () => rejected++);
+                test_driver_internal.send_keys(target, 'x').then(
+                    () => completed = true, () => rejected++);
+            "#,
+                )
+                .unwrap();
+            runtime.run_jobs().unwrap();
+            assert_eq!(
+                runtime
+                    .eval("rejected === 2 && !completed")
+                    .unwrap()
+                    .as_boolean(),
+                Some(true),
+                "{setup}"
+            );
+            assert_eq!(runtime.advance_test_automation().unwrap(), None, "{setup}");
+        }
+    }
+
+    #[test]
+    fn child_input_rejects_retirement_or_adoption_during_coordinates_or_focus() {
+        for (setup, command) in [
+            (
+                "",
+                "test_driver_internal.click(child.querySelector('button'), {get x() { frame.remove(); return 1; }, y: 1})",
+            ),
+            (
+                "child.querySelector('input').addEventListener('focus', () => frame.remove());",
+                "test_driver_internal.send_keys(child.querySelector('input'), 'x')",
+            ),
+            (
+                "",
+                "test_driver_internal.click(child.querySelector('button'), {get x() { document.body.appendChild(child.querySelector('button')); return 1; }, y: 1})",
+            ),
+            (
+                "child.querySelector('input').addEventListener('focus', event => document.body.appendChild(event.target));",
+                "test_driver_internal.send_keys(child.querySelector('input'), 'x')",
+            ),
+            (
+                "",
+                "test_driver_internal.click(child.querySelector('button'), {get x() { const driver = frame.contentWindow.test_driver_internal; const enqueue = driver.action_sequence; Object.defineProperty(driver, 'action_sequence', {get() { frame.remove(); return enqueue; }}); return 1; }, y: 1})",
+            ),
+            (
+                "child.querySelector('input').addEventListener('focus', () => { const driver = frame.contentWindow.test_driver_internal; const enqueue = driver.action_sequence; Object.defineProperty(driver, 'action_sequence', {get() { frame.remove(); return enqueue; }}); });",
+                "test_driver_internal.send_keys(child.querySelector('input'), 'x')",
+            ),
+        ] {
+            let mut runtime = scriptless_child_runtime();
+            runtime.eval(setup).unwrap();
+            runtime.eval("var rejected = false;").unwrap();
+            runtime
+                .eval(&format!(
+                    "{command}.then(() => completed = true, () => rejected = true);"
+                ))
+                .unwrap();
+            runtime.run_jobs().unwrap();
+            assert_eq!(
+                runtime.eval("rejected && !completed").unwrap().as_boolean(),
+                Some(true),
+                "{command}"
+            );
+            assert_eq!(runtime.advance_test_automation().unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn native_routing_rechecks_after_installer_and_driver_getter() {
+        for installer in [
+            "function() { frameElement.remove(); globalThis.__wpt_enqueue_element_input = () => Promise.resolve(); }",
+            "function() { Object.defineProperty(globalThis, '__wpt_enqueue_element_input', {get() { frameElement.remove(); return () => Promise.resolve(); }}); }",
+        ] {
+            let mut runtime = scriptless_child_runtime();
+            let installer = serde_json::to_string(installer).unwrap();
+            runtime
+                .eval(&format!(
+                    r#"
+                var rejected = false;
+                Promise.resolve().then(() => __omoikane_automation_route_input(
+                    child.querySelector('button'), 'click', {{x: 1, y: 1}}, {installer}
+                )).then(() => completed = true, () => rejected = true);
+            "#
+                ))
+                .unwrap();
+            runtime.run_jobs().unwrap();
+            assert_eq!(
+                runtime.eval("rejected && !completed").unwrap().as_boolean(),
+                Some(true)
+            );
+            assert_eq!(runtime.advance_test_automation().unwrap(), None);
+        }
+    }
+
     #[test]
     fn mouse_actions_hit_test_and_dispatch_with_pressed_button_state() {
         let document = TreeBuilder::parse(
