@@ -18973,6 +18973,169 @@ fn gamepad_exposure_requires_a_gesture_and_permissions_policy() {
     );
 }
 
+fn orientation_snapshot(
+    orientation_type: ScreenOrientationType,
+    angle: u16,
+) -> ScreenOrientationSnapshot {
+    ScreenOrientationSnapshot {
+        orientation_type,
+        angle,
+    }
+}
+
+#[test]
+fn screen_orientation_lock_updates_state_and_fires_before_resolution() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicScreenOrientationProvider::new(
+        orientation_snapshot(ScreenOrientationType::PortraitPrimary, 0),
+    ));
+    runtime.set_screen_orientation_provider(provider.clone());
+    runtime.refresh_screen_orientation().unwrap();
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "JSON.stringify([screen instanceof Screen, screen.orientation instanceof ScreenOrientation, screen.orientation instanceof EventTarget, screen.orientation === screen.orientation, screen.orientation.type, screen.orientation.angle])"
+        ),
+        r#"[true,true,true,true,"portrait-primary",0]"#
+    );
+    runtime
+        .eval(
+            r#"globalThis.orientationLog = [];
+               screen.orientation.onchange = () => orientationLog.push('change:' + screen.orientation.type);
+               addEventListener('keydown', () => document.documentElement.requestFullscreen(), { once: true });
+               __omoikane_dispatch_keyboard_input('keydown', { key: 'Enter', code: 'Enter' });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime
+        .eval(
+            "screen.orientation.lock('landscape-secondary').then(() => orientationLog.push('resolved'))",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "orientationLog.join(',') + ':' + screen.orientation.angle"
+        ),
+        "change:landscape-secondary,resolved:270"
+    );
+    provider.publish(orientation_snapshot(
+        ScreenOrientationType::PortraitSecondary,
+        180,
+    ));
+    runtime.refresh_screen_orientation().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "orientationLog.slice(-1)[0]"),
+        "change:portrait-secondary"
+    );
+}
+
+#[test]
+fn screen_orientation_enforces_visibility_fullscreen_and_provider_failures() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicScreenOrientationProvider::default());
+    runtime.set_screen_orientation_provider(provider.clone());
+    runtime
+        .eval(
+            "globalThis.orientationError = ''; screen.orientation.lock('portrait').catch(error => orientationError = error.name)",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "orientationError"), "SecurityError");
+
+    runtime
+        .eval(
+            "addEventListener('keydown', () => document.documentElement.requestFullscreen(), { once: true }); __omoikane_dispatch_keyboard_input('keydown', { key: 'Enter', code: 'Enter' })",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    provider.fail_next(ScreenOrientationError::NotSupported("fixed display".into()));
+    runtime
+        .eval(
+            "orientationError = ''; screen.orientation.lock('portrait').catch(error => orientationError = error.name)",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "orientationError"),
+        "NotSupportedError"
+    );
+    runtime.set_page_visibility(true);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "(() => { try { screen.orientation.unlock(); return 'allowed'; } catch (error) { return error.name; } })()"
+        ),
+        "SecurityError"
+    );
+}
+
+#[test]
+fn screen_orientation_pending_child_lock_aborts_when_document_retires() {
+    let document = crate::html::TreeBuilder::parse("<iframe id='child'></iframe>").document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    runtime
+        .eval(
+            "addEventListener('keydown', () => document.documentElement.requestFullscreen(), { once: true }); __omoikane_dispatch_keyboard_input('keydown', { key: 'Enter', code: 'Enter' })",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime
+        .eval(
+            r#"globalThis.orientationAbort = '';
+               const frame = document.getElementById('child');
+               const pending = frame.contentWindow.screen.orientation.lock('portrait-primary');
+               frame.remove();
+               pending.catch(error => orientationAbort = error.name);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "orientationAbort"), "AbortError");
+}
+
+#[test]
+fn screen_orientation_sandbox_requires_allow_orientation_lock() {
+    let document = crate::html::TreeBuilder::parse(
+        "<iframe id='blocked' allow='fullscreen' sandbox='allow-scripts allow-same-origin'></iframe>\
+         <iframe id='allowed' allow='fullscreen' sandbox='allow-scripts allow-same-origin allow-orientation-lock'></iframe>",
+    )
+    .document();
+    let allowed_iframe = document.query_selector("#allowed").unwrap().identity();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    runtime
+        .eval("void document.getElementById('allowed').contentWindow")
+        .unwrap();
+    let allowed_root = runtime.host_state.borrow().iframe_documents[&allowed_iframe]
+        .document
+        .query_selector("html")
+        .unwrap();
+    runtime
+        .eval(
+            r#"globalThis.sandboxResults = [];
+               document.getElementById('blocked').contentWindow.screen.orientation
+                 .lock('portrait-primary').catch(error => sandboxResults.push(error.name));"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert!(
+        runtime
+            .host_state
+            .borrow_mut()
+            .request_fullscreen(&allowed_root)
+    );
+    runtime
+        .eval(
+            "document.getElementById('allowed').contentWindow.screen.orientation.lock('portrait-primary').then(() => sandboxResults.push('allowed'))",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "sandboxResults.sort().join(',')"),
+        "SecurityError,allowed"
+    );
+}
+
 #[test]
 fn web_speech_synthesis_queues_owned_requests_and_advances_on_host_events() {
     let mut runtime = JsRuntime::new().unwrap();

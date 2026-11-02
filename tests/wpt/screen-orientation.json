@@ -1,0 +1,24 @@
+{
+  "tests": [
+    { "path": "screen-orientation/idlharness.window.js" },
+    { "path": "screen-orientation/orientation-reading.html" },
+    { "path": "screen-orientation/lock-bad-argument.html" },
+    { "path": "screen-orientation/lock-basic.html" },
+    { "path": "screen-orientation/onchange-event.html" },
+    { "path": "screen-orientation/event-before-promise.html" },
+    { "path": "screen-orientation/fullscreen-interactions.html" },
+    {
+      "path": "screen-orientation/non-fully-active.html",
+      "known_failure": {
+        "status": "FAIL",
+        "reason": "WPT smoke cannot yet deliver test_driver.bless input to a child browsing context",
+        "issue": "#1664",
+        "expires": "2027-01-31",
+        "failed_subtests": [
+          "Making a document non-fully active while locking results in an AbortError"
+        ]
+      }
+    },
+    { "path": "screen-orientation/unlock.html" }
+  ]
+}
