@@ -147,6 +147,16 @@ pub(super) fn register(context: &mut Context, enabled: bool) -> JsResult<()> {
             register_driver as NativeFunctionPointer,
         ),
         (
+            "__omoikane_automation_route_input",
+            4,
+            route_input as NativeFunctionPointer,
+        ),
+        (
+            "__omoikane_automation_validate_input",
+            1,
+            validate_input as NativeFunctionPointer,
+        ),
+        (
             "__omoikane_automation_set_permission",
             2,
             set_permission as NativeFunctionPointer,
@@ -195,6 +205,112 @@ fn register_driver(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
             .insert(document, callback);
         Ok(JsValue::undefined())
     })
+}
+
+// Resolve a genuine wrapper before selecting its Document. Author-visible
+// numeric node IDs alone are not authority to route trusted input.
+fn input_document(element: &JsValue, context: &mut Context) -> JsResult<usize> {
+    let resolver =
+        with_host_state(|host| Ok(host.borrow().canonical_node_identity_resolver.clone()))?
+            .ok_or_else(|| JsNativeError::typ().with_message("No node identity resolver"))?;
+    let identity = resolver
+        .as_callable()
+        .ok_or_else(|| JsNativeError::typ().with_message("Invalid node identity resolver"))?
+        .call(&JsValue::undefined(), &[element.clone()], context)?
+        .as_number()
+        .and_then(JsRuntime::accessibility_node_identity)
+        .ok_or_else(|| JsNativeError::typ().with_message("Input target is not a DOM element"))?;
+    let document = with_host_state(|host| {
+        let state = host.borrow();
+        let node = state
+            .get_node(identity)
+            .filter(|node| node.node_type() == NodeType::Element)
+            .filter(|node| state.node_is_in_active_document(node))
+            .ok_or_else(|| JsNativeError::typ().with_message("Input target is stale"))?;
+        document_root_for_node(&node)
+            .map(|document| document.identity())
+            .ok_or_else(|| {
+                JsNativeError::typ()
+                    .with_message("Input target has no Document")
+                    .into()
+            })
+    })?;
+    ensure_same_origin_document(context, document)?;
+    Ok(document)
+}
+
+fn validate_input(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let caller = active_document(context)?;
+    let element = args.first().cloned().unwrap_or_default();
+    if input_document(&element, context)? != caller {
+        return Err(JsNativeError::typ()
+            .with_message("Input target changed Document")
+            .into());
+    }
+    Ok(JsValue::undefined())
+}
+
+fn check_input_document(element: &JsValue, expected: usize, context: &mut Context) -> JsResult<()> {
+    active_document(context)?;
+    if input_document(element, context)? != expected {
+        return Err(JsNativeError::typ()
+            .with_message("Input target changed Document")
+            .into());
+    }
+    Ok(())
+}
+
+fn route_input(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    active_document(context)?;
+    let element = args.first().cloned().unwrap_or_default();
+    let method = string_argument(args.get(1), "", context)?;
+    if !matches!(method.as_str(), "click" | "send_keys") {
+        return Err(JsNativeError::typ()
+            .with_message("Unsupported input command")
+            .into());
+    }
+    let installer = string_argument(args.get(3), "", context)?;
+    let document = input_document(&element, context)?;
+    let (host, realm) = with_host_state(|host| {
+        let realm = active_document_realm(&host.borrow(), document).ok_or_else(|| {
+            JsNativeError::typ().with_message("Input Document has no active Realm")
+        })?;
+        Ok((host.clone(), realm))
+    })?;
+    let previous = context.enter_realm(realm);
+    let _document = activate_module_document(&host, document);
+    let result = (|| {
+        let installed = host
+            .borrow()
+            .input_bridge
+            .automation
+            .drivers
+            .contains_key(&document);
+        if !installed {
+            // The opt-in runner supplies its own installer, including for a
+            // scriptless about:blank child. No author eval permission is used.
+            context.eval(Source::from_bytes(&format!("({installer})()")))?;
+        }
+        check_input_document(&element, document, context)?;
+        let driver = context
+            .global_object()
+            .get(js_string!("__wpt_enqueue_element_input"), context)?;
+        check_input_document(&element, document, context)?;
+        driver
+            .as_callable()
+            .ok_or_else(|| JsNativeError::typ().with_message("Input driver is unavailable"))?
+            .call(
+                &JsValue::undefined(),
+                &[
+                    element,
+                    js_string!(method.as_str()).into(),
+                    args.get(2).cloned().unwrap_or_default(),
+                ],
+                context,
+            )
+    })();
+    context.enter_realm(previous);
+    result
 }
 
 fn set_permission(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
@@ -270,4 +386,55 @@ fn delete_cookies(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult
             .delete_associated_cookies(&url, std::time::SystemTime::now());
         Ok(JsValue::undefined())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_pages_have_no_input_routing_binding() {
+        let mut runtime = JsRuntime::new().unwrap();
+        assert_eq!(
+            runtime
+                .eval("typeof __omoikane_automation_route_input")
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_std_string_escaped(),
+            "undefined"
+        );
+    }
+
+    #[test]
+    fn opaque_child_element_cannot_be_routed_from_its_parent() {
+        let document = crate::html::TreeBuilder::parse("<body></body>").document();
+        let mut runtime = JsRuntime::with_document_and_url(document, "https://top.test/").unwrap();
+        runtime.enable_test_automation().unwrap();
+        runtime.eval("var frame = document.createElement('iframe'); frame.sandbox = 'allow-scripts'; document.body.appendChild(frame);").unwrap();
+        runtime.tick(0).unwrap();
+        let (iframe, document) = {
+            let host = runtime.host_state.borrow();
+            let (iframe, entry) = host.iframe_documents.iter().next().unwrap();
+            (*iframe, entry.document.identity())
+        };
+        let realm = runtime.ensure_iframe_realm(iframe, document).unwrap();
+        let previous = runtime.context.enter_realm(realm);
+        // Obtain the genuine foreign wrapper through the host only: ordinary
+        // parent script cannot read this opaque Document in the first place.
+        let element = runtime
+            .with_active_host(|context| {
+                context.eval(Source::from_bytes(
+                    "document.body.appendChild(document.createElement('button'))",
+                ))
+            })
+            .unwrap();
+        runtime.context.enter_realm(previous);
+        assert!(
+            runtime
+                .with_active_host(|context| input_document(&element, context))
+                .is_err()
+        );
+        assert_eq!(runtime.advance_test_automation().unwrap(), None);
+    }
 }

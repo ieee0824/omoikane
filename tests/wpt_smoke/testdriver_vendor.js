@@ -1,3 +1,5 @@
+(function installWptDriver() {
+  globalThis.test_driver_internal ??= {};
 // Reporting commands execute through the opt-in native automation binding.
 // Input and window commands are driven by the host runner between page jobs.
 globalThis.__wpt_window_commands = [];
@@ -43,30 +45,48 @@ test_driver_internal.action_sequence = (sources, context = null) => new Promise(
   }
   __wpt_action_commands.push({sources, resolve, reject, tick: 0});
 });
-test_driver_internal.click = (element, coords) => {
-  if (!(element instanceof Element) || !element.isConnected || element.ownerDocument !== document) {
-    return Promise.reject(new Error('Stale element or unsupported browsing context'));
+function wptRouteElementInput(element, method, argument) {
+  try {
+    if (element?.ownerDocument !== document) {
+      return __omoikane_automation_route_input(element, method, argument, installWptDriver.toString());
+    }
+    if (!(element instanceof Element) || !element.isConnected) {
+      throw new Error('Stale element or unsupported browsing context');
+    }
+    return wptEnqueueElementInput(element, method, argument);
+  } catch (error) {
+    return Promise.reject(error);
   }
-  return test_driver_internal.action_sequence([{
-    type: 'pointer', id: 'testdriver-click', parameters: {pointerType: 'mouse'},
-    actions: [
-      {type: 'pointerMove', x: Math.floor(coords.x), y: Math.floor(coords.y), origin: 'viewport'},
-      {type: 'pointerDown', button: 0},
-      {type: 'pointerUp', button: 0},
-    ],
-  }]);
-};
-test_driver_internal.send_keys = (element, keys) => {
-  if (!(element instanceof Element) || !element.isConnected || element.ownerDocument !== document) {
-    return Promise.reject(new Error('Stale element or unsupported browsing context'));
+}
+test_driver_internal.click = (element, coords) => wptRouteElementInput(element, 'click', coords);
+test_driver_internal.send_keys = (element, keys) => wptRouteElementInput(element, 'send_keys', keys);
+
+// Native routing validates the canonical element and its active same-origin
+// Document before entering this Realm. Input still waits for the host pump.
+function wptEnqueueElementInput(element, method, argument) {
+  if (method === 'click') {
+    const sources = [{
+      type: 'pointer', id: 'testdriver-click', parameters: {pointerType: 'mouse'},
+      actions: [
+        {type: 'pointerMove', x: Math.floor(argument.x), y: Math.floor(argument.y), origin: 'viewport'},
+        {type: 'pointerDown', button: 0},
+        {type: 'pointerUp', button: 0},
+      ],
+    }];
+    const enqueue = test_driver_internal.action_sequence;
+    __omoikane_automation_validate_input(element);
+    return enqueue(sources);
   }
   const actions = [];
-  for (const value of Array.from(keys)) {
+  for (const value of Array.from(argument)) {
     actions.push({type: 'keyDown', value}, {type: 'keyUp', value});
   }
   element.focus();
-  return test_driver_internal.action_sequence([{type: 'key', id: 'testdriver-keyboard', actions}]);
-};
+  const enqueue = test_driver_internal.action_sequence;
+  __omoikane_automation_validate_input(element);
+  return enqueue([{type: 'key', id: 'testdriver-keyboard', actions}]);
+}
+globalThis.__wpt_enqueue_element_input = wptEnqueueElementInput;
 test_driver_internal.set_permission = async (params, context = null) => {
   if (context !== null && context !== globalThis) throw new Error('Permission context is unsupported');
   __omoikane_automation_set_permission(params.descriptor.name, params.state);
@@ -238,3 +258,5 @@ if (typeof __omoikane_automation_register_driver === 'function') {
     });
   });
 }
+
+})();
