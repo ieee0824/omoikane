@@ -486,12 +486,15 @@ fn retargeting_an_old_weak_edge_reuses_its_ephemeron() {
         force_minor_collect();
         force_minor_collect();
         Harness::assert_ephemeron_allocations(1);
-        Harness::assert_remembered_ephemerons(1);
+        // Promotion removes an old unit handle whose key is old from nursery
+        // work. Retargeting must register it again before the next collection.
+        Harness::assert_remembered_ephemerons(0);
 
         let second = Rooted::new(2_u32);
         let second_edge = second.clone().into_edge();
         weak.retarget_edge(&second_edge);
         Harness::assert_ephemeron_allocations(1);
+        Harness::assert_remembered_ephemerons(1);
 
         force_minor_collect();
         assert_eq!(weak.upgrade().as_deref().copied(), Some(2));
@@ -909,5 +912,74 @@ fn promoted_weak_map_tracker_keeps_new_entries_until_their_keys_die() {
         // major collection reclaims that now-unrooted tracker allocation.
         force_collect();
         Harness::assert_empty_gc();
+    });
+}
+
+#[test]
+fn old_unit_ephemeron_roots_do_not_expand_minor_root_scan() {
+    run_test(|| {
+        let key = Rooted::new(7_u32);
+        let weak_edges: Vec<_> = (0..512).map(|_| WeakGcEdge::new_rooted(&key)).collect();
+        let _weak_roots: Vec<_> = weak_edges.iter().map(WeakGcEdge::root).collect();
+        force_minor_collect();
+        force_minor_collect();
+        assert!(is_old(&key));
+        assert!(
+            weak_edges
+                .iter()
+                .all(|weak| weak.inner().inner().header.is_old())
+        );
+
+        crate::MINOR_EPHEMERON_ROOT_VISITS.with(|count| count.set(0));
+        let _nursery_seed = Rooted::new(1_u32);
+        force_minor_collect();
+        assert_eq!(
+            crate::MINOR_EPHEMERON_ROOT_VISITS.with(std::cell::Cell::get),
+            0,
+            "old unit weak roots with old keys must not grow the nursery root scan"
+        );
+        assert!(
+            weak_edges
+                .iter()
+                .all(|weak| weak.upgrade().as_deref() == Some(&7))
+        );
+
+        drop(key);
+        force_collect();
+        assert!(weak_edges.iter().all(|weak| !weak.is_upgradable()));
+        crate::MINOR_EPHEMERON_ROOT_VISITS.with(|count| count.set(0));
+        let _next_nursery_seed = Rooted::new(2_u32);
+        force_minor_collect();
+        assert_eq!(
+            crate::MINOR_EPHEMERON_ROOT_VISITS.with(std::cell::Cell::get),
+            0
+        );
+        assert!(weak_edges.iter().all(|weak| !weak.is_upgradable()));
+    });
+}
+
+#[test]
+fn old_unit_weak_root_can_be_registered_again_without_nursery_scan() {
+    run_test(|| {
+        let key = Rooted::new(7_u32);
+        let weak = WeakGcEdge::new_rooted(&key);
+        let first_root = weak.root();
+        force_minor_collect();
+        force_minor_collect();
+        drop(first_root);
+        let _second_root = weak.root();
+
+        crate::MINOR_EPHEMERON_ROOT_VISITS.with(|count| count.set(0));
+        let _nursery_seed = Rooted::new(1_u32);
+        force_minor_collect();
+        assert_eq!(
+            crate::MINOR_EPHEMERON_ROOT_VISITS.with(std::cell::Cell::get),
+            0
+        );
+        assert_eq!(weak.upgrade().as_deref().copied(), Some(7));
+
+        drop(key);
+        force_collect();
+        assert!(!weak.is_upgradable());
     });
 }

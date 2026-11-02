@@ -75,6 +75,11 @@ thread_local!(static ROOTED_EPHEMERONS: Cell<usize> = const { Cell::new(0) });
 // mark phase enumerate roots without scanning every allocation in the heap.
 thread_local!(static ROOT_REGISTRY: RefCell<PointerSet<GcErasedPointer>> = RefCell::new(PointerSet::new()));
 thread_local!(static EPHEMERON_ROOT_REGISTRY: RefCell<EphemeronSet> = RefCell::new(EphemeronSet::new()));
+// Only roots that can expose nursery edges. The full registry above remains
+// authoritative for major collection; old unit weak handles leave this index.
+thread_local!(static MINOR_EPHEMERON_ROOTS: RefCell<EphemeronSet> = RefCell::new(EphemeronSet::new()));
+#[cfg(test)]
+thread_local!(static MINOR_EPHEMERON_ROOT_VISITS: Cell<usize> = const { Cell::new(0) });
 // Allocations can trigger collection before the newly allocated pointer reaches
 // its caller. These stacks keep that one in-flight allocation alive without
 // paying for a root-count update and hash-table insertion on every allocation.
@@ -96,6 +101,7 @@ thread_local!(static BOA_GC: RefCell<BoaGc> = {
     ROOTED_EPHEMERONS.with(|_| {});
     ROOT_REGISTRY.with(|_| {});
     EPHEMERON_ROOT_REGISTRY.with(|_| {});
+    MINOR_EPHEMERON_ROOTS.with(|_| {});
     TEMPORARY_STRONG_ROOTS.with(|_| {});
     TEMPORARY_EPHEMERON_ROOTS.with(|_| {});
     REMEMBERED_STRONGS.with(|_| {});
@@ -174,6 +180,12 @@ fn register_ephemeron_root(pointer: EphemeronPointer) {
                 "GC ephemeron root registry already contained a newly rooted allocation"
             );
         });
+        // SAFETY: the registering handle keeps this allocation valid.
+        if unsafe { pointer.as_ref() }.needs_minor_trace() {
+            MINOR_EPHEMERON_ROOTS.with(|roots| {
+                roots.borrow_mut().insert(pointer);
+            });
+        }
     }
 }
 
@@ -197,6 +209,9 @@ fn unregister_ephemeron_root(pointer: EphemeronPointer) {
                 roots.borrow_mut().remove(&pointer),
                 "GC ephemeron root registry did not contain an allocation losing its last root"
             );
+        });
+        MINOR_EPHEMERON_ROOTS.with(|roots| {
+            roots.borrow_mut().remove(&pointer);
         });
     }
 }
@@ -367,6 +382,7 @@ impl TeardownGuard {
         GC_TEARDOWN.with(|teardown| teardown.set(true));
         ROOT_REGISTRY.with(|roots| roots.borrow_mut().clear());
         EPHEMERON_ROOT_REGISTRY.with(|roots| roots.borrow_mut().clear());
+        MINOR_EPHEMERON_ROOTS.with(|roots| roots.borrow_mut().clear());
         REMEMBERED_STRONGS.with(|remembered| remembered.borrow_mut().clear());
         REMEMBERED_EPHEMERONS.with(|remembered| remembered.borrow_mut().clear());
         REMEMBERED_OLD_PARENTS.with(|remembered| remembered.borrow_mut().clear());
@@ -798,7 +814,7 @@ struct Unreachables {
 struct Collector;
 
 impl Collector {
-    fn forget_minor_remembered(
+    fn finish_minor_root_bookkeeping(
         dead_strongs: &[GcErasedPointer],
         promoted_strongs: &[GcErasedPointer],
         dead_ephemerons: &[EphemeronPointer],
@@ -815,6 +831,9 @@ impl Collector {
                 remembered.remove(pointer);
             }
         });
+        // Both the ephemeron and key have completed promotion. Retargeting
+        // a skipped old handle re-enters through its remembered-set barrier.
+        Self::retain_minor_ephemeron_candidates(false);
     }
 
     fn clear_weak_maps(gc: &mut BoaGc) {
@@ -985,11 +1004,10 @@ impl Collector {
 
         Self::clear_survivor_minor_marks(gc, &promoted_strongs, &promoted_ephemerons);
 
-        // Remove stale remembered pointers before their allocations are freed.
-        // Promoted strong children no longer need to be nursery roots. Promoted
-        // ephemerons stay remembered because an old ephemeron can still have a
-        // young key or value that minor collection must inspect.
-        Self::forget_minor_remembered(
+        // Remove stale hints before freeing allocations. Once promotion of
+        // both the key and ephemeron is complete, old unit handles have no
+        // nursery edge. Retargeting adds them back through its write barrier.
+        Self::finish_minor_root_bookkeeping(
             &final_dead_strongs,
             &promoted_strongs,
             &final_dead_ephemerons,
@@ -1124,8 +1142,10 @@ impl Collector {
                 }
             }
         });
-        EPHEMERON_ROOT_REGISTRY.with(|roots| {
+        MINOR_EPHEMERON_ROOTS.with(|roots| {
             for pointer in roots.borrow().iter().copied() {
+                #[cfg(test)]
+                MINOR_EPHEMERON_ROOT_VISITS.with(|count| count.set(count.get() + 1));
                 tracer.enqueue_ephemeron_root(pointer);
             }
         });
@@ -1284,6 +1304,24 @@ impl Collector {
         );
     }
 
+    /// Removes old unit handles from nursery work after promotion, or dead
+    /// candidates before major sweep. Both indices contain valid allocations:
+    /// minor sweep first removes dead young remembered entries, and major
+    /// sweep has not freed anything yet.
+    fn retain_minor_ephemeron_candidates(major: bool) {
+        let keep = |pointer: EphemeronPointer| {
+            // SAFETY: callers preserve indexed allocation validity as above.
+            let ephemeron = unsafe { pointer.as_ref() };
+            (!major || ephemeron.header().is_marked()) && ephemeron.needs_minor_trace()
+        };
+        MINOR_EPHEMERON_ROOTS.with(|roots| {
+            roots.borrow_mut().retain(|pointer| keep(*pointer));
+        });
+        REMEMBERED_EPHEMERONS.with(|remembered| {
+            remembered.borrow_mut().retain(|pointer| keep(*pointer));
+        });
+    }
+
     fn retain_major_remembered() {
         REMEMBERED_STRONGS.with(|remembered| {
             remembered.borrow_mut().retain(|pointer| {
@@ -1291,12 +1329,7 @@ impl Collector {
                 unsafe { pointer.as_ref() }.is_marked()
             });
         });
-        REMEMBERED_EPHEMERONS.with(|remembered| {
-            remembered.borrow_mut().retain(|pointer| {
-                // SAFETY: this runs before the major sweep.
-                unsafe { pointer.as_ref() }.header().is_marked()
-            });
-        });
+        Self::retain_minor_ephemeron_candidates(true);
         // Keep reachable dirty parents for the next minor collection. A major
         // trace can observe an old-to-young edge before the nursery pass has
         // turned it into a direct remembered young root; dropping the parent
