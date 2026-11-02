@@ -1034,6 +1034,13 @@
       "baseline_supported": true
     },
     {
+      "id": "navigator.protocol-handler",
+      "area": "web-api",
+      "description": "Protocol handler registration exposes secure-context WebIDL methods",
+      "probe": "typeof navigator.registerProtocolHandler === 'function' && navigator.registerProtocolHandler.length === 2 && typeof navigator.unregisterProtocolHandler === 'function' && navigator.unregisterProtocolHandler.length === 2 && Object.prototype.propertyIsEnumerable.call(Navigator.prototype, 'registerProtocolHandler') && Object.prototype.propertyIsEnumerable.call(Navigator.prototype, 'unregisterProtocolHandler')",
+      "baseline_supported": true
+    },
+    {
       "id": "payments.payment-request",
       "area": "web-api",
       "description": "Payment Request exposes secure-context stateful request, response, and update-event interfaces",

@@ -19650,6 +19650,91 @@ fn badging_enforces_secure_range_provider_failure_and_worker_context() {
 }
 
 #[test]
+fn protocol_handlers_normalize_and_mutate_only_accepted_host_state() {
+    let provider = Arc::new(DeterministicProtocolHandlerProvider::default());
+    provider.set_disposition(ProtocolHandlerDisposition::Accepted);
+    let mut runtime = JsRuntime::with_document_and_url(
+        default_document(),
+        "https://handlers.example.test/app/page",
+    )
+    .unwrap();
+    runtime.set_protocol_handler_provider(provider.clone());
+    runtime
+        .eval(
+            r#"navigator.registerProtocolHandler('WEB+Mail', './open?target=%s');
+               navigator.registerProtocolHandler('mailto', '/mail?uri=%s');
+               navigator.unregisterProtocolHandler('web+mail', './open?target=%s');"#,
+        )
+        .unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].0, ProtocolHandlerOperation::Register);
+    assert_eq!(requests[0].1.scheme, "web+mail");
+    assert_eq!(
+        requests[0].1.url_template,
+        "https://handlers.example.test/app/open?target=%s"
+    );
+    assert_eq!(requests[0].1.origin, "https://handlers.example.test");
+    assert_eq!(requests[2].0, ProtocolHandlerOperation::Unregister);
+    assert_eq!(provider.registrations().len(), 1);
+    assert!(
+        provider
+            .registrations()
+            .iter()
+            .any(|handler| handler.scheme == "mailto")
+    );
+
+    provider.set_disposition(ProtocolHandlerDisposition::Rejected);
+    runtime
+        .eval("navigator.registerProtocolHandler('web+denied', '/denied?url=%s')")
+        .unwrap();
+    assert_eq!(provider.registrations().len(), 1);
+}
+
+#[test]
+fn protocol_handlers_enforce_secure_webidl_scheme_template_and_origin_boundaries() {
+    let mut insecure =
+        JsRuntime::with_document_and_url(default_document(), "http://example.test/").unwrap();
+    assert_eq!(
+        eval_str(
+            &mut insecure,
+            "typeof navigator.registerProtocolHandler + ':' + typeof navigator.unregisterProtocolHandler"
+        ),
+        "undefined:undefined"
+    );
+
+    let provider = Arc::new(DeterministicProtocolHandlerProvider::default());
+    let mut runtime =
+        JsRuntime::with_document_and_url(default_document(), "https://handlers.example.test/page")
+            .unwrap();
+    runtime.set_protocol_handler_provider(provider.clone());
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            r#"[
+              (() => { try { navigator.registerProtocolHandler('http', '/?x=%s'); } catch (e) { return e.name; } })(),
+              (() => { try { navigator.registerProtocolHandler('web+ok', '/missing'); } catch (e) { return e.name; } })(),
+              (() => { try { navigator.registerProtocolHandler('web+ok', 'https://other.test/?x=%s'); } catch (e) { return e.name; } })(),
+              (() => { try { navigator.unregisterProtocolHandler('mailto:', '/?x=%s'); } catch (e) { return e.name; } })(),
+              (() => { try { navigator.registerProtocolHandler('web+ok'); } catch (e) { return e.name; } })()
+            ].join(',')"#,
+        ),
+        "SecurityError,SyntaxError,SecurityError,SecurityError,TypeError"
+    );
+    provider.fail_next(ProtocolHandlerError {
+        message: "host policy blocked registration".into(),
+    });
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "(() => { try { navigator.registerProtocolHandler('web+ok', '/?x=%s'); return 'none'; } catch (e) { return e.name; } })()"
+        ),
+        "SecurityError"
+    );
+}
+
+#[test]
 fn web_share_rejects_without_activation_and_reflects_provider_capability() {
     let provider = Arc::new(DeterministicShareProvider::default());
     let mut runtime = JsRuntime::new().unwrap();

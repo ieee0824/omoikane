@@ -27036,6 +27036,30 @@ let omoikaneUserActivationState;
       clearAppBadge: { configurable: true, enumerable: true, writable: true, value: clearAppBadge },
     });
   }
+  function protocolHandlerOperation(operation, scheme, url) {
+    if (!(this instanceof Navigator)) throw new TypeError("Illegal invocation");
+    const normalizedScheme = String(scheme);
+    const normalizedUrl = String(url);
+    const result = JSON.parse(String(__omoikane_protocol_handler(
+      operation, __omoikane_document_id, normalizedScheme, normalizedUrl)));
+    if (result.error) {
+      throw new DOMException(result.message || "The protocol handler operation failed", result.error);
+    }
+  }
+  function registerProtocolHandler(scheme, url) {
+    if (arguments.length < 2) throw new TypeError("2 arguments required");
+    protocolHandlerOperation.call(this, "register", scheme, url);
+  }
+  function unregisterProtocolHandler(scheme, url) {
+    if (arguments.length < 2) throw new TypeError("2 arguments required");
+    protocolHandlerOperation.call(this, "unregister", scheme, url);
+  }
+  if (nativeIsSecureContext()) {
+    Object.defineProperties(Navigator.prototype, {
+      registerProtocolHandler: { configurable: true, enumerable: true, writable: true, value: registerProtocolHandler },
+      unregisterProtocolHandler: { configurable: true, enumerable: true, writable: true, value: unregisterProtocolHandler },
+    });
+  }
   function shareNative(operation, data = {}) {
     const result = JSON.parse(String(nativeWebShare(operation, __omoikane_document_id, JSON.stringify(data))));
     if (result.error) {

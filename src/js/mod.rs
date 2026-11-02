@@ -185,6 +185,11 @@ pub use badging::{
     AppBadge, BadgeContext, BadgeDisposition, BadgeError, BadgeProvider, BadgeRequest,
     DeterministicBadgeProvider,
 };
+mod protocol_handler;
+pub use protocol_handler::{
+    DeterministicProtocolHandlerProvider, ProtocolHandler, ProtocolHandlerDisposition,
+    ProtocolHandlerError, ProtocolHandlerOperation, ProtocolHandlerProvider,
+};
 mod payment_request;
 pub use payment_request::{
     DeterministicPaymentProvider, PaymentError, PaymentMethodData, PaymentProvider,
@@ -2453,6 +2458,7 @@ struct HostState {
     wake_lock: wake_lock::State,
     web_share: web_share::State,
     badging: badging::State,
+    protocol_handler: protocol_handler::State,
     payment_request: payment_request::State,
     web_authn: web_authn::State,
     media_capture: media_capture::State,
@@ -3450,6 +3456,7 @@ impl HostState {
             wake_lock: wake_lock::State::default(),
             web_share: web_share::State::default(),
             badging: badging::State::default(),
+            protocol_handler: protocol_handler::State::default(),
             payment_request: payment_request::State::default(),
             web_authn: web_authn::State::default(),
             media_capture: media_capture::State::default(),
@@ -16715,6 +16722,7 @@ fn register_host_bindings(
     wake_lock::register(context, &mut bindings)?;
     web_share::register(context, &mut bindings)?;
     badging::register(context, &mut bindings)?;
+    protocol_handler::register(context, &mut bindings)?;
     payment_request::register(context, &mut bindings)?;
     web_authn::register(context, &mut bindings)?;
     media_capture::register(context, &mut bindings)?;
