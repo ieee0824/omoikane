@@ -1,0 +1,19 @@
+{
+  "sha256": "47f0dc8bd5ec931cd46e374714bcfa5f2e59f92be749195d288a2413de5c9c0f",
+  "bytes": 17855,
+  "files": 31,
+  "empty_header": {
+    "baseline": {
+      "slot": "0x147fa70",
+      "relocation_target": "0x10fe3f8"
+    },
+    "candidate": {
+      "slot": "0x147fa78",
+      "relocation_target": "0x10fd5b8"
+    },
+    "exact_symbol": "thin_vec::EMPTY_HEADER",
+    "size": 16,
+    "both_target_bytes_hex": "00000000000000000000000000000000"
+  },
+  "scope": "Nine statically selected functions; not all transitive callees; real CPU causality unknown"
+}
