@@ -87,6 +87,7 @@ mod retained_scroll;
 mod tree_style_invalidation;
 mod url_pattern;
 mod view_transition;
+mod webassembly;
 mod window_members;
 use child_document::{FetchedChildResource, LoadedChildDocument, NavigationRedirect};
 use cross_origin_isolation::{
@@ -101,6 +102,7 @@ mod canvas2d;
 mod canvas_blit;
 #[cfg(test)]
 mod canvas_blit_tests;
+mod canvas_text;
 mod child_effect_source_cache;
 #[cfg(test)]
 mod child_layout_cache_tests;
@@ -164,6 +166,30 @@ mod form_submission;
 mod frame_policy;
 mod geolocation;
 pub use geolocation::GeolocationPositionData;
+mod gamepad;
+pub use gamepad::{
+    DeterministicGamepadProvider, GamepadButtonSnapshot, GamepadHapticRequest, GamepadHapticResult,
+    GamepadProvider, GamepadSnapshot,
+};
+mod screen_orientation;
+pub use screen_orientation::{
+    DeterministicScreenOrientationProvider, ScreenOrientationError, ScreenOrientationProvider,
+    ScreenOrientationSnapshot, ScreenOrientationType,
+};
+mod wake_lock;
+pub use wake_lock::{DeterministicWakeLockProvider, WakeLockError, WakeLockProvider};
+mod web_share;
+pub use web_share::{DeterministicShareProvider, ShareData, ShareError, ShareFile, ShareProvider};
+mod payment_request;
+pub use payment_request::{
+    DeterministicPaymentProvider, PaymentError, PaymentMethodData, PaymentProvider,
+    PaymentRequestData, PaymentSelection,
+};
+mod web_authn;
+pub use web_authn::{
+    DeterministicWebAuthnProvider, WebAuthnAssertionRequest, WebAuthnAssertionResponse,
+    WebAuthnCreationRequest, WebAuthnCreationResponse, WebAuthnError, WebAuthnProvider,
+};
 mod media_capture;
 pub use media_capture::{
     MediaCaptureDevice, MediaCaptureProvider, MediaCaptureSnapshot, MediaDeviceKind,
@@ -172,6 +198,22 @@ pub use media_capture::{
 mod media_source;
 pub use media_source::{
     DeterministicMediaSourceProvider, MediaSourceError, MediaSourceProvider, MediaSourceSegment,
+};
+mod media_session;
+pub use media_session::{
+    DeterministicMediaSessionProvider, MediaSessionArtwork, MediaSessionArtworkFetch,
+    MediaSessionMetadata, MediaSessionPositionState, MediaSessionProvider, MediaSessionSnapshot,
+};
+mod web_speech;
+pub use web_speech::{
+    DeterministicWebSpeechProvider, SpeechRecognitionFailure, SpeechRecognitionPhrase,
+    SpeechRecognitionRequest, SpeechSynthesisRequest, SpeechVoice, WebSpeechCommand,
+    WebSpeechProvider,
+};
+mod web_codecs;
+pub use web_codecs::{
+    DeterministicWebCodecsProvider, WebCodecConfig, WebCodecError, WebCodecKind, WebCodecOutput,
+    WebCodecPacket, WebCodecsProvider,
 };
 mod automation;
 #[cfg(test)]
@@ -2401,8 +2443,17 @@ struct HostState {
     clipboard_permission_granted: bool,
     notification_permission: String,
     geolocation: geolocation::State,
+    gamepad: gamepad::State,
+    screen_orientation: screen_orientation::State,
+    wake_lock: wake_lock::State,
+    web_share: web_share::State,
+    payment_request: payment_request::State,
+    web_authn: web_authn::State,
     media_capture: media_capture::State,
     media_source: media_source::State,
+    web_codecs: web_codecs::State,
+    media_session: media_session::State,
+    web_speech: web_speech::State,
     compression_streams: compression_stream::Store,
     http_client: Client,
     /// Lazily started HTTP worker for best-effort CSP/Reporting delivery.
@@ -2727,6 +2778,7 @@ struct HostState {
     shared_worker: shared_worker::State,
     broadcast_channel: broadcast_channel::State,
     worklet: worklet::State,
+    webassembly: webassembly::State,
     /// Constructable stylesheets adopted by a Document or ShadowRoot. The
     /// JavaScript wrapper keeps stylesheet objects; this native snapshot lets
     /// the synchronous style resolver include their parsed text without
@@ -3154,6 +3206,7 @@ struct IframeSandboxPolicy {
     allow_pointer_lock: bool,
     allow_forms: bool,
     allow_top_navigation: bool,
+    allow_orientation_lock: bool,
 }
 
 impl Default for IframeSandboxPolicy {
@@ -3166,6 +3219,7 @@ impl Default for IframeSandboxPolicy {
             allow_pointer_lock: true,
             allow_forms: true,
             allow_top_navigation: true,
+            allow_orientation_lock: true,
         }
     }
 }
@@ -3188,6 +3242,7 @@ impl IframeSandboxPolicy {
             allow_pointer_lock: tokens.contains("allow-pointer-lock"),
             allow_forms: tokens.contains("allow-forms"),
             allow_top_navigation: tokens.contains("allow-top-navigation"),
+            allow_orientation_lock: tokens.contains("allow-orientation-lock"),
         }
     }
 
@@ -3384,9 +3439,19 @@ impl HostState {
             clipboard_permission_granted: true,
             notification_permission: "default".to_string(),
             geolocation: geolocation::State::default(),
+            gamepad: gamepad::State::default(),
+            screen_orientation: screen_orientation::State::default(),
+            wake_lock: wake_lock::State::default(),
+            web_share: web_share::State::default(),
+            payment_request: payment_request::State::default(),
+            web_authn: web_authn::State::default(),
             media_capture: media_capture::State::default(),
             media_source: media_source::State::default(),
+            web_codecs: web_codecs::State::default(),
+            media_session: media_session::State::default(),
+            web_speech: web_speech::State::default(),
             compression_streams: compression_stream::Store::new(),
+            webassembly: webassembly::State::default(),
             http_client,
             report_delivery: None,
             cookie_store,
@@ -6322,6 +6387,12 @@ impl HostState {
         self.idle_period_requests.remove(&document_id);
         self.auxiliary_opener_updaters.remove(&document_id);
         self.promise_reports.retire_document(document_id);
+        self.wake_lock.release_document(document_id);
+        self.web_share.retire_document(document_id);
+        self.payment_request.retire_document(document_id);
+        self.storage_manager
+            .opfs_release_document_locks(document_id);
+        self.web_authn.retire_document(document_id);
         self.pointer_lock.retire_document(document_id);
         self.input_bridge.retire_document(document_id);
         self.form_state.retire_document(document_id);
@@ -6460,6 +6531,14 @@ impl HostState {
             .remove(&previous.document.identity());
         self.promise_reports
             .retire_document(previous.document.identity());
+        self.wake_lock
+            .release_document(previous.document.identity());
+        self.web_share.retire_document(previous.document.identity());
+        self.payment_request
+            .retire_document(previous.document.identity());
+        self.storage_manager
+            .opfs_release_document_locks(previous.document.identity());
+        self.web_authn.retire_document(previous.document.identity());
         self.pointer_lock
             .retire_document(previous.document.identity());
         self.input_bridge
@@ -10581,10 +10660,14 @@ impl JsRuntime {
             {
                 continue;
             }
-            let result = self.eval_in_document_realm(
-                document_id,
-                &format!("__omoikane_dispatch_visibilitychange({document_id})"),
-            );
+            let script = if hidden {
+                format!(
+                    "if (typeof __omoikane_release_wake_locks === 'function') __omoikane_release_wake_locks(); __omoikane_dispatch_visibilitychange({document_id})"
+                )
+            } else {
+                format!("__omoikane_dispatch_visibilitychange({document_id})")
+            };
+            let result = self.eval_in_document_realm(document_id, &script);
             self.record_error_from("visibilitychange", result);
         }
     }
@@ -16620,12 +16703,22 @@ fn register_host_bindings(
     form_selector_state::register(context, &mut bindings)?;
     form_submission::register(context, &mut bindings)?;
     geolocation::register(context, &mut bindings)?;
+    gamepad::register(context, &mut bindings)?;
+    screen_orientation::register(context, &mut bindings)?;
+    wake_lock::register(context, &mut bindings)?;
+    web_share::register(context, &mut bindings)?;
+    payment_request::register(context, &mut bindings)?;
+    web_authn::register(context, &mut bindings)?;
     media_capture::register(context, &mut bindings)?;
     media_source::register(context, &mut bindings)?;
+    web_codecs::register(context, &mut bindings)?;
+    media_session::register(context, &mut bindings)?;
+    web_speech::register(context, &mut bindings)?;
     permissions_policy::register(context, &mut bindings)?;
     broadcast_channel::register(context, &mut bindings)?;
     web_locks::register(context, &mut bindings)?;
     cache_storage::register(context, &mut bindings)?;
+    webassembly::register(context, &mut bindings)?;
     worklet::register(context, &mut bindings)?;
     shared_worker::register(context, &mut bindings)?;
     let state = host_state.borrow();
@@ -16914,6 +17007,11 @@ fn register_host_bindings(
             NativeFunction::from_copy_closure(storage_manager_native),
         ),
         (
+            js_string!("__omoikane_opfs"),
+            4,
+            NativeFunction::from_copy_closure(opfs_native),
+        ),
+        (
             js_string!("__omoikane_get_element_by_id"),
             2,
             NativeFunction::from_copy_closure(get_element_by_id_native),
@@ -17157,6 +17255,11 @@ fn register_host_bindings(
             js_string!("__omoikane_set_style_computation_source"),
             2,
             NativeFunction::from_copy_closure(set_style_computation_source_native),
+        ),
+        (
+            js_string!("__omoikane_close_style_value_functions"),
+            1,
+            NativeFunction::from_copy_closure(close_style_value_functions_native),
         ),
         (
             js_string!("__omoikane_set_attribute_ns"),
@@ -17452,6 +17555,21 @@ fn register_host_bindings(
             js_string!("__omoikane_canvas_parse_color"),
             1,
             NativeFunction::from_copy_closure(canvas2d::parse_color_native),
+        ),
+        (
+            js_string!("__omoikane_canvas_parse_filter"),
+            1,
+            NativeFunction::from_copy_closure(canvas2d::parse_filter_native),
+        ),
+        (
+            js_string!("__omoikane_canvas_parse_font"),
+            2,
+            NativeFunction::from_copy_closure(canvas_text::parse_font_native),
+        ),
+        (
+            js_string!("__omoikane_canvas2d_text"),
+            2,
+            NativeFunction::from_copy_closure(canvas_text::text_native),
         ),
         (
             js_string!("__omoikane_canvas_commit"),
@@ -19362,6 +19480,121 @@ fn storage_manager_native(
                 .into()),
         }
     })
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpfsRequest {
+    #[serde(default)]
+    path: Vec<String>,
+    #[serde(default)]
+    destination: Vec<String>,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    directory: bool,
+    #[serde(default)]
+    create: bool,
+    #[serde(default)]
+    recursive: bool,
+    #[serde(default)]
+    modified: u64,
+    #[serde(default)]
+    mode: String,
+    #[serde(default, rename = "lockId")]
+    lock_id: u64,
+}
+
+fn opfs_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    let operation = string_argument(args.first(), "", context)?;
+    let document_id = parse_node_id(args.get(1), context)?;
+    ensure_same_origin_document(context, document_id)?;
+    let request = string_argument(args.get(2), "{}", context)?;
+    let request: OpfsRequest = serde_json::from_str(&request)
+        .map_err(|_| JsNativeError::typ().with_message("Invalid OPFS request"))?;
+    let bytes = body_bytes_argument(args.get(3), context)?.unwrap_or_default();
+    let (manager, origin) = with_host_state(|host| {
+        let state = host.borrow();
+        if !document_is_secure_context(&state, document_id)
+            || !state.document_is_active(document_id)
+        {
+            return Err(JsNativeError::error()
+                .with_message("OPFS requires an active secure document")
+                .into());
+        }
+        let origin = state
+            .document_origins
+            .get(&document_id)
+            .cloned()
+            .flatten()
+            .ok_or_else(|| JsNativeError::error().with_message("OPFS requires a tuple origin"))?;
+        Ok((state.storage_manager.clone(), origin))
+    })?;
+    let result = match operation.as_str() {
+        "root" => manager.opfs_root(&origin).map(|()| serde_json::json!({})),
+        "handle" => manager
+            .opfs_get_handle(
+                &origin,
+                &request.path,
+                &request.name,
+                request.directory,
+                request.create,
+            )
+            .map(|()| serde_json::json!({})),
+        "list" => manager.opfs_list(&origin, &request.path).map(|entries| {
+            serde_json::json!({"entries": entries.into_iter().map(|entry| serde_json::json!({"name":entry.name,"kind":entry.kind})).collect::<Vec<_>>()})
+        }),
+        "file" => manager.opfs_file(&origin, &request.path).map(|file| {
+            serde_json::json!({"bytes":file.bytes,"modified":file.modified})
+        }),
+        "write" => manager
+            .opfs_write(&origin, &request.path, bytes, request.modified)
+            .map(|()| serde_json::json!({})),
+        "lock" => {
+            use storage::OpfsLockMode;
+            let mode = match request.mode.as_str() {
+                "siloed" => OpfsLockMode::Siloed,
+                "exclusive" | "sync" => OpfsLockMode::Exclusive,
+                _ => return Err(JsNativeError::typ().with_message("Invalid OPFS lock mode").into()),
+            };
+            manager
+                .opfs_acquire_lock(document_id, &origin, &request.path, mode)
+                .map(|lock_id| serde_json::json!({"lockId":lock_id}))
+        }
+        "unlock" => {
+            manager.opfs_release_lock(request.lock_id);
+            Ok(serde_json::json!({}))
+        }
+        "remove" => manager
+            .opfs_remove(
+                &origin,
+                &request.path,
+                &request.name,
+                request.recursive,
+            )
+            .map(|()| serde_json::json!({})),
+        "move" => manager
+            .opfs_move_file(&origin, &request.path, &request.destination, &request.name)
+            .map(|()| serde_json::json!({})),
+        _ => return Err(JsNativeError::typ().with_message("Unknown OPFS operation").into()),
+    };
+    let value = match result {
+        Ok(value) => value,
+        Err(error) => {
+            use storage::OpfsError;
+            let name = match error {
+                OpfsError::InvalidName => "TypeError",
+                OpfsError::NotFound => "NotFoundError",
+                OpfsError::TypeMismatch => "TypeMismatchError",
+                OpfsError::NotEmpty => "InvalidModificationError",
+                OpfsError::QuotaExceeded => "QuotaExceededError",
+                OpfsError::Io => "UnknownError",
+                OpfsError::Locked => "NoModificationAllowedError",
+            };
+            serde_json::json!({"error":name})
+        }
+    };
+    Ok(js_string!(value.to_string()).into())
 }
 
 // ---------------------------------------------------------------------------
@@ -23754,6 +23987,50 @@ fn match_media_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> J
     })
 }
 
+/// Completes CSSOM component values before they are embedded in a declaration list.
+fn close_style_value_functions_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    // CSS input preprocessing replaces unpaired UTF-16 surrogates with U+FFFD.
+    let value = args
+        .first()
+        .cloned()
+        .unwrap_or_default()
+        .to_string(context)?
+        .to_std_string_lossy();
+    let completed = crate::css::style::close_unfinished_functions(&value);
+    Ok(js_string!(completed).into())
+}
+
+fn set_style_computation_source_native(
+    _: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = parse_node_id(args.first(), context)?;
+    ensure_same_origin_node(context, node_id)?;
+    let source = args
+        .get(1)
+        .filter(|value| !value.is_null() && !value.is_undefined())
+        .map(|value| {
+            value
+                .to_string(context)
+                .map(|value| value.to_std_string_lossy())
+        })
+        .transpose()?;
+    with_node_render_mutation(&[node_id], |state| {
+        let node = state
+            .borrow()
+            .get_node(node_id)
+            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
+        node.set_style_computation_source(source);
+        state.borrow_mut().mark_style_dirty_for_node(&node);
+        Ok(JsValue::undefined())
+    })
+}
+
 fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let node_id = parse_node_id(args.first(), context)?;
     ensure_same_origin_node(context, node_id)?;
@@ -23871,33 +24148,6 @@ fn set_attribute_native(_: &JsValue, args: &[JsValue], context: &mut Context) ->
                     csp_source.as_ref(),
                 );
         }
-        Ok(JsValue::undefined())
-    })
-}
-
-fn set_style_computation_source_native(
-    _: &JsValue,
-    args: &[JsValue],
-    context: &mut Context,
-) -> JsResult<JsValue> {
-    let node_id = parse_node_id(args.first(), context)?;
-    ensure_same_origin_node(context, node_id)?;
-    let source = args
-        .get(1)
-        .filter(|value| !value.is_null() && !value.is_undefined())
-        .map(|value| {
-            value
-                .to_string(context)
-                .map(|value| value.to_std_string_escaped())
-        })
-        .transpose()?;
-    with_node_render_mutation(&[node_id], |state| {
-        let node = state
-            .borrow()
-            .get_node(node_id)
-            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("node not found")))?;
-        node.set_style_computation_source(source);
-        state.borrow_mut().mark_style_dirty_for_node(&node);
         Ok(JsValue::undefined())
     })
 }
