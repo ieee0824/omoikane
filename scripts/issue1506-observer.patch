@@ -1,0 +1,164 @@
+--- a/src/js/node_lifetime_tests.rs
++++ b/src/js/node_lifetime_tests.rs
+@@ -388,29 +388,141 @@
+
+ #[test]
+ fn old_document_generations_are_kept_by_references_without_an_eviction_limit() {
+-    let mut runtime = runtime();
+-    runtime
+-        .eval("var frame = document.getElementById('f'); var held = [];")
+-        .unwrap();
++    // Diagnostic-only observer: flush after timers stop, also on panic.
++    struct PairObservations {
++        rows: std::cell::RefCell<Vec<(String, Option<u128>, bool, bool)>>,
++        #[cfg(feature = "gc-profile")]
++        gc_rows: std::cell::RefCell<Vec<(String, [u128; 10], [u128; 10])>>,
++    }
++    #[cfg(feature = "gc-profile")]
++    fn gc_values() -> [u128; 10] {
++        let p = boa_gc::profile();
++        [
++            p.minor.collections as u128,
++            p.minor.total.as_nanos(),
++            p.minor.mark.as_nanos(),
++            p.minor.finalize.as_nanos(),
++            p.minor.sweep.as_nanos(),
++            p.major.collections as u128,
++            p.major.total.as_nanos(),
++            p.major.mark.as_nanos(),
++            p.major.finalize.as_nanos(),
++            p.major.sweep.as_nanos(),
++        ]
++    }
++    struct PairPhase<'a> {
++        rows: &'a PairObservations,
++        label: String,
++        start: Option<std::time::Instant>,
++        #[cfg(feature = "gc-profile")]
++        gc_start: [u128; 10],
++    }
++    impl PairPhase<'_> {
++        fn record(&mut self, failed: bool, tainted: bool) {
++            if let Some(start) = self.start.take() {
++                let elapsed = if tainted {
++                    None
++                } else {
++                    Some(start.elapsed().as_nanos())
++                };
++                #[cfg(feature = "gc-profile")]
++                self.rows.gc_rows.borrow_mut().push((
++                    self.label.clone(),
++                    self.gc_start,
++                    gc_values(),
++                ));
++                self.rows.rows.borrow_mut().push((
++                    std::mem::take(&mut self.label),
++                    elapsed,
++                    failed,
++                    tainted,
++                ));
++            }
++        }
++        fn finish(mut self, failed: bool) {
++            self.record(failed, false);
++        }
++    }
++    impl Drop for PairPhase<'_> {
++        fn drop(&mut self) {
++            let panicking = std::thread::panicking();
++            self.record(panicking, panicking);
++        }
++    }
++    impl PairObservations {
++        fn phase(&self, label: String) -> PairPhase<'_> {
++            #[cfg(feature = "gc-profile")]
++            let gc_start = gc_values();
++            PairPhase {
++                rows: self,
++                label,
++                start: Some(std::time::Instant::now()),
++                #[cfg(feature = "gc-profile")]
++                gc_start,
++            }
++        }
++    }
++    impl Drop for PairObservations {
++        fn drop(&mut self) {
++            for (label, nanos, failed, tainted) in self.rows.get_mut().drain(..) {
++                let nanos = nanos.map_or_else(|| "null".into(), |n| n.to_string());
++                eprintln!("ISSUE1506_PHASE\t{label}\t{nanos}\t{failed}\t{tainted}");
++            }
++            #[cfg(feature = "gc-profile")]
++            for (label, before, after) in self.gc_rows.get_mut().drain(..) {
++                eprintln!("ISSUE1506_GC_PHASE\t{label}\t{before:?}\t{after:?}");
++            }
++            eprintln!(
++                "ISSUE1506_OBSERVER\toverhead_unmeasured\tgc_visits_and_thread_cpu_unavailable"
++            );
++        }
++    }
++    let observations = PairObservations {
++        rows: std::cell::RefCell::new(Vec::with_capacity(90)),
++        #[cfg(feature = "gc-profile")]
++        gc_rows: std::cell::RefCell::new(Vec::with_capacity(90)),
++    };
++    let mut runtime = {
++        let phase = observations.phase("runtime-bootstrap".into());
++        let result = runtime();
++        phase.finish(false);
++        result
++    };
++    let phase = observations.phase("setup".into());
++    let result = runtime.eval("var frame = document.getElementById('f'); var held = [];");
++    phase.finish(result.is_err());
++    result.unwrap();
+     // Each navigation is a separate script job, as it would be when initiated
+     // by successive page tasks. Keep all 80 generations reachable throughout.
+     for index in 0..80 {
+-        runtime
+-            .eval(&format!(
+-                "frame.srcdoc = '<p>{index}</p>'; held.push(frame.contentDocument);"
+-            ))
+-            .unwrap();
+-    }
+-    collect(&mut runtime);
+-    assert_eq!(
+-        runtime
+-            .eval("held.every((doc, i) => doc.body.textContent === String(i))")
+-            .unwrap()
+-            .as_boolean(),
+-        Some(true)
+-    );
+-    runtime.eval("held = null").unwrap();
+-    collect(&mut runtime);
++        let phase = observations.phase(format!("generation-{index}"));
++        let result = runtime.eval(&format!(
++            "frame.srcdoc = '<p>{index}</p>'; held.push(frame.contentDocument);"
++        ));
++        phase.finish(result.is_err());
++        result.unwrap();
++    }
++    {
++        let phase = observations.phase("retained-collection".into());
++        collect(&mut runtime);
++        phase.finish(false);
++    }
++    let phase = observations.phase("retained-content".into());
++    let result = runtime.eval("held.every((doc, i) => doc.body.textContent === String(i))");
++    phase.finish(result.is_err());
++    assert_eq!(result.unwrap().as_boolean(), Some(true));
++    {
++        let phase = observations.phase("release-references".into());
++        let result = runtime.eval("held = null");
++        phase.finish(result.is_err());
++        result.unwrap();
++    }
++    {
++        let phase = observations.phase("release-collection".into());
++        collect(&mut runtime);
++        phase.finish(false);
++    }
++    let _phase = observations.phase("release-assertions".into());
+     let state = runtime.host_state.borrow();
+     assert!(
+         state.node_lifetimes.document_count() <= 2,

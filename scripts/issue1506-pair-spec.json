@@ -1,0 +1,200 @@
+{
+  "status": "Local implementation for peer review; source preflight passed; Rust observer and native Mac execution not yet validated",
+  "issue": 1506,
+  "host_requirement": "One authorized native macOS job allocation, both revisions sequentially on that same host; separate jobs with the same runner label do not qualify.",
+  "sources": {
+    "before": "2a5e1d31a37fdcfd1ba93ba2448f8663a2a017b1",
+    "after": "f04c59a07d56d782afa2f77ea0742431524f5f24",
+    "required_diff": "GC4files only, verify stable patch-id; if adding observer instrumentation apply identical patch to both and retain original/observed tree and patch hashes"
+  },
+  "exact_mode": {
+    "features": "baseline-jit,jit-differential",
+    "selector": "js::node_lifetime_tests::old_document_generations_are_kept_by_references_without_an_eviction_limit",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--features",
+      "baseline-jit,jit-differential",
+      "--no-fail-fast",
+      "--lib",
+      "--",
+      "js::node_lifetime_tests::old_document_generations_are_kept_by_references_without_an_eviction_limit",
+      "--exact",
+      "--include-ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "requirements": [
+      "80 reachable generations and all original assertions unchanged",
+      "Record generation index before eval and elapsed Instant duration after eval or error",
+      "Record final retained-document verification and explicit collection separately",
+      "Preserve error at generation, wall-clock RuntimeLimit, full stderr and exit; no retry substitution"
+    ]
+  },
+  "profile_mode": {
+    "features": "same exact features plus gc-profile on BOTH sources",
+    "scope": "Separate diagnostic mode; do not compare profile timing directly against non-profile CI timing",
+    "measurements": [
+      "bootstrap/eval/explicitGC phases where instrumentation actually exposes them",
+      "collection count/visits and retained graph size with feature/config recorded",
+      "Unavailable subphase metrics are null with reason, not inferred from totals"
+    ],
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "--features",
+      "baseline-jit,jit-differential,gc-profile",
+      "--no-fail-fast",
+      "--lib",
+      "--",
+      "js::node_lifetime_tests::old_document_generations_are_kept_by_references_without_an_eviction_limit",
+      "--exact",
+      "--include-ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "environment": "same common_environment with separate profile-mode target",
+    "feature_check": "Root Cargo.toml currently declares gc-profile=[boa_gc/gc-profile], baseline-jit=[boa_engine/baseline-jit], jit-differential=[]; verify declarations and feature closure on BOTH pinned source trees before execution."
+  },
+  "evidence": [
+    "UTC start/end plus monotonic elapsed and clock-jump flags",
+    "host/OS/Rust identity, source parent/tree/dirty, locks/config hashes",
+    "build/setup times separately from runtime",
+    "exact command/env/source/observer patch hashes",
+    "expected test name exactly1, ignored0, original assertion results",
+    "per-generation raw rows plus final graph/liveness assertions",
+    "capture before and after even if one fails, always upload original logs, preserve failure status"
+  ],
+  "priority": "Current mac CI and existing PRs first; no additional heavy parallel work; no new PR; current1646head unchanged",
+  "completion_boundary": "Diagnostic proposal only. Does not resolve1506, certify mac margin, waive failures, or prove currentmain.",
+  "run_order_evidence": [
+    "record source execution order and warm/cold cache state",
+    "AB/BA repetition is optional future measurement quality work; not execution authorization or a new blocker"
+  ],
+  "schema_revision": 4,
+  "supersedes_sha256": "4080a33f88a0b18e048a84d8275bb5419302cc0d149d4c8e24788c1c05815dea",
+  "target_isolation": {
+    "before": "<allocation>/targets/before/<mode>",
+    "after": "<allocation>/targets/after/<mode>",
+    "policy": "Distinct CARGO_TARGET_DIR per source AND mode. Start clean, or retain only cache explicitly keyed by source tree, observer patch, lock, Rust, features, and profile. Record policy/state; never share mutable target metadata."
+  },
+  "common_environment": {
+    "CI": "true",
+    "CARGO_BUILD_JOBS": "2 (matches present Gate5 workflow; revalidate at execution)",
+    "CARGO_TARGET_DIR": "the unique source/mode target path above",
+    "profile_overrides": "Record actual CARGO_PROFILE_* and RUSTFLAGS; keep identical across sources. Do not silently change CI profile or wall-clock limit.",
+    "RUST_TEST_THREADS": null,
+    "unset_semantics": "null for RUST_TEST_THREADS means remove/unset; do not set the literal string null. Command still uses --test-threads=1.",
+    "CARGO_INCREMENTAL": "0"
+  },
+  "observer_isolation": [
+    "Record original tree and observed tree separately for each source and observer patch SHA.",
+    "Remove observer in both trees and verify remaining before/after diff is precisely the original GC4file patch/stable patch-id.",
+    "Buffer generation/stage timings and metrics in memory; emit after the timed region or on failure after stopping the timer, no synchronous per-generation I/O in timed regions.",
+    "Record observer overhead or explicitly mark it unmeasured. Observed timings are not directly comparable to uninstrumented CI wall time."
+  ],
+  "host_metadata": [
+    "One allocation ID/runner identity and runner-image version",
+    "macOS product version and build",
+    "CPU model/core count, physical memory",
+    "power/thermal state if available; mark inaccessible fields null with reason",
+    "run order, warm/cold state, cache provenance and competing load"
+  ],
+  "failing_environment_evidence": {
+    "run": 41436665843,
+    "job": 125248343957,
+    "artifact": 13145510218,
+    "file_sha256": "a26c4288d6a83be95209f58858db31c9ce93cf3ed690981478cdff04580cc2d6",
+    "observed_values": {
+      "WPT_ROOT": "/Users/runner/work/omoikane/omoikane/.cache/wpt",
+      "WPT_REQUIRED": "1",
+      "WPT_MANIFEST": null,
+      "WPT_REPORT": "/Users/runner/work/omoikane/omoikane/.artifacts/jit-gate5/aarch64-apple-darwin/suite/wpt.json",
+      "WPT_JUNIT": "/Users/runner/work/omoikane/omoikane/.artifacts/jit-gate5/aarch64-apple-darwin/suite/wpt.xml",
+      "OMOIKANE_JIT_GATE_REPORT_DIR": "/Users/runner/work/omoikane/omoikane/.artifacts/jit-gate5/aarch64-apple-darwin/suite",
+      "OMOIKANE_WEB_API_REPORT": "/Users/runner/work/omoikane/omoikane/.artifacts/jit-gate5/aarch64-apple-darwin/suite/web-api.json",
+      "RUST_TEST_THREADS": null,
+      "CI": "true"
+    },
+    "path_mapping": "Before/after worktrees use allocation-local WPT/report paths with the same roles; preserve both original and mapped actual values.",
+    "unrecorded_values": "RUSTFLAGS/profile overrides not captured in this file remain unknown; capture effective relevant environment/toolchain/build commands on both diagnostic runs rather than inventing defaults.",
+    "fidelity": "Keep literal values and unset distinct. No truthy normalization. Do not call changed environment runs exact CI reproduction.",
+    "recovered_build_environment": {
+      "CARGO_INCREMENTAL": "0",
+      "job": 125248343957,
+      "raw_job_log_sha256": "c45a7e1edb8eb65dda177d73e8316b826007e240266e34ceb379239f5e69aa0e",
+      "evidence": "15 explicit CARGO_INCREMENTAL: 0 lines in original job headers; original9fieldenvironment artifact retained unchanged",
+      "scope": "Other unrecorded profile/RUSTFLAGS settings remain unknown"
+    }
+  },
+  "original_test_reference": {
+    "revision": "2a5e1d31a37fdcfd1ba93ba2448f8663a2a017b1",
+    "file": "src/js/node_lifetime_tests.rs",
+    "blob": "ba0e883514d72288f326f6d0ac419217705f910c",
+    "function_segment_sha256": "749ee799f9bba9d07798674fda3f5b8948369ca3bcb896054948a879158686a5",
+    "function_segment": "fn old_document_generations_are_kept_by_references_without_an_eviction_limit() {\n    let mut runtime = runtime();\n    runtime\n        .eval(\"var frame = document.getElementById('f'); var held = [];\")\n        .unwrap();\n    // Each navigation is a separate script job, as it would be when initiated\n    // by successive page tasks. Keep all 80 generations reachable throughout.\n    for index in 0..80 {\n        runtime\n            .eval(&format!(\n                \"frame.srcdoc = '<p>{index}</p>'; held.push(frame.contentDocument);\"\n            ))\n            .unwrap();\n    }\n    collect(&mut runtime);\n    assert_eq!(\n        runtime\n            .eval(\"held.every((doc, i) => doc.body.textContent === String(i))\")\n            .unwrap()\n            .as_boolean(),\n        Some(true)\n    );\n    runtime.eval(\"held = null\").unwrap();\n    collect(&mut runtime);\n    let state = runtime.host_state.borrow();\n    assert!(\n        state.node_lifetimes.document_count() <= 2,\n        \"only main and current iframe documents remain\"\n    );\n    assert!(\n        state.node_lifetimes.node_count() < 30,\n        \"retired nodes must be reclaimed\"\n    );\n    assert!(state.document_styles.len() <= 2);\n}",
+    "preflight": "Verify original test is unchanged on both source refs, then apply identical observer patch."
+  },
+  "eval_graph_invariants": [
+    "Preserve the initial frame/held eval.",
+    "Preserve exactly80 iterations, exactly one existing runtime.eval per iteration. srcdoc assignment and held.push(frame.contentDocument) remain combined and in the same order.",
+    "Never split existing evals or add evals; each eval has its own5second budget. Preserve the original runtime limit configuration.",
+    "Preserve exactly the two existing explicit collection positions: after80 generations before held-document liveness assertion; after held=null before final document/node/style assertions.",
+    "No additional collect/run_jobs, navigation reads, retained references, retries, or reordering. Numeric observer samples must not retain DOM/JS objects.",
+    "Coarse Instant brackets go outside the existing eval. Internal bootstrap/GC phases unavailable without changing semantics remain null+reason.",
+    "Buffer data and emit after timed region, including failure after stopping the timer. Observer overhead is recorded or explicitly unmeasured."
+  ],
+  "local_preparation": {
+    "status": "Prepared specification only; workflow/observer runner not implemented or executed; no remote push/dispatch",
+    "sources": {
+      "before_tree": "a63bd6075783a9eb1d2ee9e9d74456da26f312b6",
+      "after_tree": "f900d5a8f4089019cb9b439b804a7636fabf300b",
+      "production_gc_files": [
+        "engine/boa/core/gc/src/internals/ephemeron_box.rs",
+        "engine/boa/core/gc/src/lib.rs",
+        "engine/boa/core/gc/src/test/generational.rs",
+        "engine/boa/core/gc/src/test/mod.rs"
+      ],
+      "production_gc_patch_sha256": "35507356eedaeaea0347f915f4f1117467b0e47e6cc904f8ed72688f9002a077",
+      "production_gc_patch_id": "09d15ab45a076c9c8f97ed6910159cef3ef6a6fc"
+    },
+    "peer_spec_sha256": "4080a33f88a0b18e048a84d8275bb5419302cc0d149d4c8e24788c1c05815dea",
+    "environment_clarification": {
+      "original_ci_recorded_CI": "true",
+      "original_ci_recorded_RUST_TEST_THREADS": null,
+      "command_test_threads": "1",
+      "planned_CARGO_BUILD_JOBS": "2",
+      "other_environment": "Must explicitly record controlled diagnostic variables and unrecorded original CI variables; do not assert full environment equivalence"
+    },
+    "observer": "Identical buffered observer patch in both variants; source removal must reproduce original hashes and the same4-file production diff. Do not emit per-generation rows in timed regions.",
+    "execution_boundary": "Single native macos-15 job allocation; before/after different bound target directories; build/setup/runtime separated; native execution and dispatch pending concrete runner review and resource scheduling.",
+    "unsupported_metrics": "Use null plus reason, including thread CPU time if unavailable on native macOS; no fabricated zeroes",
+    "peer_spec_revision": "4ed7123877445421b54381f77a65e1be2d1d02a6",
+    "implementation_status": "source preflight, reversible buffered observer, sequential runner and branch-only manual workflow prepared; not dispatched",
+    "profile_snapshot_observer": {
+      "api": "boa_gc::profile(), existing thread-local Copy snapshots; no reset",
+      "fields": [
+        "minor_count",
+        "minor_total_ns",
+        "minor_mark_ns",
+        "minor_finalize_ns",
+        "minor_sweep_ns",
+        "major_count",
+        "major_total_ns",
+        "major_mark_ns",
+        "major_finalize_ns",
+        "major_sweep_ns"
+      ],
+      "scope": "same observer patch on both refs, cfg gc-profile only; before/after buffered outside timed eval; checked monotonic deltas",
+      "unavailable": [
+        "ephemeron visits",
+        "thread CPU time",
+        "bootstrap internal stages"
+      ],
+      "complete_Rust_profile_integration": "not compiled or executed yet"
+    },
+    "observer_sha256": "001ef76167efc0b5ebd30b9d6b522db60b3c9f2f9a36b21237cd892ada3dcc8d"
+  }
+}

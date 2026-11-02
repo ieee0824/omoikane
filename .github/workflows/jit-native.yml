@@ -7,6 +7,10 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      issue1506_pair:
+        description: Run only the fixed Issue1506 paired diagnostic on one native Mac
+        type: boolean
+        default: false
       macos_wpt_diagnostics:
         description: Run an additional Apple Silicon WPT AddressSanitizer diagnostic
         type: boolean
@@ -18,8 +22,8 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: native-jit-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: native-jit-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && inputs.issue1506_pair && format('issue1506-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !(github.event_name == 'workflow_dispatch' && inputs.issue1506_pair) }}
 
 jobs:
   changes:
@@ -27,7 +31,7 @@ jobs:
 
   native:
     needs: changes
-    if: needs.changes.outputs.run_full == 'true'
+    if: needs.changes.outputs.run_full == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.issue1506_pair)
     name: Native JIT (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -83,7 +87,7 @@ jobs:
           if-no-files-found: error
 
   macos-wpt-asan:
-    if: github.event_name == 'workflow_dispatch' && inputs.macos_wpt_diagnostics
+    if: github.event_name == 'workflow_dispatch' && inputs.macos_wpt_diagnostics && !inputs.issue1506_pair
     name: Diagnostic WPT ASan (aarch64-apple-darwin)
     runs-on: macos-15
     timeout-minutes: 90
@@ -112,4 +116,40 @@ jobs:
           path: |
             .artifacts/macos-wpt-asan/
             .artifacts/wptserve/
+          if-no-files-found: error
+
+  issue1506-pair:
+    if: github.event_name == 'workflow_dispatch' && inputs.issue1506_pair
+    name: Issue1506 fixed paired diagnostic (single native Mac allocation)
+    runs-on: macos-15
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - name: Check diagnostic source invariants
+        run: python3 scripts/test_issue1506_pair.py > "$RUNNER_TEMP/issue1506-pair-unit.log" 2>&1
+      - name: Run both fixed sources and preserve failures
+        run: python3 scripts/run-issue1506-pair.py --allocation "$RUNNER_TEMP/issue1506-pair" --execute
+      - name: Upload diagnostic evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue1506-native-mac-pair
+          path: |
+            ${{ runner.temp }}/issue1506-pair/result.json
+            ${{ runner.temp }}/issue1506-pair/host-*.log
+            ${{ runner.temp }}/issue1506-pair/*-observer-applied.patch
+            ${{ runner.temp }}/issue1506-pair/logs/
+            scripts/issue1506-pair-spec.json
+            scripts/issue1506-observer.patch
+            scripts/diagnose-issue1506-pair.py
+            scripts/run-issue1506-pair.py
+            scripts/test_issue1506_pair.py
+            .github/workflows/jit-native.yml
+            ${{ runner.temp }}/issue1506-pair/preflight.json
+            ${{ runner.temp }}/issue1506-pair-unit.log
           if-no-files-found: error
