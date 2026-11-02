@@ -38,8 +38,8 @@ fn document_policy_object_reports_the_same_header_rules_as_fullscreen() {
         ),
         json!({
             "same": true,
-            "features": ["fullscreen", "geolocation", "gamepad", "cross-origin-isolated", "storage-access", "focus-without-user-activation"],
-            "allowed": ["fullscreen", "gamepad", "storage-access", "focus-without-user-activation"],
+            "features": ["fullscreen", "geolocation", "gamepad", "screen-wake-lock", "cross-origin-isolated", "storage-access", "focus-without-user-activation"],
+            "allowed": ["fullscreen", "gamepad", "screen-wake-lock", "storage-access", "focus-without-user-activation"],
             "self": true,
             "child": true,
             "other": false,
@@ -78,6 +78,7 @@ fn document_policy_object_reports_the_same_header_rules_as_fullscreen() {
             [
                 "geolocation",
                 "gamepad",
+                "screen-wake-lock",
                 "cross-origin-isolated",
                 "storage-access",
                 "focus-without-user-activation"
@@ -104,6 +105,7 @@ fn document_policy_object_reports_the_same_header_rules_as_fullscreen() {
             [
                 "geolocation",
                 "gamepad",
+                "screen-wake-lock",
                 "cross-origin-isolated",
                 "storage-access",
                 "focus-without-user-activation"

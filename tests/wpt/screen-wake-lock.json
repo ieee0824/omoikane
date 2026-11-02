@@ -1,0 +1,27 @@
+{
+  "tests": [
+    { "path": "screen-wake-lock/idlharness.https.window.js" },
+    { "path": "screen-wake-lock/wakelock-type.https.window.js" },
+    { "path": "screen-wake-lock/wakelock-released.https.html" },
+    { "path": "screen-wake-lock/wakelock-onrelease.https.html" },
+    {
+      "path": "screen-wake-lock/wakelock-document-hidden.https.html",
+      "known_failure": {
+        "status": "FAIL",
+        "reason": "WPT smoke does not complete minimize/restore window-state cleanup",
+        "issue": "#1666",
+        "expires": "2027-01-31"
+      }
+    },
+    { "path": "screen-wake-lock/wakelock-active-document.https.window.js" },
+    {
+      "path": "screen-wake-lock/wakelock-disabled-by-permissions-policy.https.html",
+      "known_failure": {
+        "status": "FAIL",
+        "reason": "WPT smoke does not complete the cross-origin policy iframe result",
+        "issue": "#1666",
+        "expires": "2027-01-31"
+      }
+    }
+  ]
+}
