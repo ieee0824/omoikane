@@ -172,6 +172,7 @@ let omoikaneUserActivationState;
   const nativeIsSecureContext = globalThis.__omoikane_is_secure_context;
   const nativeCrossOriginIsolated = globalThis.__omoikane_cross_origin_isolated;
   const nativeStorageManager = globalThis.__omoikane_storage_manager;
+  const nativeOpfs = globalThis.__omoikane_opfs;
   const nativeCookieStoreAvailable = globalThis.__omoikane_cookie_store_available;
   const nativeCookieStoreQuery = globalThis.__omoikane_cookie_store_query;
   const nativeCookieStoreSubscriptions = globalThis.__omoikane_cookie_store_subscriptions;
@@ -26212,6 +26213,7 @@ let omoikaneUserActivationState;
           return result;
         });
       }
+      getDirectory() { return Promise.resolve().then(() => opfsGetDirectory(storageManagerDocumentId(this))); }
       get [Symbol.toStringTag]() { return "StorageManager"; }
     };
     globalThis.StorageManager = StorageManager;
@@ -34987,6 +34989,9 @@ let omoikaneUserActivationState;
         throw dataCloneError("A MessagePort must be transferred to be cloned.");
       }
       state.nodes[id] = ["P", value];
+    } else if (value instanceof FileSystemHandle) {
+      const handle = opfsHandleState(value);
+      state.nodes[id] = ["H", handle.kind, handle.documentId, handle.path.slice()];
     } else if (value instanceof EncodedVideoChunk || value instanceof EncodedAudioChunk) {
       const chunk = webCodecChunkState.get(value);
       state.nodes[id] = ["C", value instanceof EncodedVideoChunk, chunk.type,
@@ -35074,6 +35079,7 @@ let omoikaneUserActivationState;
         case "x": objects[index] = new IntrinsicRegExp(node[1], node[2]); break;
         case "b": objects[index] = node[2] ? safeMapGet(transferred, node[1]) : node[1]; break;
         case "P": objects[index] = safeMapGet(transferred, node[1]); break;
+        case "H": objects[index] = opfsHandle(node[1], node[2], node[3]); break;
         case "C": {
           const Constructor = node[1] ? EncodedVideoChunk : EncodedAudioChunk;
           objects[index] = new Constructor({
@@ -37472,6 +37478,10 @@ let omoikaneUserActivationState;
     globalThis.WorkerGlobalScope = Object;
     globalThis.DedicatedWorkerGlobalScope = Object;
     globalThis.FileReaderSync = FileReaderSync;
+    if (storageManagerAvailable) {
+      Object.defineProperty(globalThis, "FileSystemSyncAccessHandle", { configurable: true, writable: true, value: FileSystemSyncAccessHandle });
+      Object.defineProperty(FileSystemFileHandle.prototype, "createSyncAccessHandle", { ...opfsCreateSyncAccessHandleDescriptor, enumerable: true });
+    }
     const WorkerDOMException = DOMException;
     globalThis.importScripts = function(...urls) {
       // Both Array.prototype.map and @@iterator are writable by worker code.
@@ -38273,6 +38283,271 @@ let omoikaneUserActivationState;
     get lastModified() { return this.__lastModified; }
     get webkitRelativePath() { return ""; }
     get [Symbol.toStringTag]() { return "File"; }
+  }
+
+  const opfsConstructionToken = {};
+  const opfsState = new WeakMap();
+  function opfsError(name) {
+    if (name === "TypeError") return new TypeError("Invalid file system name");
+    return new DOMException("File system operation failed", name);
+  }
+  function opfsCall(operation, documentId, request = {}, bytes = new Uint8Array()) {
+    let result;
+    try { result = JSON.parse(String(nativeOpfs(operation, documentId, JSON.stringify(request), bytes))); }
+    catch (error) {
+      if (String(error).includes("OPFS requires")) throw new DOMException("OPFS is unavailable for this document", "SecurityError");
+      throw error;
+    }
+    if (result.error) throw opfsError(result.error);
+    return result;
+  }
+  function opfsHandleState(value, kind) {
+    const state = opfsState.get(value);
+    if (!state || (kind && state.kind !== kind)) throw new TypeError("Illegal invocation");
+    return state;
+  }
+  function opfsHandle(kind, documentId, path) {
+    return kind === "directory"
+      ? new FileSystemDirectoryHandle(opfsConstructionToken, documentId, path)
+      : new FileSystemFileHandle(opfsConstructionToken, documentId, path);
+  }
+  function opfsGetDirectory(documentId) {
+    return Promise.resolve().then(() => {
+      opfsCall("root", documentId);
+      return opfsHandle("directory", documentId, []);
+    });
+  }
+  class FileSystemHandle {
+    constructor(token, documentId, path, kind) {
+      if (token !== opfsConstructionToken) throw new TypeError("Illegal constructor");
+      opfsState.set(this, { documentId, path: path.slice(), kind });
+    }
+    get kind() { return opfsHandleState(this).kind; }
+    get name() { const path = opfsHandleState(this).path; return path.length ? path[path.length - 1] : ""; }
+    isSameEntry(other) {
+      return Promise.resolve().then(() => {
+        const left = opfsHandleState(this);
+        const right = opfsHandleState(other);
+        return left.documentId === right.documentId && left.kind === right.kind &&
+          left.path.length === right.path.length && left.path.every((part, index) => part === right.path[index]);
+      });
+    }
+    remove(options = {}) {
+      const state = opfsHandleState(this);
+      return Promise.resolve().then(() => {
+        if (!state.path.length) { for (const entry of opfsCall("list", state.documentId, {path: []}).entries) opfsCall("remove", state.documentId, {path: [], name: entry.name, recursive: true}); return; }
+        opfsCall("remove", state.documentId, { path: state.path.slice(0, -1), name: state.path.at(-1), recursive: !!Object(options).recursive });
+      });
+    }
+    get [Symbol.toStringTag]() { return "FileSystemHandle"; }
+  }
+  class FileSystemDirectoryHandle extends FileSystemHandle {
+    constructor(token, documentId, path) { super(token, documentId, path, "directory"); }
+    getDirectoryHandle(name, options = {}) {
+      const value = String(name), create = !!Object(options).create;
+      return Promise.resolve().then(() => {
+        const state = opfsHandleState(this, "directory");
+        opfsCall("handle", state.documentId, { path: state.path, name: value, directory: true, create });
+        return opfsHandle("directory", state.documentId, [...state.path, value]);
+      });
+    }
+    getFileHandle(name, options = {}) {
+      const value = String(name), create = !!Object(options).create;
+      return Promise.resolve().then(() => {
+        const state = opfsHandleState(this, "directory");
+        opfsCall("handle", state.documentId, { path: state.path, name: value, directory: false, create });
+        return opfsHandle("file", state.documentId, [...state.path, value]);
+      });
+    }
+    removeEntry(name, options = {}) {
+      const value = String(name), recursive = !!Object(options).recursive;
+      return Promise.resolve().then(() => { const state = opfsHandleState(this, "directory"); opfsCall("remove", state.documentId, { path: state.path, name: value, recursive }); });
+    }
+    resolve(possibleDescendant) {
+      return Promise.resolve().then(() => {
+        const state = opfsHandleState(this, "directory");
+        const other = opfsHandleState(possibleDescendant);
+        if (state.documentId !== other.documentId || state.path.some((part, index) => other.path[index] !== part)) return null;
+        return other.path.slice(state.path.length);
+      });
+    }
+    entries() {
+      const state = opfsHandleState(this, "directory");
+      const entries = opfsCall("list", state.documentId, { path: state.path }).entries;
+      let index = 0;
+      return { next: async () => index < entries.length ? { value: [entries[index].name, opfsHandle(entries[index].kind, state.documentId, [...state.path, entries[index++].name])], done: false } : { value: undefined, done: true }, [Symbol.asyncIterator]() { return this; } };
+    }
+    keys() { const iterator = this.entries(); return { next: async () => { const item = await iterator.next(); return item.done ? item : { value: item.value[0], done: false }; }, [Symbol.asyncIterator]() { return this; } }; }
+    values() { const iterator = this.entries(); return { next: async () => { const item = await iterator.next(); return item.done ? item : { value: item.value[1], done: false }; }, [Symbol.asyncIterator]() { return this; } }; }
+    [Symbol.asyncIterator]() { return this.entries(); }
+    get [Symbol.toStringTag]() { return "FileSystemDirectoryHandle"; }
+  }
+  class FileSystemFileHandle extends FileSystemHandle {
+    constructor(token, documentId, path) { super(token, documentId, path, "file"); }
+    getFile() {
+      return Promise.resolve().then(() => {
+        const state = opfsHandleState(this, "file");
+        const value = opfsCall("file", state.documentId, { path: state.path });
+        const file = new File([Uint8Array.from(value.bytes)], state.path.at(-1), { lastModified: value.modified });
+        Object.defineProperty(file, "__opfsSource", { value: { documentId: state.documentId, path: state.path.slice() } });
+        return file;
+      });
+    }
+    createWritable(options = {}) {
+      const keep = !!Object(options).keepExistingData;
+      return Promise.resolve().then(() => {
+        const state = opfsHandleState(this, "file");
+        const mode = String(Object(options).mode ?? "siloed");
+        const { lockId } = opfsCall("lock", state.documentId, { path: state.path, mode });
+        try {
+          const current = opfsCall("file", state.documentId, { path: state.path });
+          return new FileSystemWritableFileStream(opfsConstructionToken, state.documentId, state.path, keep ? Uint8Array.from(current.bytes) : new Uint8Array(), lockId);
+        } catch (error) { opfsCall("unlock", state.documentId, { lockId }); throw error; }
+      });
+    }
+    move(destinationOrName, optionalName = undefined) {
+      return Promise.resolve().then(() => {
+        const state = opfsHandleState(this, "file");
+        let destination, name;
+        if (typeof destinationOrName === "string") {
+          destination = state.path.slice(0, -1); name = String(destinationOrName);
+        } else {
+          destination = opfsHandleState(destinationOrName, "directory").path;
+          name = optionalName === undefined ? state.path.at(-1) : String(optionalName);
+        }
+        opfsCall("move", state.documentId, { path: state.path, destination, name });
+        state.path = [...destination, name];
+      });
+    }
+    createSyncAccessHandle() {
+      const state = opfsHandleState(this, "file");
+      if (typeof document !== "undefined") return Promise.reject(new DOMException("Sync access handles require a dedicated worker", "NotSupportedError"));
+      return Promise.resolve().then(() => new FileSystemSyncAccessHandle(opfsConstructionToken, state.documentId, state.path));
+    }
+    get [Symbol.toStringTag]() { return "FileSystemFileHandle"; }
+  }
+  class FileSystemWritableFileStream extends WritableStream {
+    constructor(token, documentId, path, initial, lockId) {
+      if (token !== opfsConstructionToken) throw new TypeError("Illegal constructor");
+      const state = { documentId, path: path.slice(), bytes: initial.slice(), position: 0, closed: false, lockId };
+      let owner;
+      super({ write: chunk => owner.__write(chunk), close: () => owner.__commit(), abort: () => owner.__abort() });
+      owner = this;
+      opfsState.set(this, state);
+    }
+    async __data(value) {
+      if (value instanceof Blob) {
+        if (value.__opfsSource) opfsCall("file", value.__opfsSource.documentId, { path: value.__opfsSource.path });
+        return value.__bytes.slice();
+      }
+      if (value instanceof ArrayBuffer) return new Uint8Array(value).slice();
+      if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+      return blobTextEncoder.encode(String(value));
+    }
+    async __write(chunk) {
+      const state = opfsState.get(this);
+      if (!state || state.closed) throw new TypeError("The stream is closed");
+      try {
+      const params = chunk !== null && typeof chunk === "object" && !(chunk instanceof Blob) && !(chunk instanceof ArrayBuffer) && !ArrayBuffer.isView(chunk);
+      const command = params ? String(chunk.type) : "write";
+      if (command === "seek") {
+        if (!("position" in chunk)) throw new DOMException("seek requires position", "SyntaxError");
+        const position = Number(chunk.position);
+        if (!Number.isSafeInteger(position) || position < 0) throw new TypeError("position must be a non-negative integer");
+        state.position = position;
+        return;
+      }
+      if (command === "truncate") {
+        if (!("size" in chunk)) throw new DOMException("truncate requires size", "SyntaxError");
+        await this.truncate(chunk.size);
+        return;
+      }
+      if (command !== "write" || (params && !("data" in chunk))) {
+        throw new DOMException("write requires data", "SyntaxError");
+      }
+      if ((params && chunk.data === null) || (!params && (chunk === undefined || chunk === null))) {
+        throw new TypeError("write requires valid data");
+      }
+      const data = await this.__data(params ? chunk.data : chunk);
+      const position = params && "position" in chunk ? Number(chunk.position) : state.position;
+      if (!Number.isSafeInteger(position) || position < 0) throw new TypeError("position must be a non-negative integer");
+      const length = Math.max(state.bytes.length, position + data.length);
+      if (length !== state.bytes.length) { const grown = new Uint8Array(length); grown.set(state.bytes); state.bytes = grown; }
+      state.bytes.set(data, position); state.position = position + data.length;
+      } catch (error) {
+        state.errored = true;
+        this.__release();
+        throw error;
+      }
+    }
+    write(data) { return Promise.resolve().then(() => this.__write(data)); }
+    seek(position) { return Promise.resolve().then(() => this.write({ type: "seek", position })); }
+    truncate(size) {
+      return Promise.resolve().then(() => {
+        const state = opfsState.get(this);
+        if (!state || state.closed) throw new TypeError("The stream is closed");
+        const length = Number(size);
+        if (!Number.isSafeInteger(length) || length < 0) throw new TypeError("size must be a non-negative integer");
+        const resized = new Uint8Array(length); resized.set(state.bytes.subarray(0, length)); state.bytes = resized; state.position = Math.min(state.position, length);
+      });
+    }
+    __commit() {
+      const state = opfsState.get(this);
+      if (!state || state.closed || state.errored) throw new TypeError("The stream is closed");
+      try { opfsCall("write", state.documentId, { path: state.path, modified: Date.now() }, state.bytes); }
+      finally { state.closed = true; this.__release(); }
+    }
+    __release() { const state = opfsState.get(this); if (state?.lockId) { opfsCall("unlock", state.documentId, { lockId: state.lockId }); state.lockId = 0; } }
+    __abort() { const state = opfsState.get(this); if (state && !state.closed) { state.closed = true; this.__release(); } }
+    close() { return Promise.resolve().then(() => this.__commit()); }
+    get [Symbol.toStringTag]() { return "FileSystemWritableFileStream"; }
+  }
+  class FileSystemSyncAccessHandle {
+    constructor(token, documentId, path) {
+      if (token !== opfsConstructionToken) throw new TypeError("Illegal constructor");
+      const { lockId } = opfsCall("lock", documentId, { path, mode: "sync" });
+      try {
+        const file = opfsCall("file", documentId, { path });
+        opfsState.set(this, { documentId, path: path.slice(), lockId, bytes: Uint8Array.from(file.bytes), closed: false, dirty: false });
+      } catch (error) { opfsCall("unlock", documentId, { lockId }); throw error; }
+    }
+    __state() { const state = opfsState.get(this); if (!state || state.closed) throw new DOMException("The handle is closed", "InvalidStateError"); return state; }
+    read(buffer, options = {}) {
+      const state = this.__state(); const target = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+      const at = Number(Object(options).at ?? 0); if (!Number.isSafeInteger(at) || at < 0) throw new TypeError("at must be non-negative");
+      const count = Math.min(target.byteLength, Math.max(0, state.bytes.length - at)); target.set(state.bytes.subarray(at, at + count)); return count;
+    }
+    write(buffer, options = {}) {
+      const state = this.__state(); const source = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+      const at = Number(Object(options).at ?? 0); if (!Number.isSafeInteger(at) || at < 0) throw new TypeError("at must be non-negative");
+      const length = Math.max(state.bytes.length, at + source.byteLength); if (length !== state.bytes.length) { const grown = new Uint8Array(length); grown.set(state.bytes); state.bytes = grown; }
+      state.bytes.set(source, at); state.dirty = true; return source.byteLength;
+    }
+    truncate(size) { const state = this.__state(); const length = Number(size); if (!Number.isSafeInteger(length) || length < 0) throw new TypeError("size must be non-negative"); const bytes = new Uint8Array(length); bytes.set(state.bytes.subarray(0, length)); state.bytes = bytes; state.dirty = true; }
+    getSize() { return this.__state().bytes.byteLength; }
+    flush() { const state = this.__state(); if (state.dirty) { opfsCall("write", state.documentId, { path: state.path, modified: Date.now() }, state.bytes); state.dirty = false; } }
+    close() { const state = this.__state(); try { this.flush(); } finally { state.closed = true; opfsCall("unlock", state.documentId, { lockId: state.lockId }); state.lockId = 0; } }
+    get [Symbol.toStringTag]() { return "FileSystemSyncAccessHandle"; }
+  }
+  const opfsCreateSyncAccessHandleDescriptor = Object.getOwnPropertyDescriptor(FileSystemFileHandle.prototype, "createSyncAccessHandle");
+  delete FileSystemFileHandle.prototype.createSyncAccessHandle;
+  for (const constructor of [FileSystemHandle, FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemWritableFileStream, FileSystemSyncAccessHandle]) {
+    Object.defineProperty(constructor, "length", { value: 0 });
+  }
+  if (storageManagerAvailable) {
+    for (const constructor of [FileSystemHandle, FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemWritableFileStream]) {
+      Object.defineProperty(globalThis, constructor.name, { configurable: true, writable: true, value: constructor });
+    }
+    for (const [target, members] of [
+      [FileSystemHandle.prototype, ["kind", "name", "isSameEntry"]],
+      [FileSystemFileHandle.prototype, ["getFile", "createWritable", "move"]],
+      [FileSystemDirectoryHandle.prototype, ["getFileHandle", "getDirectoryHandle", "removeEntry", "resolve"]],
+      [FileSystemWritableFileStream.prototype, ["write", "seek", "truncate"]],
+      [StorageManager.prototype, ["getDirectory"]],
+    ]) for (const member of members) {
+      const descriptor = Object.getOwnPropertyDescriptor(target, member);
+      if (descriptor) Object.defineProperty(target, member, { ...descriptor, enumerable: true });
+    }
   }
 
   // Read-only, index-accessible list of files. The list itself is immutable from

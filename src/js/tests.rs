@@ -16661,9 +16661,9 @@ fn navigator_storage_is_secure_context_only_and_denial_is_not_fixed_success() {
     assert_eq!(
         eval_str(
             &mut insecure,
-            "typeof StorageManager + ':' + ('storage' in navigator)"
+            "typeof StorageManager + ':' + ('storage' in navigator) + ':' + typeof FileSystemHandle"
         ),
-        "undefined:false"
+        "undefined:false:undefined"
     );
     {
         let mut state = insecure.host_state.borrow_mut();
@@ -16706,7 +16706,7 @@ fn navigator_storage_rejects_operations_for_an_opaque_secure_origin() {
         .insert(document_id, None);
     runtime
         .eval(
-            r#"globalThis.opaqueProbe = { done: false, exposed: false, rejected: false };
+            r#"globalThis.opaqueProbe = { done: false, exposed: false, rejected: false, directoryRejected: false };
                    (() => {
                      opaqueProbe.exposed = typeof StorageManager === 'function' &&
                        navigator.storage instanceof StorageManager;
@@ -16714,6 +16714,7 @@ fn navigator_storage_rejects_operations_for_an_opaque_secure_origin() {
                        () => { opaqueProbe.done = true; },
                        error => { opaqueProbe.done = true; opaqueProbe.rejected = error instanceof TypeError; }
                      );
+                     navigator.storage.getDirectory().catch(error => { opaqueProbe.directoryRejected = error.name === 'SecurityError'; });
                    })();"#,
         )
         .unwrap();
@@ -16721,9 +16722,9 @@ fn navigator_storage_rejects_operations_for_an_opaque_secure_origin() {
     assert_eq!(
         eval_str(
             &mut runtime,
-            "opaqueProbe.done + ':' + opaqueProbe.exposed + ':' + opaqueProbe.rejected"
+            "opaqueProbe.done + ':' + opaqueProbe.exposed + ':' + opaqueProbe.rejected + ':' + opaqueProbe.directoryRejected"
         ),
-        "true:true:true"
+        "true:true:true:true"
     );
 }
 
@@ -19403,6 +19404,91 @@ fn web_authn_enforces_abort_rp_policy_secure_context_and_retirement() {
         .eval("globalThis.childFrame=document.getElementById('child'); childFrame.remove()")
         .unwrap();
     assert!(!provider.cancelled_documents().is_empty());
+}
+
+#[test]
+fn opfs_handles_persist_owned_bytes_and_enforce_origin_quota() {
+    let storage = StorageManager::with_policy(32, StoragePersistencePolicy::Allow);
+    let mut runtime = JsRuntime::with_document_url_and_storage(
+        NodeHandle::document(),
+        "https://files.example.test/",
+        storage.clone(),
+        storage.create_session(),
+    )
+    .unwrap();
+    runtime
+        .eval(
+            r#"globalThis.opfsResult = 'pending';
+               (async () => {
+                 const root = await navigator.storage.getDirectory();
+                 const dir = await root.getDirectoryHandle('docs', {create:true});
+                 const handle = await dir.getFileHandle('note.txt', {create:true});
+                 const writer = await handle.createWritable();
+                 await writer.write('hello');
+                 await writer.close();
+                 const file = await handle.getFile();
+                 const entries = [];
+                 for await (const [name, value] of dir) entries.push(name + ':' + value.kind);
+                 opfsResult = [root.name, dir.kind, file.name, await file.text(), entries.join(','),
+                   (await root.resolve(handle)).join('/'), await handle.isSameEntry(await dir.getFileHandle('note.txt')),
+                   await handle.isSameEntry(structuredClone(handle))].join('|');
+               })().catch(error => { opfsResult = error.name + ':' + error.message; });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "opfsResult"),
+        "|directory|note.txt|hello|note.txt:file|docs/note.txt|true|true"
+    );
+    assert_eq!(
+        storage
+            .estimate(&StorageOrigin::from_url("https://files.example.test/").unwrap())
+            .usage,
+        17
+    );
+    runtime
+        .eval(
+            "globalThis.heldWriter = null; navigator.storage.getDirectory().then(root => root.getDirectoryHandle('docs')).then(dir => dir.getFileHandle('note.txt')).then(file => file.createWritable({ mode: 'exclusive' })).then(writer => { heldWriter = writer; });",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    let mut same_origin = JsRuntime::with_document_url_and_storage(
+        NodeHandle::document(),
+        "https://files.example.test/other",
+        storage.clone(),
+        storage.create_session(),
+    )
+    .unwrap();
+    same_origin
+        .eval(
+            "globalThis.lockResult = 'pending'; navigator.storage.getDirectory().then(root => root.getDirectoryHandle('docs')).then(dir => dir.getFileHandle('note.txt')).then(file => file.createWritable()).then(() => { lockResult = 'unlocked'; }, error => { lockResult = error.name; });",
+        )
+        .unwrap();
+    same_origin.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut same_origin, "lockResult"),
+        "NoModificationAllowedError"
+    );
+    runtime.eval("heldWriter.abort()").unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime
+        .eval(
+            r#"__omoikane_install_worker_global('https://files.example.test/worker.js', 'opfs-worker');
+               globalThis.syncResult = 'pending';
+               (async () => {
+                 const root = await navigator.storage.getDirectory();
+                 const file = await (await root.getDirectoryHandle('docs')).getFileHandle('note.txt');
+                 const access = await file.createSyncAccessHandle();
+                 const before = access.getSize();
+                 access.write(new Uint8Array([33]), {at: before});
+                 access.flush();
+                 access.close();
+                 syncResult = before + ':' + await (await file.getFile()).text();
+               })().catch(error => { syncResult = error.name + ':' + error.message; });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "syncResult"), "5:hello!");
 }
 
 #[test]
