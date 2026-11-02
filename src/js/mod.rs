@@ -180,6 +180,11 @@ mod wake_lock;
 pub use wake_lock::{DeterministicWakeLockProvider, WakeLockError, WakeLockProvider};
 mod web_share;
 pub use web_share::{DeterministicShareProvider, ShareData, ShareError, ShareFile, ShareProvider};
+mod payment_request;
+pub use payment_request::{
+    DeterministicPaymentProvider, PaymentError, PaymentMethodData, PaymentProvider,
+    PaymentRequestData, PaymentSelection,
+};
 mod web_authn;
 pub use web_authn::{
     DeterministicWebAuthnProvider, WebAuthnAssertionRequest, WebAuthnAssertionResponse,
@@ -2442,6 +2447,7 @@ struct HostState {
     screen_orientation: screen_orientation::State,
     wake_lock: wake_lock::State,
     web_share: web_share::State,
+    payment_request: payment_request::State,
     web_authn: web_authn::State,
     media_capture: media_capture::State,
     media_source: media_source::State,
@@ -3437,6 +3443,7 @@ impl HostState {
             screen_orientation: screen_orientation::State::default(),
             wake_lock: wake_lock::State::default(),
             web_share: web_share::State::default(),
+            payment_request: payment_request::State::default(),
             web_authn: web_authn::State::default(),
             media_capture: media_capture::State::default(),
             media_source: media_source::State::default(),
@@ -6382,6 +6389,7 @@ impl HostState {
         self.promise_reports.retire_document(document_id);
         self.wake_lock.release_document(document_id);
         self.web_share.retire_document(document_id);
+        self.payment_request.retire_document(document_id);
         self.storage_manager
             .opfs_release_document_locks(document_id);
         self.web_authn.retire_document(document_id);
@@ -6526,6 +6534,8 @@ impl HostState {
         self.wake_lock
             .release_document(previous.document.identity());
         self.web_share.retire_document(previous.document.identity());
+        self.payment_request
+            .retire_document(previous.document.identity());
         self.storage_manager
             .opfs_release_document_locks(previous.document.identity());
         self.web_authn.retire_document(previous.document.identity());
@@ -16697,6 +16707,7 @@ fn register_host_bindings(
     screen_orientation::register(context, &mut bindings)?;
     wake_lock::register(context, &mut bindings)?;
     web_share::register(context, &mut bindings)?;
+    payment_request::register(context, &mut bindings)?;
     web_authn::register(context, &mut bindings)?;
     media_capture::register(context, &mut bindings)?;
     media_source::register(context, &mut bindings)?;

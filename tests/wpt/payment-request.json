@@ -1,0 +1,8 @@
+{
+  "tests": [
+    { "path": "payment-request/constructor_convert_method_data.https.html", "server": "wptserve" },
+    { "path": "payment-request/payment-request-canmakepayment-method.https.html", "server": "wptserve" },
+    { "path": "payment-request/payment-request-abort-method.https.html", "server": "wptserve" },
+    { "path": "payment-request/payment-request-insecure.http.html", "server": "wptserve-http" }
+  ]
+}

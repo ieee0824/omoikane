@@ -1025,6 +1025,13 @@
       "description": "Web Share exposes secure-context methods with validation and platform capability checks",
       "probe": "typeof navigator.share === 'function' && navigator.share.length === 0 && typeof navigator.canShare === 'function' && navigator.canShare.length === 0 && navigator.canShare({text:''}) && !navigator.canShare({}) && !navigator.canShare({url:'data:no'})",
       "baseline_supported": true
+    },
+    {
+      "id": "payments.payment-request",
+      "area": "web-api",
+      "description": "Payment Request exposes secure-context stateful request, response, and update-event interfaces",
+      "probe": "(() => { const request = new PaymentRequest([{supportedMethods:'basic-card'}], {total:{label:'Total', amount:{currency:'USD', value:'1.00'}}}); const update = new PaymentRequestUpdateEvent('shippingaddresschange'); const change = new PaymentMethodChangeEvent('paymentmethodchange', {methodName:'basic-card', methodDetails:{network:'visa'}}); return request instanceof EventTarget && request.id.length > 0 && request.shippingAddress === null && request.shippingOption === null && request.shippingType === null && request.onpaymentmethodchange === null && typeof request.show === 'function' && typeof request.abort === 'function' && typeof request.canMakePayment === 'function' && update instanceof Event && update.updateWith(Promise.resolve({total:{label:'Total', amount:{currency:'USD', value:'1.00'}}})) === undefined && change.methodName === 'basic-card' && change.methodDetails.network === 'visa' && PaymentRequest.length === 2 && PaymentResponse.length === 0 && PaymentRequestUpdateEvent.length === 1 && PaymentMethodChangeEvent.length === 1; })()",
+      "baseline_supported": true
     }
   ]
 }
