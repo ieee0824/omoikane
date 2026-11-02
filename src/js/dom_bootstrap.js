@@ -174,6 +174,7 @@ let omoikaneUserActivationState;
   const nativeStorageManager = globalThis.__omoikane_storage_manager;
   const nativeOpfs = globalThis.__omoikane_opfs;
   const nativeWebShare = globalThis.__omoikane_web_share;
+  const nativeSerial = globalThis.__omoikane_serial;
   const nativePaymentRequest = globalThis.__omoikane_payment_request;
   const nativeCookieStoreAvailable = globalThis.__omoikane_cookie_store_available;
   const nativeCookieStoreQuery = globalThis.__omoikane_cookie_store_query;
@@ -27287,6 +27288,271 @@ let omoikaneUserActivationState;
       share: { configurable: true, enumerable: true, writable: true, value: share },
     });
   }
+  function installWebSerial() {
+  const serialToken = {};
+  const serialPortToken = {};
+  const serialState = new WeakSet();
+  const serialPortState = new WeakMap();
+  const serialPorts = new Map();
+  let serialInstance = null;
+  function serialNative(operation, port = "", data = {}) {
+    const result = JSON.parse(String(nativeSerial(
+      operation, __omoikane_document_id, String(port), JSON.stringify(data))));
+    if (result.error) throw new DOMException(result.message || "The serial operation failed", result.error);
+    return result;
+  }
+  function normalizeSerialInfo(info) {
+    return {
+      usbVendorId: info.usbVendorId == null ? undefined : Number(info.usbVendorId),
+      usbProductId: info.usbProductId == null ? undefined : Number(info.usbProductId),
+      bluetoothServiceClassId: info.bluetoothServiceClassId == null ? undefined : String(info.bluetoothServiceClassId),
+    };
+  }
+  function portFor(info) {
+    let port = serialPorts.get(info.id);
+    if (!port) {
+      port = new SerialPort(serialPortToken, info);
+      serialPorts.set(info.id, port);
+    } else {
+      const state = serialPortState.get(port);
+      const connected = Boolean(info.connected);
+      if (state.connected !== connected) {
+        state.connected = connected;
+        const event = new Event(connected ? "connect" : "disconnect");
+        port.dispatchEvent(event);
+        serialInstance?.dispatchEvent(new Event(event.type));
+      }
+      state.info = normalizeSerialInfo(info);
+    }
+    return port;
+  }
+  function serialOptions(value) {
+    const source = Object(value);
+    if (value == null || source.baudRate === undefined) throw new TypeError("baudRate is required");
+    const integer = (raw, name, maximum) => {
+      const number = Number(raw);
+      if (!Number.isFinite(number) || number < 0 || number > maximum || Math.trunc(number) !== number) {
+        throw new TypeError(name + " is outside its allowed range");
+      }
+      return number;
+    };
+    const baudRate = integer(source.baudRate, "baudRate", 0xffffffff);
+    const dataBits = integer(source.dataBits ?? 8, "dataBits", 255);
+    const stopBits = integer(source.stopBits ?? 1, "stopBits", 255);
+    const bufferSize = integer(source.bufferSize ?? 255, "bufferSize", 0xffffffff);
+    const parity = source.parity === undefined ? "none" : String(source.parity);
+    const flowControl = source.flowControl === undefined ? "none" : String(source.flowControl);
+    if (baudRate === 0 || ![7, 8].includes(dataBits) || ![1, 2].includes(stopBits) || bufferSize === 0 || bufferSize > 16777216) {
+      throw new TypeError("Invalid serial connection options");
+    }
+    if (!["none", "even", "odd"].includes(parity) || !["none", "hardware"].includes(flowControl)) {
+      throw new TypeError("Invalid serial connection enum value");
+    }
+    return { baudRate, dataBits, stopBits, parity, bufferSize, flowControl };
+  }
+  function serialRequestOptions(value = {}) {
+    const source = value == null ? {} : Object(value);
+    const filters = source.filters === undefined ? [] : Array.from(source.filters, raw => {
+      const filter = Object(raw);
+      const normalized = {};
+      if (filter.usbVendorId !== undefined) normalized.usbVendorId = Number(filter.usbVendorId);
+      if (filter.usbProductId !== undefined) normalized.usbProductId = Number(filter.usbProductId);
+      if (filter.bluetoothServiceClassId !== undefined) normalized.bluetoothServiceClassId = String(filter.bluetoothServiceClassId);
+      if (!Object.keys(normalized).length || (normalized.usbProductId !== undefined && normalized.usbVendorId === undefined)) {
+        throw new TypeError("Invalid serial port filter");
+      }
+      for (const key of ["usbVendorId", "usbProductId"]) {
+        if (normalized[key] !== undefined && (!Number.isInteger(normalized[key]) || normalized[key] < 0 || normalized[key] > 65535)) {
+          throw new TypeError("Invalid serial USB identifier");
+        }
+      }
+      return normalized;
+    });
+    const allowedBluetoothServiceClassIds = source.allowedBluetoothServiceClassIds === undefined
+      ? [] : Array.from(source.allowedBluetoothServiceClassIds, String);
+    return { filters, allowedBluetoothServiceClassIds };
+  }
+  class SerialPort extends EventTarget {
+    constructor(token, info) {
+      if (token !== serialPortToken) throw new TypeError("Illegal constructor");
+      super();
+      serialPortState.set(this, {
+        id: String(info.id), info: normalizeSerialInfo(info), connected: Boolean(info.connected),
+        open: false, readable: null, writable: null,
+      });
+    }
+    get connected() {
+      const state = serialPortState.get(this);
+      if (!state) throw new TypeError("Illegal SerialPort receiver");
+      return state.connected;
+    }
+    get readable() {
+      const state = serialPortState.get(this);
+      if (!state) throw new TypeError("Illegal SerialPort receiver");
+      return state.readable;
+    }
+    get writable() {
+      const state = serialPortState.get(this);
+      if (!state) throw new TypeError("Illegal SerialPort receiver");
+      return state.writable;
+    }
+    getInfo() {
+      const state = serialPortState.get(this);
+      if (!state) throw new TypeError("Illegal SerialPort receiver");
+      return {...state.info};
+    }
+    open(options) {
+      const state = serialPortState.get(this);
+      if (!state) return Promise.reject(new TypeError("Illegal SerialPort receiver"));
+      if (state.open) return Promise.reject(new DOMException("The serial port is already open", "InvalidStateError"));
+      let normalized;
+      try { normalized = serialOptions(options); serialNative("open", state.id, normalized); }
+      catch (error) { return Promise.reject(error); }
+      state.open = true;
+      state.readable = new ReadableStream({
+        type: "bytes",
+        pull(controller) {
+          const result = serialNative("read", state.id);
+          if (result.bytes !== null) controller.enqueue(Uint8Array.from(result.bytes));
+        },
+      }, {highWaterMark: 0});
+      state.writable = new WritableStream({
+        write(chunk) {
+          if (!(chunk instanceof ArrayBuffer) && !ArrayBuffer.isView(chunk)) throw new TypeError("Serial writes require a BufferSource");
+          const bytes = chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+          serialNative("write", state.id, Array.from(bytes));
+        },
+      });
+      return Promise.resolve(undefined);
+    }
+    close() {
+      const state = serialPortState.get(this);
+      if (!state) return Promise.reject(new TypeError("Illegal SerialPort receiver"));
+      if (!state.open || state.readable?.locked || state.writable?.locked) {
+        return Promise.reject(new DOMException("The serial streams must be unlocked", "InvalidStateError"));
+      }
+      try { serialNative("close", state.id); }
+      catch (error) { return Promise.reject(error); }
+      state.open = false; state.readable = null; state.writable = null;
+      return Promise.resolve(undefined);
+    }
+    getSignals() {
+      const state = serialPortState.get(this);
+      if (!state) return Promise.reject(new TypeError("Illegal SerialPort receiver"));
+      try { return Promise.resolve({...serialNative("getSignals", state.id).signals}); }
+      catch (error) { return Promise.reject(error); }
+    }
+    setSignals(value = {}) {
+      const state = serialPortState.get(this);
+      if (!state) return Promise.reject(new TypeError("Illegal SerialPort receiver"));
+      try {
+        const source = value == null ? {} : Object(value);
+        serialNative("setSignals", state.id, {
+          dataTerminalReady: Boolean(source.dataTerminalReady), requestToSend: Boolean(source.requestToSend),
+          break: Boolean(source.break),
+        });
+        return Promise.resolve(undefined);
+      } catch (error) { return Promise.reject(error); }
+    }
+    forget() {
+      const state = serialPortState.get(this);
+      if (!state) return Promise.reject(new TypeError("Illegal SerialPort receiver"));
+      try { serialNative("forget", state.id); serialPorts.delete(state.id); return Promise.resolve(undefined); }
+      catch (error) { return Promise.reject(error); }
+    }
+    get [Symbol.toStringTag]() { return "SerialPort"; }
+  }
+  for (const type of ["connect", "disconnect"]) {
+    Object.defineProperty(SerialPort.prototype, "on" + type, {
+      configurable: true, enumerable: true,
+      get() {
+        if (!serialPortState.has(this)) throw new TypeError("Illegal SerialPort receiver");
+        return this["__on" + type] || null;
+      },
+      set(value) {
+        if (!serialPortState.has(this)) throw new TypeError("Illegal SerialPort receiver");
+        const old = this["__on" + type];
+        if (old) this.removeEventListener(type, old);
+        const next = typeof value === "function" ? value : null;
+        this["__on" + type] = next;
+        if (next) this.addEventListener(type, next);
+      },
+    });
+    const descriptor = Object.getOwnPropertyDescriptor(SerialPort.prototype, "on" + type);
+    Object.defineProperty(descriptor.get, "name", {value: "get on" + type});
+    Object.defineProperty(descriptor.set, "name", {value: "set on" + type});
+  }
+  class Serial extends EventTarget {
+    constructor(token) {
+      if (token !== serialToken) throw new TypeError("Illegal constructor");
+      super();
+      serialState.add(this);
+    }
+    getPorts() {
+      if (!serialState.has(this)) return Promise.reject(new TypeError("Illegal invocation"));
+      try { return Promise.resolve(serialNative("get").ports.map(portFor)); }
+      catch (error) { return Promise.reject(error); }
+    }
+    requestPort(options) {
+      if (!serialState.has(this)) return Promise.reject(new TypeError("Illegal invocation"));
+      if (!arguments.length) return Promise.reject(new TypeError("SerialPortRequestOptions is required"));
+      if (!fullscreenTransientActivation) return Promise.reject(new DOMException("A user activation is required", "SecurityError"));
+      fullscreenTransientActivation = false; nativePointerLockActivation(false, 0);
+      try { return Promise.resolve(portFor(serialNative("request", "", serialRequestOptions(options)).port)); }
+      catch (error) { return Promise.reject(error); }
+    }
+    get [Symbol.toStringTag]() { return "Serial"; }
+  }
+  for (const type of ["connect", "disconnect"]) {
+    Object.defineProperty(Serial.prototype, "on" + type, {
+      configurable: true, enumerable: true,
+      get() {
+        if (!serialState.has(this)) throw new TypeError("Illegal Serial receiver");
+        return this["__on" + type] || null;
+      },
+      set(value) {
+        if (!serialState.has(this)) throw new TypeError("Illegal Serial receiver");
+        const old = this["__on" + type];
+        if (old) this.removeEventListener(type, old);
+        const next = typeof value === "function" ? value : null;
+        this["__on" + type] = next;
+        if (next) this.addEventListener(type, next);
+      },
+    });
+    const descriptor = Object.getOwnPropertyDescriptor(Serial.prototype, "on" + type);
+    Object.defineProperty(descriptor.get, "name", {value: "get on" + type});
+    Object.defineProperty(descriptor.set, "name", {value: "set on" + type});
+  }
+  if (nativeIsSecureContext()) {
+    const serial = new Serial(serialToken);
+    serialInstance = serial;
+    Object.defineProperty(Navigator.prototype, "serial", {
+      configurable: true, enumerable: true,
+      get() {
+        if (this !== navigator) throw new TypeError("Illegal Navigator receiver");
+        return serial;
+      },
+    });
+    const serialDescriptor = Object.getOwnPropertyDescriptor(Navigator.prototype, "serial");
+    Object.defineProperty(serialDescriptor.get, "name", {value: "get serial"});
+    Object.defineProperties(globalThis, {
+      Serial: {configurable:true, writable:true, value:Serial},
+      SerialPort: {configurable:true, writable:true, value:SerialPort},
+    });
+  }
+  Object.defineProperty(Serial, "length", {value: 0});
+  Object.defineProperty(SerialPort, "length", {value: 0});
+  Object.defineProperty(Serial.prototype.requestPort, "length", {value: 0});
+  for (const [prototype, members] of [
+    [Serial.prototype, ["getPorts", "requestPort"]],
+    [SerialPort.prototype, ["connected", "readable", "writable", "getInfo", "open", "setSignals", "getSignals", "close", "forget"]],
+  ]) {
+    for (const member of members) {
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, member);
+      Object.defineProperty(prototype, member, {...descriptor, enumerable: true});
+    }
+  }
+  }
   Object.defineProperty(Navigator.prototype, "getGamepads", {
     ...Object.getOwnPropertyDescriptor(Navigator.prototype, "getGamepads"),
     enumerable: true,
@@ -34866,6 +35132,7 @@ let omoikaneUserActivationState;
     if (visualScroll) visualViewport.dispatchEvent(new Event("scroll"));
   };
   globalThis.EventTarget = EventTarget;
+  installWebSerial();
   Object.setPrototypeOf(MediaEventTarget.prototype, EventTarget.prototype);
   Object.setPrototypeOf(MediaEventTarget, EventTarget);
   Object.setPrototypeOf(MediaStreamTrackEvent.prototype, Event.prototype);
@@ -38015,6 +38282,7 @@ let omoikaneUserActivationState;
     try { if (globalThis.navigator) delete globalThis.navigator.geolocation; } catch (_) {}
     try { delete Navigator.prototype.share; } catch (_) {}
     try { delete Navigator.prototype.canShare; } catch (_) {}
+    try { if (globalThis.Serial) delete globalThis.Serial.prototype.requestPort; } catch (_) {}
     try { if (globalThis.StorageManager) delete globalThis.StorageManager.prototype.persist; } catch (_) {}
     try { delete globalThis.Clipboard; } catch (_) { globalThis.Clipboard = undefined; }
     try { delete globalThis.__omoikane_dispatch_notification_click; } catch (_) {}

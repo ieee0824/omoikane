@@ -67,6 +67,8 @@ collect_pattern "/mediasession/"
 collect_pattern "/speech-api/"
 # WebCodecs data containers and provider-independent API contracts (#1616).
 collect_pattern "/webcodecs/"
+# Web Serial IDL and provider-independent API contracts (#1469).
+collect_pattern "/serial/" "/interfaces/serial.idl"
 # OfflineAudioContext and AudioWorklet graph/runtime contracts (#1617).
 collect_pattern "/webaudio/"
 collect_pattern "/common/performance-timeline-utils.js" "/common/performance-timeline-utils.js.headers"
