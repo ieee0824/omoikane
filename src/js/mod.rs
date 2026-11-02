@@ -190,6 +190,11 @@ pub use protocol_handler::{
     DeterministicProtocolHandlerProvider, ProtocolHandler, ProtocolHandlerDisposition,
     ProtocolHandlerError, ProtocolHandlerOperation, ProtocolHandlerProvider,
 };
+mod push_api;
+pub use push_api::{
+    DeterministicPushProvider, PushError, PushOwner, PushProvider, PushSubscriptionData,
+    PushSubscriptionOptionsData,
+};
 mod payment_request;
 pub use payment_request::{
     DeterministicPaymentProvider, PaymentError, PaymentMethodData, PaymentProvider,
@@ -2459,6 +2464,7 @@ struct HostState {
     web_share: web_share::State,
     badging: badging::State,
     protocol_handler: protocol_handler::State,
+    push_api: push_api::State,
     payment_request: payment_request::State,
     web_authn: web_authn::State,
     media_capture: media_capture::State,
@@ -3457,6 +3463,7 @@ impl HostState {
             web_share: web_share::State::default(),
             badging: badging::State::default(),
             protocol_handler: protocol_handler::State::default(),
+            push_api: push_api::State::default(),
             payment_request: payment_request::State::default(),
             web_authn: web_authn::State::default(),
             media_capture: media_capture::State::default(),
@@ -16723,6 +16730,7 @@ fn register_host_bindings(
     web_share::register(context, &mut bindings)?;
     badging::register(context, &mut bindings)?;
     protocol_handler::register(context, &mut bindings)?;
+    push_api::register(context, &mut bindings)?;
     payment_request::register(context, &mut bindings)?;
     web_authn::register(context, &mut bindings)?;
     media_capture::register(context, &mut bindings)?;
@@ -25728,6 +25736,8 @@ fn initialize_dedicated_worker(
         let owner = owner_state.borrow();
         let mut state = worker_runtime.host_state.borrow_mut();
         state.badging.provider = Arc::clone(&owner.badging.provider);
+        state.push_api.provider = Arc::clone(&owner.push_api.provider);
+        state.notification_permission = owner.notification_permission.clone();
         state.inherit_worker_cookie_session(&owner, creator.document_id);
         state.inherit_resource_loading(&owner);
         let document_id = state.document.identity();

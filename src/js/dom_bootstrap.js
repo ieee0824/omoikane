@@ -25304,6 +25304,7 @@ let omoikaneUserActivationState;
       const container = registration._container;
       if (container._records.get(registration.scope) !== registration._record) return false;
       container._records.delete(registration.scope);
+      try { pushResult("retire", registration.scope); } catch (_) {}
       clearServiceWorkerCookieSubscriptions(registration);
       for (const worker of new Set([registration.installing, registration.waiting, registration.active])) {
         // The calling worker must remain live long enough to settle its own
@@ -25317,6 +25318,133 @@ let omoikaneUserActivationState;
       return true;
     });
   }
+
+  const pushManagerToken = {};
+  const pushSubscriptionToken = {};
+  const pushManagerState = new WeakMap();
+  const pushSubscriptionState = new WeakMap();
+  const pushRegistrationManagers = new WeakMap();
+  let windowPushManager = null;
+  const pushBytes = value => Uint8Array.from(value || []).buffer;
+  function pushOptions(value = undefined) {
+    const source = value === undefined ? {} : Object(value);
+    const userVisibleOnly = Boolean(source.userVisibleOnly);
+    const raw = source.applicationServerKey;
+    let applicationServerKey = null;
+    if (raw !== undefined && raw !== null) {
+      let bytes;
+      if (typeof raw === "string") {
+        try { bytes = Uint8Array.from(cryptoBase64UrlToBytes(raw)); }
+        catch (_) { throw new DOMException("The applicationServerKey is not valid base64url", "InvalidCharacterError"); }
+      } else if (raw instanceof ArrayBuffer) {
+        bytes = new Uint8Array(raw.slice(0));
+      } else if (ArrayBuffer.isView(raw)) {
+        bytes = new Uint8Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
+      } else {
+        throw new TypeError("applicationServerKey must be a BufferSource or DOMString");
+      }
+      if (bytes.byteLength !== 65 || bytes[0] !== 4) {
+        throw new DOMException("The applicationServerKey is not a valid P-256 public key", "InvalidAccessError");
+      }
+      applicationServerKey = Array.from(bytes);
+    }
+    return { userVisibleOnly, applicationServerKey };
+  }
+  function pushResult(operation, scope, data = {}) {
+    return JSON.parse(String(__omoikane_push(
+      operation, __omoikane_document_id, scope, JSON.stringify(data))));
+  }
+  function pushFailure(result) {
+    if (result.error) throw new DOMException(result.message || "The push operation failed", result.error);
+    return result;
+  }
+  class PushSubscriptionOptions {
+    constructor(token, data) {
+      if (token !== pushSubscriptionToken) throw new TypeError("Illegal constructor");
+      this._userVisibleOnly = Boolean(data.userVisibleOnly);
+      this._applicationServerKey = data.applicationServerKey === null ? null : pushBytes(data.applicationServerKey);
+    }
+    get userVisibleOnly() { return this._userVisibleOnly; }
+    get applicationServerKey() { return this._applicationServerKey; }
+    get [Symbol.toStringTag]() { return "PushSubscriptionOptions"; }
+  }
+  class PushSubscription {
+    constructor(token, data, scope) {
+      if (token !== pushSubscriptionToken) throw new TypeError("Illegal constructor");
+      const options = new PushSubscriptionOptions(token, data.options);
+      pushSubscriptionState.set(this, {
+        endpoint: String(data.endpoint),
+        expirationTime: data.expirationTime === null ? null : Number(data.expirationTime),
+        options,
+        p256dh: pushBytes(data.p256dh),
+        auth: pushBytes(data.auth),
+        scope: String(scope),
+      });
+    }
+    get endpoint() { return pushSubscriptionState.get(this)?.endpoint; }
+    get expirationTime() { return pushSubscriptionState.get(this)?.expirationTime; }
+    get options() { return pushSubscriptionState.get(this)?.options; }
+    getKey(name) {
+      const state = pushSubscriptionState.get(this);
+      if (!state) throw new TypeError("Illegal PushSubscription receiver");
+      const key = String(name);
+      if (key !== "p256dh" && key !== "auth") throw new TypeError("Invalid PushEncryptionKeyName");
+      const value = state[key];
+      return value === null ? null : value.slice(0);
+    }
+    unsubscribe() {
+      const state = pushSubscriptionState.get(this);
+      if (!state) return Promise.reject(new TypeError("Illegal PushSubscription receiver"));
+      return Promise.resolve().then(() => pushFailure(pushResult(
+        "unsubscribe", state.scope, {endpoint: state.endpoint})).removed);
+    }
+    toJSON() {
+      const state = pushSubscriptionState.get(this);
+      if (!state) throw new TypeError("Illegal PushSubscription receiver");
+      return {
+        endpoint: state.endpoint,
+        expirationTime: state.expirationTime,
+        keys: {
+          p256dh: cryptoBytesToBase64Url(Array.from(new Uint8Array(state.p256dh))),
+          auth: cryptoBytesToBase64Url(Array.from(new Uint8Array(state.auth))),
+        },
+      };
+    }
+    get [Symbol.toStringTag]() { return "PushSubscription"; }
+  }
+  const makePushSubscription = (data, scope) => data === null ? null : new PushSubscription(pushSubscriptionToken, data, scope);
+  class PushManager {
+    constructor(token, scope) {
+      if (token !== pushManagerToken) throw new TypeError("Illegal constructor");
+      pushManagerState.set(this, String(scope));
+    }
+    subscribe(options = undefined) {
+      const scope = pushManagerState.get(this);
+      if (scope === undefined) return Promise.reject(new TypeError("Illegal PushManager receiver"));
+      let normalized;
+      try { normalized = pushOptions(options); }
+      catch (error) { return Promise.reject(error); }
+      return Promise.resolve().then(() => makePushSubscription(
+        pushFailure(pushResult("subscribe", scope, normalized)), scope));
+    }
+    getSubscription() {
+      const scope = pushManagerState.get(this);
+      if (scope === undefined) return Promise.reject(new TypeError("Illegal PushManager receiver"));
+      return Promise.resolve().then(() => makePushSubscription(
+        pushFailure(pushResult("get", scope)).subscription ?? null, scope));
+    }
+    permissionState(options = undefined) {
+      const scope = pushManagerState.get(this);
+      if (scope === undefined) return Promise.reject(new TypeError("Illegal PushManager receiver"));
+      let normalized;
+      try { normalized = pushOptions(options); }
+      catch (error) { return Promise.reject(error); }
+      return Promise.resolve().then(() => pushFailure(pushResult("permission", scope, normalized)).permission);
+    }
+    static get supportedContentEncodings() { return pushSupportedContentEncodings; }
+    get [Symbol.toStringTag]() { return "PushManager"; }
+  }
+  const pushSupportedContentEncodings = Object.freeze(["aes128gcm"]);
 
   class ServiceWorkerRegistration extends ServiceWorkerEventTarget {
     constructor(record, container, token) {
@@ -25528,6 +25656,31 @@ let omoikaneUserActivationState;
   globalThis.ServiceWorker = ServiceWorker;
   globalThis.ServiceWorkerRegistration = ServiceWorkerRegistration;
   globalThis.ServiceWorkerContainer = ServiceWorkerContainer;
+  if (nativeIsSecureContext()) {
+    globalThis.PushManager = PushManager;
+    globalThis.PushSubscription = PushSubscription;
+    globalThis.PushSubscriptionOptions = PushSubscriptionOptions;
+    Object.defineProperty(ServiceWorkerRegistration.prototype, "pushManager", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        let manager = pushRegistrationManagers.get(this);
+        if (!manager) {
+          manager = new PushManager(pushManagerToken, this.scope);
+          pushRegistrationManagers.set(this, manager);
+        }
+        return manager;
+      },
+    });
+    Object.defineProperty(Window.prototype, "pushManager", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        if (!windowPushManager) windowPushManager = new PushManager(pushManagerToken, "");
+        return windowPushManager;
+      },
+    });
+  }
 
   // -------------------------------------------------------------------------
   // WebGPU deterministic adapter/device/queue core.
@@ -33172,7 +33325,7 @@ let omoikaneUserActivationState;
   const observedPermissionStatuses = new Set();
   let permissionLifecycleActive = true;
   const supportedPermissionNames = Object.freeze([
-    "notifications", "geolocation", "clipboard-read", "clipboard-write", "persistent-storage",
+    "notifications", "push", "geolocation", "clipboard-read", "clipboard-write", "persistent-storage",
     "accelerometer", "gyroscope", "magnetometer", "storage-access", "camera", "microphone",
     "screen-wake-lock",
   ]);
@@ -33207,7 +33360,7 @@ let omoikaneUserActivationState;
         return "denied";
       }
     }
-    if (name === "notifications") {
+    if (name === "notifications" || name === "push") {
       const permission = currentNotificationPermission();
       return permission === "default" ? "prompt" : permission;
     }
@@ -38027,8 +38180,85 @@ let omoikaneUserActivationState;
       get [Symbol.toStringTag]() { return "ExtendableCookieChangeEvent"; }
     }
     globalThis.ExtendableCookieChangeEvent = ExtendableCookieChangeEvent;
+    const pushMessageDataState = new WeakMap();
+    const pushEventState = new WeakMap();
+    const pushChangeState = new WeakMap();
+    const pushMessageBytes = value => {
+      if (typeof value === "string") return new TextEncoder().encode(value);
+      if (value instanceof ArrayBuffer) return new Uint8Array(value.slice(0));
+      if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+      throw new TypeError("Push message data must be a BufferSource or USVString");
+    };
+    class PushMessageData {
+      constructor(token, value) {
+        if (token !== pushSubscriptionToken) throw new TypeError("Illegal constructor");
+        pushMessageDataState.set(this, pushMessageBytes(value));
+      }
+      arrayBuffer() { return pushMessageDataState.get(this).slice().buffer; }
+      blob() { return new Blob([this.arrayBuffer()]); }
+      bytes() { return pushMessageDataState.get(this).slice(); }
+      json() { return JSON.parse(this.text()); }
+      text() { return new TextDecoder().decode(pushMessageDataState.get(this)); }
+      get [Symbol.toStringTag]() { return "PushMessageData"; }
+    }
+    class PushEvent extends ExtendableEvent {
+      constructor(type, init = {}) {
+        if (arguments.length === 0) throw new TypeError("PushEvent requires a type");
+        super(type, init);
+        const source = Object(init);
+        pushEventState.set(this, {
+          data: source.data === undefined || source.data === null ? null : new PushMessageData(pushSubscriptionToken, source.data),
+          notification: source.notification ?? null,
+        });
+      }
+      get data() { return pushEventState.get(this)?.data; }
+      get notification() { return pushEventState.get(this)?.notification; }
+      get [Symbol.toStringTag]() { return "PushEvent"; }
+    }
+    class PushSubscriptionChangeEvent extends ExtendableEvent {
+      constructor(type, init = {}) {
+        if (arguments.length === 0) throw new TypeError("PushSubscriptionChangeEvent requires a type");
+        super(type, init);
+        const source = Object(init);
+        pushChangeState.set(this, {
+          newSubscription: source.newSubscription ?? null,
+          oldSubscription: source.oldSubscription ?? null,
+        });
+      }
+      get newSubscription() { return pushChangeState.get(this)?.newSubscription; }
+      get oldSubscription() { return pushChangeState.get(this)?.oldSubscription; }
+      get [Symbol.toStringTag]() { return "PushSubscriptionChangeEvent"; }
+    }
+    globalThis.PushMessageData = PushMessageData;
+    globalThis.PushEvent = PushEvent;
+    globalThis.PushSubscriptionChangeEvent = PushSubscriptionChangeEvent;
     __omoikane_service_worker_lifecycle.cookiechange = function(data) {
       const event = new ExtendableCookieChangeEvent("cookiechange", data);
+      const state = states.get(event);
+      state.trusted = state.dispatching = true;
+      event.isTrusted = true;
+      try { globalThis.dispatchEvent(event); }
+      finally {
+        state.dispatching = false;
+        complete(event);
+      }
+    };
+    __omoikane_service_worker_lifecycle.push = function(data) {
+      const event = new PushEvent("push", {data: data === null ? null : Uint8Array.from(data)});
+      const state = states.get(event);
+      state.trusted = state.dispatching = true;
+      event.isTrusted = true;
+      try { globalThis.dispatchEvent(event); }
+      finally {
+        state.dispatching = false;
+        complete(event);
+      }
+    };
+    __omoikane_service_worker_lifecycle.pushsubscriptionchange = function(data) {
+      const event = new PushSubscriptionChangeEvent("pushsubscriptionchange", {
+        newSubscription: makePushSubscription(data.newSubscription ?? null, registration.scope),
+        oldSubscription: makePushSubscription(data.oldSubscription ?? null, registration.scope),
+      });
       const state = states.get(event);
       state.trusted = state.dispatching = true;
       event.isTrusted = true;
@@ -38059,7 +38289,7 @@ let omoikaneUserActivationState;
       states.get(event).dispatching = false;
       complete(event);
     };
-    for (const type of ["install", "activate", "cookiechange"]) {
+    for (const type of ["install", "activate", "cookiechange", "push", "pushsubscriptionchange"]) {
       let handler = null;
       Object.defineProperty(globalThis, "on" + type, {
         configurable: true,

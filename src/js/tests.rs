@@ -1067,6 +1067,163 @@ fn service_worker_register_rejects_insecure_and_opaque_origins() {
 }
 
 #[test]
+fn push_subscription_owns_options_keys_state_and_unsubscribe() {
+    let fixture = super::service_worker_tests::ServiceWorkerFixture::new();
+    let provider = Arc::new(DeterministicPushProvider::default());
+    provider.set_supported(true);
+    provider.set_permission("granted");
+    let mut runtime = JsRuntime::with_document_and_url(
+        default_document(),
+        &format!("{}/app/index.html", fixture.origin),
+    )
+    .unwrap();
+    runtime.set_push_provider(provider.clone());
+    runtime.set_notification_permission("granted").unwrap();
+    runtime
+        .eval(
+            r#"globalThis.pushProbe = 'pending';
+               navigator.serviceWorker.register('/app/push.js', {scope:'/app/'}).then(async registration => {
+                 const key = new Uint8Array(65); key[0] = 4; key.fill(7, 1);
+                 const subscription = await registration.pushManager.subscribe({
+                   userVisibleOnly: true, applicationServerKey: key,
+                 });
+                 const current = await registration.pushManager.getSubscription();
+                 pushProbe = JSON.stringify({
+                   sameEndpoint: current.endpoint === subscription.endpoint,
+                   endpoint: subscription.endpoint,
+                   permission: await registration.pushManager.permissionState({userVisibleOnly:true, applicationServerKey:key}),
+                   optionKey: new Uint8Array(subscription.options.applicationServerKey).length,
+                   p256dh: subscription.getKey('p256dh').byteLength,
+                   auth: subscription.getKey('auth').byteLength,
+                   json: subscription.toJSON(),
+                   removed: await subscription.unsubscribe(),
+                   missing: await registration.pushManager.getSubscription(),
+                 });
+               }).catch(error => pushProbe = error.name + ':' + error.message);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    let value: serde_json::Value = serde_json::from_str(&eval_str(&mut runtime, "pushProbe"))
+        .expect("subscription probe returns JSON");
+    assert_eq!(value["sameEndpoint"], true);
+    assert_eq!(value["permission"], "granted");
+    assert_eq!(value["optionKey"], 65);
+    assert_eq!(value["p256dh"], 65);
+    assert_eq!(value["auth"], 16);
+    assert_eq!(value["removed"], true);
+    assert!(value["missing"].is_null());
+    assert!(value["endpoint"].as_str().unwrap().starts_with("https://"));
+    assert!(provider.subscriptions().is_empty());
+    provider.set_permission("provider-bug");
+    runtime
+        .eval(
+            r#"pushProbe = 'pending';
+               navigator.serviceWorker.ready.then(registration =>
+                 registration.pushManager.permissionState().then(
+                   () => pushProbe = 'resolved', error => pushProbe = error.name));"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "pushProbe"), "OperationError");
+    drop(runtime);
+    assert_eq!(fixture.finish(), vec!["/app/push.js".to_owned()]);
+}
+
+#[test]
+fn push_delivery_reaches_trusted_service_worker_events_and_validates_boundaries() {
+    let mut insecure =
+        JsRuntime::with_document_and_url(default_document(), "http://push-insecure.example.test/")
+            .unwrap();
+    assert_eq!(
+        eval_str(
+            &mut insecure,
+            "typeof PushManager + ':' + ('pushManager' in globalThis)"
+        ),
+        "undefined:false"
+    );
+
+    let fixture = super::service_worker_tests::ServiceWorkerFixture::new();
+    let provider = Arc::new(DeterministicPushProvider::default());
+    provider.set_supported(true);
+    provider.set_permission("granted");
+    let mut runtime = JsRuntime::with_document_and_url(
+        default_document(),
+        &format!("{}/app/index.html", fixture.origin),
+    )
+    .unwrap();
+    runtime.set_push_provider(provider.clone());
+    runtime.set_notification_permission("granted").unwrap();
+    runtime
+        .eval(
+            r#"globalThis.pushReady = false;
+               globalThis.pushErrors = [];
+               navigator.serviceWorker.register('/app/push.js', {scope:'/app/'}).then(async registration => {
+                 for (const key of ['', new Uint8Array(), new Uint8Array([1,2,3])]) {
+                   try { await registration.pushManager.subscribe({applicationServerKey:key}); }
+                   catch (error) { pushErrors.push(error.name); }
+                 }
+                 pushReady = registration.pushManager === registration.pushManager &&
+                   Object.isFrozen(PushManager.supportedContentEncodings) &&
+                   PushManager.supportedContentEncodings.includes('aes128gcm');
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "String(pushReady)"), "true");
+    assert_eq!(
+        eval_str(&mut runtime, "pushErrors.join(',')"),
+        "InvalidAccessError,InvalidAccessError,InvalidAccessError"
+    );
+    let scope = format!("{}/app/", fixture.origin);
+    assert!(
+        runtime
+            .deliver_push_message(&scope, Some("hello".as_bytes()))
+            .unwrap()
+    );
+    let subscription = PushSubscriptionData {
+        endpoint: "https://push.invalid/replacement".into(),
+        expiration_time: None,
+        options: PushSubscriptionOptionsData {
+            user_visible_only: true,
+            application_server_key: None,
+        },
+        p256dh: vec![4; 65],
+        auth: vec![8; 16],
+    };
+    assert!(
+        runtime
+            .deliver_push_subscription_change(&scope, Some(&subscription), None)
+            .unwrap()
+    );
+    let worker = runtime
+        .host_state
+        .borrow()
+        .workers
+        .values()
+        .find(|entry| {
+            entry
+                .borrow()
+                .runtime
+                .host_state
+                .borrow()
+                .worker_service_worker_scope
+                .as_deref()
+                == Some(scope.as_str())
+        })
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        eval_str(
+            &mut worker.borrow_mut().runtime,
+            "JSON.stringify(pushProbe)"
+        ),
+        r#"[{"trusted":true,"brand":"[object PushEvent]","text":"hello","bytes":[104,101,108,108,111]},{"change":true,"old":null,"next":"https://push.invalid/replacement"}]"#
+    );
+    drop(runtime);
+    assert_eq!(fixture.finish(), vec!["/app/push.js".to_owned()]);
+}
+
+#[test]
 fn webrtc_offer_answer_and_data_channel_are_deterministic() {
     let mut runtime = JsRuntime::new().unwrap();
     runtime

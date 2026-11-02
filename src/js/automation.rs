@@ -200,6 +200,23 @@ fn register_driver(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsRe
 fn set_permission(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let document = active_document(context)?;
     let name = string_argument(args.first(), "", context)?;
+    if matches!(name.as_str(), "notifications" | "push") {
+        let permission = match string_argument(args.get(1), "", context)?.as_str() {
+            "prompt" => "default",
+            "granted" => "granted",
+            "denied" => "denied",
+            _ => {
+                return Err(JsNativeError::typ()
+                    .with_message("Invalid permission state")
+                    .into());
+            }
+        };
+        with_host_state(|host| {
+            host.borrow_mut().notification_permission = permission.to_owned();
+            Ok(())
+        })?;
+        return Ok(JsValue::undefined());
+    }
     if name == "screen-wake-lock" {
         let granted = match string_argument(args.get(1), "", context)?.as_str() {
             "granted" => true,

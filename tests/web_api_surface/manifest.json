@@ -1041,6 +1041,13 @@
       "baseline_supported": true
     },
     {
+      "id": "service-worker.push-api",
+      "area": "workers",
+      "description": "Push API exposes registration- and window-owned managers with subscription semantics",
+      "probe": "typeof PushManager === 'function' && typeof PushSubscription === 'function' && typeof PushSubscriptionOptions === 'function' && typeof pushManager === 'object' && pushManager instanceof PushManager && PushManager.supportedContentEncodings.includes('aes128gcm') && Object.isFrozen(PushManager.supportedContentEncodings)",
+      "baseline_supported": true
+    },
+    {
       "id": "payments.payment-request",
       "area": "web-api",
       "description": "Payment Request exposes secure-context stateful request, response, and update-event interfaces",
