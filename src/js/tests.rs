@@ -19979,6 +19979,160 @@ fn web_share_enforces_secure_context_policy_provider_errors_and_retirement() {
 }
 
 #[test]
+fn web_serial_filters_opens_streams_controls_signals_and_forgets_permission() {
+    let provider = Arc::new(DeterministicSerialProvider::default());
+    provider.add_port(SerialPortInfo {
+        id: "usb-1".into(),
+        usb_vendor_id: Some(0x1234),
+        usb_product_id: Some(0x5678),
+        bluetooth_service_class_id: None,
+        connected: true,
+    });
+    provider.enqueue_read("usb-1", vec![1, 2, 3]);
+    let mut runtime =
+        JsRuntime::with_document_and_url(default_document(), "https://serial.example.test/page")
+            .unwrap();
+    runtime.set_serial_provider(provider.clone());
+    runtime
+        .eval(
+            r#"document.body.innerHTML = '<button id=choose>choose</button>';
+               const choose = document.getElementById('choose');
+               __omoikane_dispatch_mouse_input(choose.__id, 'mousedown', {}, true);
+               globalThis.serialResult = 'pending';
+               (async () => {
+                 const port = await navigator.serial.requestPort({filters:[{usbVendorId:0x1234, usbProductId:0x5678}]});
+                 const info = port.getInfo();
+                 await port.open({baudRate:115200});
+                 const reader = port.readable.getReader();
+                 const read = await reader.read();
+                 reader.releaseLock();
+                 const writer = port.writable.getWriter();
+                 await writer.write(Uint8Array.of(9, 8));
+                 writer.releaseLock();
+                 await port.setSignals({dataTerminalReady:true, requestToSend:true});
+                 const signals = await port.getSignals();
+                 await port.close();
+                 await port.forget();
+                 const remaining = await navigator.serial.getPorts();
+                 serialResult = [info.usbVendorId, info.usbProductId, Array.from(read.value),
+                   signals.clearToSend, remaining.length, port.readable, port.writable].join(':');
+               })().catch(error => serialResult = error.name + ':' + error.message);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "serialResult"),
+        "4660:22136:1,2,3:false:0::"
+    );
+    assert_eq!(provider.writes("usb-1"), vec![vec![9, 8]]);
+}
+
+#[test]
+fn web_serial_enforces_context_activation_validation_and_disconnect_events() {
+    let mut insecure =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "http://example.test/").unwrap();
+    assert_eq!(
+        eval_str(
+            &mut insecure,
+            "typeof navigator.serial + ':' + typeof Serial"
+        ),
+        "undefined:undefined"
+    );
+
+    let provider = Arc::new(DeterministicSerialProvider::default());
+    provider.add_port(SerialPortInfo {
+        id: "usb-2".into(),
+        usb_vendor_id: Some(7),
+        usb_product_id: None,
+        bluetooth_service_class_id: None,
+        connected: true,
+    });
+    let mut runtime =
+        JsRuntime::with_document_and_url(default_document(), "https://serial.example.test/")
+            .unwrap();
+    runtime.set_serial_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.noActivation = 'pending';
+               navigator.serial.requestPort({}).catch(error => noActivation = error.name);
+               globalThis.invalidFilter = 'pending';
+               document.body.innerHTML = '<button id=choose>choose</button>';
+               const choose = document.getElementById('choose');
+               __omoikane_dispatch_mouse_input(choose.__id, 'mousedown', {}, true);
+               navigator.serial.requestPort({filters:[{usbProductId:1}]}).catch(error => invalidFilter = error.name);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "noActivation"), "SecurityError");
+    assert_eq!(eval_str(&mut runtime, "invalidFilter"), "TypeError");
+
+    runtime
+        .eval(
+            r#"__omoikane_dispatch_mouse_input(choose.__id, 'mousedown', {}, true);
+               globalThis.disconnects = 0;
+               globalThis.serialDisconnects = 0;
+               navigator.serial.requestPort({filters:[{usbVendorId:7}]}).then(port => {
+                 globalThis.selectedSerialPort = port;
+                 port.ondisconnect = () => disconnects++;
+                 navigator.serial.ondisconnect = () => serialDisconnects++;
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    provider.set_connected("usb-2", false);
+    runtime.eval("navigator.serial.getPorts()").unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "selectedSerialPort.connected + ':' + disconnects + ':' + serialDisconnects"
+        ),
+        "false:1:1"
+    );
+}
+
+#[test]
+fn web_serial_retires_open_provider_sessions_with_the_document() {
+    let provider = Arc::new(DeterministicSerialProvider::default());
+    provider.add_port(SerialPortInfo {
+        id: "retired-port".into(),
+        usb_vendor_id: Some(9),
+        usb_product_id: None,
+        bluetooth_service_class_id: None,
+        connected: true,
+    });
+    let origin = "https://retire.serial.test";
+    provider.request_port(origin, &[], &[]).unwrap();
+    provider
+        .open(
+            origin,
+            "retired-port",
+            &SerialOptions {
+                baud_rate: 9600,
+                data_bits: 8,
+                stop_bits: 1,
+                parity: "none".into(),
+                buffer_size: 255,
+                flow_control: "none".into(),
+            },
+        )
+        .unwrap();
+    let mut runtime =
+        JsRuntime::with_document_and_url(default_document(), "https://retire.serial.test/page")
+            .unwrap();
+    runtime.set_serial_provider(provider.clone());
+    let document_id = runtime.document().identity();
+    runtime
+        .host_state
+        .borrow()
+        .retire_web_serial_document(document_id);
+    assert_eq!(
+        provider.read(origin, "retired-port").unwrap_err().name,
+        "InvalidStateError"
+    );
+}
+
+#[test]
 fn payment_request_validates_and_passes_owned_data_to_provider() {
     let provider = Arc::new(DeterministicPaymentProvider::default());
     provider.set_supported(true);

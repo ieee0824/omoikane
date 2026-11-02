@@ -1027,6 +1027,13 @@
       "baseline_supported": true
     },
     {
+      "id": "navigator.web-serial",
+      "area": "web-api",
+      "description": "Web Serial exposes secure-context enumeration, chooser, stream, signal, and lifecycle interfaces",
+      "probe": "typeof navigator.serial === 'object' && navigator.serial === navigator.serial && navigator.serial instanceof Serial && typeof navigator.serial.getPorts === 'function' && typeof navigator.serial.requestPort === 'function' && typeof SerialPort === 'function' && Serial.prototype instanceof EventTarget && SerialPort.prototype instanceof EventTarget && 'connected' in SerialPort.prototype && 'readable' in SerialPort.prototype && 'writable' in SerialPort.prototype && typeof SerialPort.prototype.open === 'function' && typeof SerialPort.prototype.close === 'function' && typeof SerialPort.prototype.getInfo === 'function' && typeof SerialPort.prototype.getSignals === 'function' && typeof SerialPort.prototype.setSignals === 'function' && typeof SerialPort.prototype.forget === 'function'",
+      "baseline_supported": true
+    },
+    {
       "id": "navigator.badging",
       "area": "web-api",
       "description": "Badging exposes secure-context NavigatorBadge methods with WebIDL argument conversion",

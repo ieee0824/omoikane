@@ -195,6 +195,11 @@ pub use push_api::{
     DeterministicPushProvider, PushError, PushOwner, PushProvider, PushSubscriptionData,
     PushSubscriptionOptionsData,
 };
+mod web_serial;
+pub use web_serial::{
+    DeterministicSerialProvider, SerialError, SerialInputSignals, SerialOptions,
+    SerialOutputSignals, SerialPortFilter, SerialPortInfo, SerialProvider,
+};
 mod payment_request;
 pub use payment_request::{
     DeterministicPaymentProvider, PaymentError, PaymentMethodData, PaymentProvider,
@@ -2465,6 +2470,7 @@ struct HostState {
     badging: badging::State,
     protocol_handler: protocol_handler::State,
     push_api: push_api::State,
+    web_serial: web_serial::State,
     payment_request: payment_request::State,
     web_authn: web_authn::State,
     media_capture: media_capture::State,
@@ -3464,6 +3470,7 @@ impl HostState {
             badging: badging::State::default(),
             protocol_handler: protocol_handler::State::default(),
             push_api: push_api::State::default(),
+            web_serial: web_serial::State::default(),
             payment_request: payment_request::State::default(),
             web_authn: web_authn::State::default(),
             media_capture: media_capture::State::default(),
@@ -6403,6 +6410,7 @@ impl HostState {
     /// contexts, or document-scoped native state alive after close/navigation.
     fn retire_document_tree(&mut self, document: &NodeHandle) {
         let document_id = document.identity();
+        self.retire_web_serial_document(document_id);
         self.cookie_change_callbacks.remove(&document_id);
         self.idle_period_hooks.remove(&document_id);
         self.idle_period_requests.remove(&document_id);
@@ -6543,6 +6551,7 @@ impl HostState {
         let Some(previous) = self.iframe_documents.remove(&iframe_id) else {
             return;
         };
+        self.retire_web_serial_document(previous.document.identity());
         self.cookie_change_callbacks
             .remove(&previous.document.identity());
         self.idle_period_hooks.remove(&previous.document.identity());
@@ -6800,6 +6809,15 @@ impl HostState {
         // about:blank/srcdoc keep their inherited HTTP base in this registry.
         // Their visible document URL cannot be parsed as an HTTP URL.
         self.document_base_urls.get(&document_id).cloned()
+    }
+
+    fn retire_web_serial_document(&self, document_id: usize) {
+        let Some(url) = self.base_url_for_document(document_id) else {
+            return;
+        };
+        self.web_serial
+            .provider
+            .retire(&format!("{}://{}", url.scheme(), url.authority()));
     }
 
     fn cors_origin_for_document(&self, document_id: usize) -> CorsOrigin {
@@ -16731,6 +16749,7 @@ fn register_host_bindings(
     badging::register(context, &mut bindings)?;
     protocol_handler::register(context, &mut bindings)?;
     push_api::register(context, &mut bindings)?;
+    web_serial::register(context, &mut bindings)?;
     payment_request::register(context, &mut bindings)?;
     web_authn::register(context, &mut bindings)?;
     media_capture::register(context, &mut bindings)?;
@@ -25737,6 +25756,7 @@ fn initialize_dedicated_worker(
         let mut state = worker_runtime.host_state.borrow_mut();
         state.badging.provider = Arc::clone(&owner.badging.provider);
         state.push_api.provider = Arc::clone(&owner.push_api.provider);
+        state.web_serial.provider = Arc::clone(&owner.web_serial.provider);
         state.notification_permission = owner.notification_permission.clone();
         state.inherit_worker_cookie_session(&owner, creator.document_id);
         state.inherit_resource_loading(&owner);
