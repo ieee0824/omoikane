@@ -1027,6 +1027,13 @@
       "baseline_supported": true
     },
     {
+      "id": "navigator.badging",
+      "area": "web-api",
+      "description": "Badging exposes secure-context NavigatorBadge methods with WebIDL argument conversion",
+      "probe": "typeof navigator.setAppBadge === 'function' && navigator.setAppBadge.length === 0 && typeof navigator.clearAppBadge === 'function' && navigator.clearAppBadge.length === 0 && Object.prototype.propertyIsEnumerable.call(Navigator.prototype, 'setAppBadge') && Object.prototype.propertyIsEnumerable.call(Navigator.prototype, 'clearAppBadge')",
+      "baseline_supported": true
+    },
+    {
       "id": "payments.payment-request",
       "area": "web-api",
       "description": "Payment Request exposes secure-context stateful request, response, and update-event interfaces",

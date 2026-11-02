@@ -180,6 +180,11 @@ mod wake_lock;
 pub use wake_lock::{DeterministicWakeLockProvider, WakeLockError, WakeLockProvider};
 mod web_share;
 pub use web_share::{DeterministicShareProvider, ShareData, ShareError, ShareFile, ShareProvider};
+mod badging;
+pub use badging::{
+    AppBadge, BadgeContext, BadgeDisposition, BadgeError, BadgeProvider, BadgeRequest,
+    DeterministicBadgeProvider,
+};
 mod payment_request;
 pub use payment_request::{
     DeterministicPaymentProvider, PaymentError, PaymentMethodData, PaymentProvider,
@@ -2447,6 +2452,7 @@ struct HostState {
     screen_orientation: screen_orientation::State,
     wake_lock: wake_lock::State,
     web_share: web_share::State,
+    badging: badging::State,
     payment_request: payment_request::State,
     web_authn: web_authn::State,
     media_capture: media_capture::State,
@@ -3443,6 +3449,7 @@ impl HostState {
             screen_orientation: screen_orientation::State::default(),
             wake_lock: wake_lock::State::default(),
             web_share: web_share::State::default(),
+            badging: badging::State::default(),
             payment_request: payment_request::State::default(),
             web_authn: web_authn::State::default(),
             media_capture: media_capture::State::default(),
@@ -16707,6 +16714,7 @@ fn register_host_bindings(
     screen_orientation::register(context, &mut bindings)?;
     wake_lock::register(context, &mut bindings)?;
     web_share::register(context, &mut bindings)?;
+    badging::register(context, &mut bindings)?;
     payment_request::register(context, &mut bindings)?;
     web_authn::register(context, &mut bindings)?;
     media_capture::register(context, &mut bindings)?;
@@ -25711,6 +25719,7 @@ fn initialize_dedicated_worker(
     {
         let owner = owner_state.borrow();
         let mut state = worker_runtime.host_state.borrow_mut();
+        state.badging.provider = Arc::clone(&owner.badging.provider);
         state.inherit_worker_cookie_session(&owner, creator.document_id);
         state.inherit_resource_loading(&owner);
         let document_id = state.document.identity();

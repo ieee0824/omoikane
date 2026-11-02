@@ -19539,6 +19539,117 @@ fn web_share_normalizes_owned_data_consumes_activation_and_serializes_requests()
 }
 
 #[test]
+fn badging_normalizes_values_and_passes_owned_origin_to_provider() {
+    let provider = Arc::new(DeterministicBadgeProvider::default());
+    provider.set_disposition(BadgeDisposition::Applied);
+    let mut runtime =
+        JsRuntime::with_document_and_url(default_document(), "https://badge.example.test/inbox")
+            .unwrap();
+    runtime.set_badge_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.badgeResult = 'pending';
+               (async () => {
+                 await navigator.setAppBadge();
+                 await navigator.setAppBadge(10.9);
+                 await navigator.setAppBadge('3');
+                 await navigator.setAppBadge(0);
+                 await navigator.clearAppBadge();
+                 badgeResult = 'resolved';
+               })().catch(error => badgeResult = error.name);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "badgeResult"), "resolved");
+    let origin = "https://badge.example.test:443";
+    assert_eq!(
+        provider.requests(),
+        vec![
+            BadgeRequest {
+                origin: origin.into(),
+                context: BadgeContext::Document,
+                badge: AppBadge::Flag,
+            },
+            BadgeRequest {
+                origin: origin.into(),
+                context: BadgeContext::Document,
+                badge: AppBadge::Number(10),
+            },
+            BadgeRequest {
+                origin: origin.into(),
+                context: BadgeContext::Document,
+                badge: AppBadge::Number(3),
+            },
+            BadgeRequest {
+                origin: origin.into(),
+                context: BadgeContext::Document,
+                badge: AppBadge::Clear,
+            },
+            BadgeRequest {
+                origin: origin.into(),
+                context: BadgeContext::Document,
+                badge: AppBadge::Clear,
+            },
+        ]
+    );
+}
+
+#[test]
+fn badging_enforces_secure_range_provider_failure_and_worker_context() {
+    let mut insecure =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "http://example.test/").unwrap();
+    assert_eq!(
+        eval_str(
+            &mut insecure,
+            "typeof navigator.setAppBadge + ':' + typeof navigator.clearAppBadge"
+        ),
+        "undefined:undefined"
+    );
+
+    let provider = Arc::new(DeterministicBadgeProvider::default());
+    provider.fail_next(BadgeError {
+        name: "NotAllowedError".into(),
+        message: "badge permission denied".into(),
+    });
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_badge_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.badgeChecks = [];
+               for (const value of [-1, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN, 'bad', {}, [], Symbol('badge')]) {
+                 navigator.setAppBadge(value).then(
+                   () => badgeChecks.push('resolved'),
+                   error => badgeChecks.push(error.name));
+               }
+               navigator.setAppBadge(1).catch(error => badgeChecks.push(error.name));"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "badgeChecks.join(',')"),
+        "TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,NotAllowedError"
+    );
+
+    runtime
+        .eval(
+            r#"globalThis.workerBadge = 'pending';
+               const source = encodeURIComponent(
+                 "navigator.setAppBadge(7).then(() => postMessage([navigator instanceof WorkerNavigator, Object.prototype.toString.call(navigator)]), error => postMessage(error.name))");
+               const badgeWorker = new Worker('data:text/javascript,' + source);
+               badgeWorker.onmessage = event => workerBadge = JSON.stringify(event.data);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "workerBadge"),
+        "[true,\"[object WorkerNavigator]\"]"
+    );
+    let requests = provider.requests();
+    assert_eq!(requests.last().unwrap().context, BadgeContext::Worker);
+    assert_eq!(requests.last().unwrap().badge, AppBadge::Number(7));
+}
+
+#[test]
 fn web_share_rejects_without_activation_and_reflects_provider_capability() {
     let provider = Arc::new(DeterministicShareProvider::default());
     let mut runtime = JsRuntime::new().unwrap();
