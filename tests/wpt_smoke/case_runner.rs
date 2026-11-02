@@ -361,7 +361,9 @@ pub(super) fn run_case_with_transport(
             .map(|path| format!("<script src=\"{path}\"></script>"))
             .collect::<String>();
         let document_source = format!(
-            "<!doctype html><script src=\"/resources/testharness.js\"></script>\
+            "<!doctype html><script>self.GLOBAL={{\
+                 isWindow:()=>true,isWorker:()=>false,isShadowRealm:()=>false\
+                 }};</script><script src=\"/resources/testharness.js\"></script>\
                  <script src=\"/resources/testharnessreport.js\"></script>{dependencies}\
                  <script src=\"/{0}\"></script>",
             path

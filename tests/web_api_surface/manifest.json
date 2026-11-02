@@ -1018,6 +1018,41 @@
       "description": "Selection hides shadow boundaries and returns authorized StaticRanges",
       "probe": "(() => { const host=document.createElement('div');document.body.append(host);const root=host.attachShadow({mode:'closed'});root.textContent='text';const selection=getSelection();try {selection.collapse(root.firstChild,1);const hidden=selection.anchorNode===null&&selection.focusNode===null&&selection.rangeCount===0;let rejected=false;try{selection.getRangeAt(0)}catch(error){rejected=error.name==='IndexSizeError'}const range=selection.getComposedRanges({shadowRoots:[root]})[0];return hidden&&rejected&&range instanceof StaticRange&&range.startContainer===root.firstChild&&range.startOffset===1;}finally{selection.removeAllRanges();host.remove();}})()",
       "baseline_supported": true
+    },
+    {
+      "id": "navigator.web-share",
+      "area": "web-api",
+      "description": "Web Share exposes secure-context methods with validation and platform capability checks",
+      "probe": "typeof navigator.share === 'function' && navigator.share.length === 0 && typeof navigator.canShare === 'function' && navigator.canShare.length === 0 && navigator.canShare({text:''}) && !navigator.canShare({}) && !navigator.canShare({url:'data:no'})",
+      "baseline_supported": true
+    },
+    {
+      "id": "navigator.badging",
+      "area": "web-api",
+      "description": "Badging exposes secure-context NavigatorBadge methods with WebIDL argument conversion",
+      "probe": "typeof navigator.setAppBadge === 'function' && navigator.setAppBadge.length === 0 && typeof navigator.clearAppBadge === 'function' && navigator.clearAppBadge.length === 0 && Object.prototype.propertyIsEnumerable.call(Navigator.prototype, 'setAppBadge') && Object.prototype.propertyIsEnumerable.call(Navigator.prototype, 'clearAppBadge')",
+      "baseline_supported": true
+    },
+    {
+      "id": "navigator.protocol-handler",
+      "area": "web-api",
+      "description": "Protocol handler registration exposes secure-context WebIDL methods",
+      "probe": "typeof navigator.registerProtocolHandler === 'function' && navigator.registerProtocolHandler.length === 2 && typeof navigator.unregisterProtocolHandler === 'function' && navigator.unregisterProtocolHandler.length === 2 && Object.prototype.propertyIsEnumerable.call(Navigator.prototype, 'registerProtocolHandler') && Object.prototype.propertyIsEnumerable.call(Navigator.prototype, 'unregisterProtocolHandler')",
+      "baseline_supported": true
+    },
+    {
+      "id": "service-worker.push-api",
+      "area": "workers",
+      "description": "Push API exposes registration- and window-owned managers with subscription semantics",
+      "probe": "typeof PushManager === 'function' && typeof PushSubscription === 'function' && typeof PushSubscriptionOptions === 'function' && typeof pushManager === 'object' && pushManager instanceof PushManager && PushManager.supportedContentEncodings.includes('aes128gcm') && Object.isFrozen(PushManager.supportedContentEncodings)",
+      "baseline_supported": true
+    },
+    {
+      "id": "payments.payment-request",
+      "area": "web-api",
+      "description": "Payment Request exposes secure-context stateful request, response, and update-event interfaces",
+      "probe": "(() => { const request = new PaymentRequest([{supportedMethods:'basic-card'}], {total:{label:'Total', amount:{currency:'USD', value:'1.00'}}}); const update = new PaymentRequestUpdateEvent('shippingaddresschange'); const change = new PaymentMethodChangeEvent('paymentmethodchange', {methodName:'basic-card', methodDetails:{network:'visa'}}); return request instanceof EventTarget && request.id.length > 0 && request.shippingAddress === null && request.shippingOption === null && request.shippingType === null && request.onpaymentmethodchange === null && typeof request.show === 'function' && typeof request.abort === 'function' && typeof request.canMakePayment === 'function' && update instanceof Event && update.updateWith(Promise.resolve({total:{label:'Total', amount:{currency:'USD', value:'1.00'}}})) === undefined && change.methodName === 'basic-card' && change.methodDetails.network === 'visa' && PaymentRequest.length === 2 && PaymentResponse.length === 0 && PaymentRequestUpdateEvent.length === 1 && PaymentMethodChangeEvent.length === 1; })()",
+      "baseline_supported": true
     }
   ]
 }

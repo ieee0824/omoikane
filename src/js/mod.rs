@@ -178,6 +178,28 @@ pub use screen_orientation::{
 };
 mod wake_lock;
 pub use wake_lock::{DeterministicWakeLockProvider, WakeLockError, WakeLockProvider};
+mod web_share;
+pub use web_share::{DeterministicShareProvider, ShareData, ShareError, ShareFile, ShareProvider};
+mod badging;
+pub use badging::{
+    AppBadge, BadgeContext, BadgeDisposition, BadgeError, BadgeProvider, BadgeRequest,
+    DeterministicBadgeProvider,
+};
+mod protocol_handler;
+pub use protocol_handler::{
+    DeterministicProtocolHandlerProvider, ProtocolHandler, ProtocolHandlerDisposition,
+    ProtocolHandlerError, ProtocolHandlerOperation, ProtocolHandlerProvider,
+};
+mod push_api;
+pub use push_api::{
+    DeterministicPushProvider, PushError, PushOwner, PushProvider, PushSubscriptionData,
+    PushSubscriptionOptionsData,
+};
+mod payment_request;
+pub use payment_request::{
+    DeterministicPaymentProvider, PaymentError, PaymentMethodData, PaymentProvider,
+    PaymentRequestData, PaymentSelection,
+};
 mod web_authn;
 pub use web_authn::{
     DeterministicWebAuthnProvider, WebAuthnAssertionRequest, WebAuthnAssertionResponse,
@@ -2439,6 +2461,11 @@ struct HostState {
     gamepad: gamepad::State,
     screen_orientation: screen_orientation::State,
     wake_lock: wake_lock::State,
+    web_share: web_share::State,
+    badging: badging::State,
+    protocol_handler: protocol_handler::State,
+    push_api: push_api::State,
+    payment_request: payment_request::State,
     web_authn: web_authn::State,
     media_capture: media_capture::State,
     media_source: media_source::State,
@@ -3433,6 +3460,11 @@ impl HostState {
             gamepad: gamepad::State::default(),
             screen_orientation: screen_orientation::State::default(),
             wake_lock: wake_lock::State::default(),
+            web_share: web_share::State::default(),
+            badging: badging::State::default(),
+            protocol_handler: protocol_handler::State::default(),
+            push_api: push_api::State::default(),
+            payment_request: payment_request::State::default(),
             web_authn: web_authn::State::default(),
             media_capture: media_capture::State::default(),
             media_source: media_source::State::default(),
@@ -6377,6 +6409,8 @@ impl HostState {
         self.auxiliary_opener_updaters.remove(&document_id);
         self.promise_reports.retire_document(document_id);
         self.wake_lock.release_document(document_id);
+        self.web_share.retire_document(document_id);
+        self.payment_request.retire_document(document_id);
         self.storage_manager
             .opfs_release_document_locks(document_id);
         self.web_authn.retire_document(document_id);
@@ -6520,6 +6554,9 @@ impl HostState {
             .retire_document(previous.document.identity());
         self.wake_lock
             .release_document(previous.document.identity());
+        self.web_share.retire_document(previous.document.identity());
+        self.payment_request
+            .retire_document(previous.document.identity());
         self.storage_manager
             .opfs_release_document_locks(previous.document.identity());
         self.web_authn.retire_document(previous.document.identity());
@@ -16690,6 +16727,11 @@ fn register_host_bindings(
     gamepad::register(context, &mut bindings)?;
     screen_orientation::register(context, &mut bindings)?;
     wake_lock::register(context, &mut bindings)?;
+    web_share::register(context, &mut bindings)?;
+    badging::register(context, &mut bindings)?;
+    protocol_handler::register(context, &mut bindings)?;
+    push_api::register(context, &mut bindings)?;
+    payment_request::register(context, &mut bindings)?;
     web_authn::register(context, &mut bindings)?;
     media_capture::register(context, &mut bindings)?;
     media_source::register(context, &mut bindings)?;
@@ -25693,6 +25735,9 @@ fn initialize_dedicated_worker(
     {
         let owner = owner_state.borrow();
         let mut state = worker_runtime.host_state.borrow_mut();
+        state.badging.provider = Arc::clone(&owner.badging.provider);
+        state.push_api.provider = Arc::clone(&owner.push_api.provider);
+        state.notification_permission = owner.notification_permission.clone();
         state.inherit_worker_cookie_session(&owner, creator.document_id);
         state.inherit_resource_loading(&owner);
         let document_id = state.document.identity();
