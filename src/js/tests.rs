@@ -19492,6 +19492,140 @@ fn opfs_handles_persist_owned_bytes_and_enforce_origin_quota() {
 }
 
 #[test]
+fn web_share_normalizes_owned_data_consumes_activation_and_serializes_requests() {
+    let provider = Arc::new(DeterministicShareProvider::default());
+    provider.respond_to_next(Ok(()));
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_share_provider(provider.clone());
+    runtime
+        .eval(
+            r#"document.body.innerHTML = '<button id=share>share</button>';
+               globalThis.shareResult = 'pending';
+               globalThis.secondShare = 'pending';
+               const button = document.getElementById('share');
+               __omoikane_dispatch_mouse_input(button.__id, 'mousedown', {}, true);
+               const first = navigator.share({
+                 title: 42,
+                 text: 'body',
+                 url: '/shared',
+                 files: [new File([new Uint8Array([1, 2, 3])], 'data.bin', {type:'application/octet-stream', lastModified:7})]
+               });
+               navigator.share({text:'second'}).then(
+                 () => { secondShare = 'resolved'; },
+                 error => { secondShare = error.name; }
+               );
+               first.then(() => { shareResult = 'resolved'; }, error => { shareResult = error.name; });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "shareResult + ':' + secondShare"),
+        "resolved:InvalidStateError"
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "navigator.userActivation.isActive + ':' + navigator.canShare({url:'data:no'}) + ':' + navigator.canShare({text:''})"
+        ),
+        "false:false:true"
+    );
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].title.as_deref(), Some("42"));
+    assert_eq!(requests[0].text.as_deref(), Some("body"));
+    assert_eq!(requests[0].url.as_deref(), Some("http://localhost/shared"));
+    assert_eq!(requests[0].files[0].name, "data.bin");
+    assert_eq!(requests[0].files[0].bytes, vec![1, 2, 3]);
+}
+
+#[test]
+fn web_share_rejects_without_activation_and_reflects_provider_capability() {
+    let provider = Arc::new(DeterministicShareProvider::default());
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_share_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.shareDenied = 'pending';
+               navigator.share({text:'body'}).catch(error => { shareDenied = error.name; });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "shareDenied"), "NotAllowedError");
+    provider.set_supported(false);
+    assert_eq!(
+        eval_str(&mut runtime, "navigator.canShare({text:'body'})"),
+        "false"
+    );
+    assert!(provider.requests().is_empty());
+}
+
+#[test]
+fn web_share_enforces_secure_context_policy_provider_errors_and_retirement() {
+    let mut insecure =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "http://example.test/").unwrap();
+    assert_eq!(
+        eval_str(
+            &mut insecure,
+            "typeof navigator.share + ':' + typeof navigator.canShare"
+        ),
+        "undefined:undefined"
+    );
+
+    let provider = Arc::new(DeterministicShareProvider::default());
+    provider.respond_to_next(Err(ShareError {
+        name: "OperationError".into(),
+        message: "platform failure".into(),
+    }));
+    let mut runtime =
+        JsRuntime::with_document_and_url(default_document(), "https://share.example.test/page")
+            .unwrap();
+    runtime.set_share_provider(provider.clone());
+    runtime
+        .eval(
+            r#"document.body.innerHTML = '<button id=share>share</button>';
+               globalThis.shareFailure = 'pending';
+               const button = document.getElementById('share');
+               __omoikane_dispatch_mouse_input(button.__id, 'mousedown', {}, true);
+               navigator.share({text:'body'}).catch(error => { shareFailure = error.name; });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "shareFailure"), "OperationError");
+
+    runtime
+        .install_response_security_headers(&[("Permissions-Policy".into(), "web-share=()".into())]);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "navigator.canShare({text:'blocked'}) + ':' + document.permissionsPolicy.allowsFeature('web-share')"
+        ),
+        "false:false"
+    );
+
+    provider.respond_to_next(Ok(()));
+    runtime.install_response_security_headers(&[]);
+    runtime
+        .eval(
+            r#"__omoikane_dispatch_mouse_input(button.__id, 'mousedown', {}, true);
+               globalThis.retiredShare = 'pending';
+               navigator.share({text:'retire'}).then(
+                 () => { retiredShare = 'resolved'; },
+                 error => { retiredShare = error.name; }
+               );"#,
+        )
+        .unwrap();
+    let document_id = runtime.document().identity();
+    runtime
+        .host_state
+        .borrow_mut()
+        .web_share
+        .retire_document(document_id);
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "retiredShare"), "AbortError");
+    assert_eq!(provider.cancelled_documents(), vec![document_id]);
+}
+
+#[test]
 fn web_speech_synthesis_queues_owned_requests_and_advances_on_host_events() {
     let mut runtime = JsRuntime::new().unwrap();
     let provider = Arc::new(DeterministicWebSpeechProvider::new(vec![SpeechVoice {

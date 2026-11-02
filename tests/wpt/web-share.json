@@ -1,0 +1,29 @@
+{
+  "tests": [
+    { "path": "web-share/idlharness.https.window.js", "server": "wptserve" },
+    { "path": "web-share/canShare.https.html", "server": "wptserve" },
+    { "path": "web-share/canShare-files.https.html", "server": "wptserve" },
+    { "path": "web-share/canShare-insecure.http.html", "server": "wptserve-http" },
+    { "path": "web-share/share-securecontext.http.html", "server": "wptserve-http" },
+    { "path": "web-share/share-empty.https.html", "server": "wptserve" },
+    { "path": "web-share/share-consume-activation.https.html", "server": "wptserve" },
+    { "path": "web-share/share-sharePromise-internal-slot.https.html", "server": "wptserve" },
+    { "path": "web-share/share-url-invalid.https.html", "server": "wptserve" },
+    { "path": "web-share/share-without-user-gesture.https.html", "server": "wptserve" },
+    {
+      "path": "web-share/test-fully-active.https.html",
+      "server": "wptserve",
+      "known_failure": {
+        "status": "FAIL",
+        "reason": "WPT smoke cannot yet deliver test_driver.bless input to a child browsing context",
+        "issue": "#1664",
+        "expires": "2027-01-31",
+        "failed_subtests": [
+          "calling share() with transient activation on non-fully active document returns a promise rejected with InvalidStateError"
+        ]
+      }
+    },
+    { "path": "web-share/disabled-by-permissions-policy.https.sub.html", "server": "wptserve" },
+    { "path": "web-share/feature-policy-listed.tentative.html", "server": "wptserve-http" }
+  ]
+}

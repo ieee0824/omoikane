@@ -173,6 +173,7 @@ let omoikaneUserActivationState;
   const nativeCrossOriginIsolated = globalThis.__omoikane_cross_origin_isolated;
   const nativeStorageManager = globalThis.__omoikane_storage_manager;
   const nativeOpfs = globalThis.__omoikane_opfs;
+  const nativeWebShare = globalThis.__omoikane_web_share;
   const nativeCookieStoreAvailable = globalThis.__omoikane_cookie_store_available;
   const nativeCookieStoreQuery = globalThis.__omoikane_cookie_store_query;
   const nativeCookieStoreSubscriptions = globalThis.__omoikane_cookie_store_subscriptions;
@@ -26990,6 +26991,80 @@ let omoikaneUserActivationState;
     }
     get [Symbol.toStringTag]() { return "Navigator"; }
   }
+  function shareNative(operation, data = {}) {
+    const result = JSON.parse(String(nativeWebShare(operation, __omoikane_document_id, JSON.stringify(data))));
+    if (result.error) {
+      if (result.error === "TypeError") throw new TypeError(result.message || "Invalid share data");
+      throw new DOMException(result.message || "The share operation failed", result.error);
+    }
+    return result;
+  }
+  function shareData(value) {
+    const source = value == null ? {} : Object(value);
+    const data = {};
+    if (source.title !== undefined) data.title = String(source.title);
+    if (source.text !== undefined) data.text = String(source.text);
+    let validUrl = true;
+    if (source.url !== undefined) {
+      try {
+        const url = new URL(String(source.url), String(document.baseURI || location.href));
+        validUrl = url.protocol === "http:" || url.protocol === "https:";
+        if (validUrl) data.url = url.href;
+      } catch (_) { validUrl = false; }
+    }
+    if (source.files !== undefined) {
+      const sequence = source.files;
+      if (sequence == null || typeof sequence[Symbol.iterator] !== "function") {
+        throw new TypeError("files must be a sequence of File objects");
+      }
+      data.files = [];
+      for (const file of sequence) {
+        if (!isFile(file)) throw new TypeError("files must contain only File objects");
+        data.files.push({
+          name: file.name,
+          mediaType: file.type,
+          lastModified: file.lastModified,
+          bytes: Array.from(file.__bytes),
+        });
+      }
+    }
+    const hasFiles = data.files !== undefined && data.files.length > 0;
+    const hasData = data.title !== undefined || data.text !== undefined || data.url !== undefined || hasFiles;
+    return { data, valid: validUrl && hasData && (data.files === undefined || hasFiles) };
+  }
+  function canShare(value = undefined) {
+    if (!(this instanceof Navigator)) throw new TypeError("Illegal invocation");
+    let normalized;
+    try { normalized = shareData(value); }
+    catch (error) { throw error; }
+    if (!normalized.valid) return false;
+    try { return shareNative("canShare", normalized.data).supported === true; }
+    catch (_) { return false; }
+  }
+  function share(value = undefined) {
+    if (!(this instanceof Navigator)) return Promise.reject(new TypeError("Illegal invocation"));
+    try { shareNative("preflight"); }
+    catch (error) { return Promise.reject(error); }
+    if (!fullscreenTransientActivation) {
+      return Promise.reject(new DOMException("A user activation is required", "NotAllowedError"));
+    }
+    fullscreenTransientActivation = false;
+    nativePointerLockActivation(false, 0);
+    let normalized;
+    try { normalized = shareData(value); }
+    catch (error) { return Promise.reject(error); }
+    if (!normalized.valid) return Promise.reject(new TypeError("The share data is not valid"));
+    let pending;
+    try { pending = shareNative("begin", normalized.data); }
+    catch (error) { return Promise.reject(error); }
+    return Promise.resolve().then(() => { shareNative("complete", { id: pending.id }); });
+  }
+  if (nativeIsSecureContext()) {
+    Object.defineProperties(Navigator.prototype, {
+      canShare: { configurable: true, enumerable: true, writable: true, value: canShare },
+      share: { configurable: true, enumerable: true, writable: true, value: share },
+    });
+  }
   Object.defineProperty(Navigator.prototype, "getGamepads", {
     ...Object.getOwnPropertyDescriptor(Navigator.prototype, "getGamepads"),
     enumerable: true,
@@ -37453,6 +37528,8 @@ let omoikaneUserActivationState;
     try { if (globalThis.navigator) delete globalThis.navigator.clipboard; } catch (_) {}
     try { delete Navigator.prototype.clipboard; } catch (_) {}
     try { if (globalThis.navigator) delete globalThis.navigator.geolocation; } catch (_) {}
+    try { delete Navigator.prototype.share; } catch (_) {}
+    try { delete Navigator.prototype.canShare; } catch (_) {}
     try { if (globalThis.StorageManager) delete globalThis.StorageManager.prototype.persist; } catch (_) {}
     try { delete globalThis.Clipboard; } catch (_) { globalThis.Clipboard = undefined; }
     try { delete globalThis.__omoikane_dispatch_notification_click; } catch (_) {}
