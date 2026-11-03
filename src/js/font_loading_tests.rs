@@ -741,26 +741,20 @@ fn text_mutation_requests_fonts_without_using_public_observer_methods() {
 }
 
 fn font_sync_calls(runtime: &mut JsRuntime, script: &str) -> u64 {
-    runtime
-        .eval(
-            "globalThis.__originalFontSync = globalThis.__omoikane_flush_stylesheets; \
-             globalThis.__fontSyncCalls = 0; \
-             globalThis.__omoikane_flush_stylesheets = () => { \
-                 globalThis.__fontSyncCalls++; \
-                 return globalThis.__originalFontSync(); \
-             };",
-        )
-        .unwrap();
+    let document_id = runtime.document().identity();
+    let before = runtime
+        .host_state
+        .borrow()
+        .host_callbacks
+        .stylesheet_flush_entries(document_id);
     runtime.eval(script).unwrap();
     runtime.run_until_idle().unwrap();
-    let value = eval_json(runtime, "__fontSyncCalls");
     runtime
-        .eval(
-            "globalThis.__omoikane_flush_stylesheets = globalThis.__originalFontSync; \
-             delete globalThis.__originalFontSync;",
-        )
-        .unwrap();
-    value.as_u64().unwrap()
+        .host_state
+        .borrow()
+        .host_callbacks
+        .stylesheet_flush_entries(document_id)
+        - before
 }
 
 #[test]

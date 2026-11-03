@@ -2646,7 +2646,7 @@ fn render_document_with_url_internal(
             // CSSOM insertRule/deleteRule mutations are batched by the JS shim so
             // frameworks can install large generated stylesheets without an O(n²)
             // text rewrite. Commit the batch before rebuilding the native resolver.
-            if let Err(err) = runtime.eval("__omoikane_flush_stylesheets()") {
+            if let Err(err) = runtime.flush_stylesheets() {
                 eprintln!("[omoikane][js-error] {err}");
             }
             // Page script that failed inside an event-loop task (a timer callback,

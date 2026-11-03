@@ -346,9 +346,7 @@
     if (!state.document || state.syncing) return;
     state.syncing = true;
     try {
-      if (typeof globalThis.__omoikane_flush_stylesheets === 'function') {
-        globalThis.__omoikane_flush_stylesheets();
-      }
+      __omoikane_flush_stylesheets();
       const snapshots = JSON.parse(state.native('css', '{}'));
       const ruleViews = [];
       const collectRules = sheet => {
