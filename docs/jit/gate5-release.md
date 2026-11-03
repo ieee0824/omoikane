@@ -128,3 +128,44 @@ The existing ignored local layout investigation also requires
 `tests/output/blog-content.html` outside CI. Supply the investigation's existing
 snapshot when running locally; a missing snapshot is a failed local run, not a
 compatibility result. The test's existing CI behavior is unchanged.
+
+
+### Suite job partitions (#1692)
+
+Each supported target runs `suite-core`, `suite-wpt`, and `package` as separate
+90-minute jobs. Core retains the original full-suite command and first seven
+serialized sensitive commands. WPT retains the eighth serialized command, with
+its original selector, features and test-thread setting. Their ordered union is
+the original nine Rust commands; no test or evaluation limit is relaxed. The
+local `suite` command remains available for a monolithic execution.
+
+Both suite jobs fetch the pinned WPT checkout as runner setup. Core supplies
+native, Acid3 and Web API reports; the WPT job supplies the final complete WPT
+report. Logs, capacity snapshots and diagnostics use distinct part directories.
+Both jobs may restore the shared suite caches; only a successful core job on main
+may save Rust/Boa caches, avoiding competing writers and additional full caches.
+
+CI aggregation explicitly requires split evidence, identical clean source/lock
+and toolchain identities, exact command coverage, and successful actual matrix
+jobs. A missing part, conflicting monolithic report, altered command or cancelled
+job produces no-go even when other reports say passed. Historical timings explain
+the split but do not guarantee cold-run completion. Capacity (#1681) and elapsed
+time (#1692) remain separate acceptance conditions.
+
+Before execution, core lists the unfiltered full test universe; WPT lists its
+exact selected test in its own harness. Reports retain harness-qualified test
+names from these listings and from every executed command. Aggregation requires
+the combined execution multiset to equal the core inventory, each test once,
+with the sole WPT test exclusively in the WPT part. Counts alone cannot satisfy
+this check. Missing names, overlapping substring skips and duplicates fail.
+Listing compiles but does not run tests; WPT lists only its own integration target
+so it does not compile unrelated integration binaries for inventory collection.
+
+Each part fetches WPT independently and records its explicit report paths, WPT
+configuration, Cargo target/jobs, temporary directory and test environment in
+`suite-environment.json`. System font installation remains runner setup. WPT does
+not consume core reports or core server state. Results include the workflow run
+ID and attempt; different latest attempts from the same run can compose, while
+cross-run evidence is rejected. The actual matrix result must also be success.
+Cold/warm timings, cache usage and successful x86 Boa-cache saves remain required
+observations when CI runs; fixture success alone does not establish them.

@@ -84,6 +84,210 @@ class GateTests(unittest.TestCase):
         with patch.object(gate, "output", return_value=self.identity["revision"]), contextlib.redirect_stdout(io.StringIO()):
             return gate.aggregate(self.root, result)
 
+    def test_partition_preserves_original_rust_commands_exactly_once(self):
+        core = gate.suite_commands("suite-core")
+        wpt = gate.suite_commands("suite-wpt")
+        self.assertEqual(core + wpt, [("full-suite", gate.SUITE_COMMAND),
+                                     *gate.SERIAL_SUITE_COMMANDS])
+        self.assertEqual(len(core), 8)
+        self.assertEqual(wpt, [gate.SERIAL_SUITE_COMMANDS[-1]])
+        self.assertEqual(len({label for label, _ in core + wpt}), 9)
+        with self.assertRaises(ValueError):
+            gate.suite_commands("unknown")
+
+    def test_wpt_partition_executes_only_pinned_setup_and_original_wpt(self):
+        target = next(iter(gate.TARGETS))
+        identity = dict(self.identity, target=target)
+        calls = []
+
+        def execute(command, **kwargs):
+            calls.append(command)
+            self.assertEqual(kwargs["env"]["WPT_REQUIRED"], "1")
+            self.assertEqual(kwargs["env"]["CARGO_TERM_COLOR"], "never")
+            if command[0] == "cargo":
+                log = kwargs["stdout"]
+                log.write("     Running tests/wpt_smoke.rs (/tmp/deps/wpt_smoke-abc)\n")
+                name = gate.SENSITIVE_TESTS[-1][2]
+                if "--list" in command:
+                    log.write(f"{name}: test\n")
+                else:
+                    log.write(f"test {name} ... ok\n")
+                    log.write("test result: ok. 1 passed; 0 failed; 0 ignored\n")
+            return SimpleNamespace(returncode=0)
+
+        with patch.object(gate, "identity", return_value=identity), \
+                patch.object(gate.subprocess, "run", side_effect=execute), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(gate.run_target("suite-wpt", target, self.root))
+        self.assertEqual(calls, [["bash", "scripts/fetch-wpt.sh"],
+                                 gate.inventory_command("suite-wpt"),
+                                 gate.SERIAL_SUITE_COMMANDS[-1][1]])
+        result = gate.read(self.root / target / "suite-wpt/result.json")
+        self.assertEqual(result["kind"], "suite-wpt")
+        self.assertEqual(result["status"], "passed")
+        self.assertFalse((self.root / target / "suite-wpt/native.json").exists())
+        environment = gate.read(self.root / target / "suite-wpt/suite-environment.json")
+        self.assertEqual(environment["CARGO_TERM_COLOR"], "never")
+        self.assertEqual(environment["WPT_REPORT"], str((self.root / target / "suite-wpt/wpt.json").resolve()))
+
+    def split_evidence(self):
+        self.identity["run_id"] = "12345"
+        self.save("inputs/identity.json", self.identity)
+        for target in gate.TARGETS:
+            base = self.root / target
+            original = gate.read(base / "suite/result.json")
+            original["identity"]["run_id"] = "12345"
+            for kind in gate.SUITE_PARTS:
+                self.save(f"{target}/{kind}/result.json", {
+                    "kind": kind, "attempt": "1",
+                    "identity": dict(original["identity"], rustc="fixed rustc"),
+                    "status": "passed",
+                    "test_results": [["1", "0", "0"] for _ in gate.suite_commands(kind)],
+                    "steps": [{"name": name, "command": command, "exit": 0} for name, command in
+                              [("fetch-wpt", ["bash", "scripts/fetch-wpt.sh"]),
+                               ("list-tests", gate.inventory_command(kind)),
+                               *gate.suite_commands(kind)]],
+                    "expected_tests": [["tests/wpt_smoke.rs", gate.SENSITIVE_TESTS[-1][2]]]
+                        + ([] if kind == "suite-wpt" else
+                           [["src/lib.rs", label] for label, _ in gate.suite_commands("suite-core")]),
+                    "executed_tests": {label: [["tests/wpt_smoke.rs", gate.SENSITIVE_TESTS[-1][2]]]
+                                       if kind == "suite-wpt" else [["src/lib.rs", label]]
+                                       for label, _ in gate.suite_commands(kind)}})
+            package = gate.read(base / "package/result.json")
+            package["attempt"] = "2"
+            package["identity"]["run_id"] = "12345"
+            package["archive"]["manifest"]["identity"]["run_id"] = "12345"
+            package["identity"]["rustc"] = "fixed rustc"
+            package["archive"]["manifest"]["identity"]["rustc"] = "fixed rustc"
+            gate.write(base / "package/result.json", package)
+            for path in (base / "suite").iterdir():
+                if path.name != "result.json":
+                    destination = "suite-wpt" if path.name == "wpt.json" else "suite-core"
+                    path.rename(base / destination / path.name)
+            (base / "suite/result.json").unlink()
+
+    def split_decision(self, result="success"):
+        with patch.object(gate, "output", return_value=self.identity["revision"]), \
+                patch.dict(gate.os.environ, {"GITHUB_RUN_ID": "12345"}), \
+                contextlib.redirect_stdout(io.StringIO()):
+            return gate.aggregate(self.root, result, split_suite=True)
+
+    def test_split_complete_and_real_job_failure(self):
+        self.split_evidence()
+        self.assertTrue(self.split_decision())
+        for result in ("failure", "cancelled", "skipped"):
+            self.assertFalse(self.split_decision(result))
+
+    def test_split_rejects_missing_duplicate_argv_and_identity_mismatch(self):
+        self.split_evidence()
+        base = self.root / next(iter(gate.TARGETS))
+        path = base / "suite-wpt/result.json"
+        original = gate.read(path)
+        for change in ("missing", "duplicate", "argv", "rustc", "kind", "failed"):
+            with self.subTest(change=change):
+                result = copy.deepcopy(original)
+                if change == "missing":
+                    path.unlink()
+                else:
+                    if change == "duplicate":
+                        result["steps"].append(result["steps"][-1])
+                    elif change == "argv":
+                        result["steps"][-1]["command"].remove("--exact")
+                    elif change == "rustc":
+                        result["identity"]["rustc"] = "different"
+                    elif change == "kind":
+                        result["kind"] = "suite-core"
+                    else:
+                        result["status"] = "failed"
+                    gate.write(path, result)
+                self.assertFalse(self.split_decision())
+                gate.write(path, original)
+        self.save(f"{base.name}/suite/result.json", original)
+        self.assertFalse(self.split_decision())
+
+    def test_split_provenance_allows_attempts_but_rejects_cross_run(self):
+        self.split_evidence()
+        self.assertTrue(self.split_decision())
+        path = self.root / next(iter(gate.TARGETS)) / "package/result.json"
+        original = gate.read(path)
+        for change in ("run", "attempt", "missing-attempt"):
+            result = copy.deepcopy(original)
+            if change == "run":
+                result["identity"]["run_id"] = "99999"
+            elif change == "attempt":
+                result["attempt"] = "0"
+            else:
+                result.pop("attempt")
+            gate.write(path, result)
+            self.assertFalse(self.split_decision())
+        gate.write(path, original)
+
+    def test_split_inventory_rejects_missing_duplicate_and_wrong_part_tests(self):
+        self.split_evidence()
+        base = self.root / next(iter(gate.TARGETS))
+        path = base / "suite-core/result.json"
+        original = gate.read(path)
+        for change in ("missing", "duplicate", "unexpected", "overlapping-skip", "wrong-part"):
+            with self.subTest(change=change):
+                result = copy.deepcopy(original)
+                rows = result["executed_tests"]["full-suite"]
+                if change == "missing":
+                    rows.clear()
+                elif change == "duplicate":
+                    rows.append(rows[0])
+                elif change == "unexpected":
+                    rows[0][1] = "unexpected_test"
+                elif change == "overlapping-skip":
+                    result["expected_tests"].append(["src/lib.rs", "prefix_sensitive_test_suffix"])
+                else:
+                    rows.append(["tests/wpt_smoke.rs", gate.SENSITIVE_TESTS[-1][2]])
+                gate.write(path, result)
+                self.assertFalse(self.split_decision())
+        gate.write(path, original)
+        self.assertTrue(self.split_decision())
+
+    def test_doctest_compile_modes_match_unsuffixed_inventory(self):
+        listing = """   Doc-tests omoikane
+src/http/client.rs - Client (line 65): test
+src/http/connection.rs - send (line 285): test
+src/lib.rs - example (line 12): test
+"""
+        executed = """\x1b[1m\x1b[92m   Doc-tests\x1b[0m omoikane
+test src/http/client.rs - Client (line 65) - compile ... ok
+test src/http/connection.rs - send (line 285) - compile fail ... ok
+test src/lib.rs - example (line 12) - should panic ... ok
+"""
+        self.assertEqual(gate.harness_tests(listing, listing=True),
+                         gate.harness_tests(executed))
+
+    def test_harness_inventory_retains_target_identity_and_duplicates(self):
+        listing = """     Running unittests src/lib.rs (/tmp/deps/omoikane-abc)
+same_name: test
+     Running tests/example.rs (/tmp/deps/example-def)
+same_name: test
+   Doc-tests omoikane
+src/lib.rs - example (line 4): test
+"""
+        executed = """\x1b[1m\x1b[92m     Running\x1b[0m unittests src/lib.rs (/other/deps/omoikane-123)
+latest unrelated ... text
+contest unrelated ... text
+table rows=test same_name - should panic ... diagnostic emitted before status
+ok
+     Running tests/example.rs (/other/deps/example-456)
+test same_name ... ok
+test same_name ... ok
+   Doc-tests omoikane
+test src/lib.rs - example (line 4) ... ok
+"""
+        expected = gate.harness_tests(listing, listing=True)
+        actual = gate.harness_tests(executed)
+        self.assertEqual(expected, [["src/lib.rs", "same_name"],
+                                    ["tests/example.rs", "same_name"],
+                                    ["doctest:omoikane", "src/lib.rs - example (line 4)"]])
+        self.assertEqual(actual, [*expected[:2], expected[1], expected[2]])
+        with self.assertRaises(ValueError):
+            gate.harness_tests("test missing_harness ... ok")
+
     def test_complete_evidence_passes(self):
         self.assertTrue(self.decision())
 

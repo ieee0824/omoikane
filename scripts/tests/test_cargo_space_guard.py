@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -22,10 +23,21 @@ SPEC.loader.exec_module(guard)
 
 
 class CargoSpaceGuardTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith("linux"), "isolated Linux subreaper fixture")
+    def test_term_exiting_leader_does_not_leave_a_term_resistant_member(self):
+        fixture = Path(__file__).with_name("process_group_fixture.py")
+        result = subprocess.run([sys.executable, str(fixture), "guard", guard.__file__,
+                                 str(self.root / "group-case")],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report["leader_exit"], -15)
+        self.assertFalse(report["group_exists_after_cleanup"])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.workspace = self.root / "source"
         self.workspace.mkdir()
 
@@ -49,6 +61,15 @@ class CargoSpaceGuardTests(unittest.TestCase):
             guard.validate_run_target(self.root, self.workspace)
         target = self.root / "cache" / "issue-737"
         self.assertEqual(guard.validate_run_target(target, self.workspace), target)
+
+    def test_run_target_resolves_symlinked_parent(self):
+        alias = self.root / "alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        target = alias / "cache" / "issue-737"
+        self.assertEqual(
+            guard.validate_run_target(target, self.workspace),
+            self.root / "cache" / "issue-737",
+        )
 
     def test_mount_type_uses_longest_matching_mount(self):
         mounts = (
