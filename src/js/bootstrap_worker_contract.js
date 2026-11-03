@@ -37,6 +37,18 @@
             else delete globalThis[name];
         }
     }
+    const weakMapGet = WeakMap.prototype.get;
+    let adoptedMapReads = 0;
+    WeakMap.prototype.get = function() {
+        adoptedMapReads++;
+        throw 'private adopted stylesheet map reached an author hook';
+    };
+    try {
+        CSSStyleSheet.prototype.__syncAdoptedRoots.call({});
+    } finally {
+        WeakMap.prototype.get = weakMapGet;
+    }
+    require(adoptedMapReads === 0, 'adopted stylesheet captured map access');
     const form = new FormData();
     form.append('word', 'value');
     require(form.get('word') === 'value', 'FormData');

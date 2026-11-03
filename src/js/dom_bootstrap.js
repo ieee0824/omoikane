@@ -12359,7 +12359,7 @@ let omoikaneUserActivationState;
   }
 
   function adoptedRootsForSheet(sheet) {
-    const refs = adoptedRootsBySheet.get(sheet);
+    const refs = safeWeakMapGet(adoptedRootsBySheet, sheet);
     if (!refs) return [];
     const roots = [];
     for (const ref of Array.from(refs)) {
@@ -12371,7 +12371,7 @@ let omoikaneUserActivationState;
   }
 
   function detachAdoptedRootFromSheet(root, sheet) {
-    const refs = adoptedRootsBySheet.get(sheet);
+    const refs = safeWeakMapGet(adoptedRootsBySheet, sheet);
     if (!refs) return;
     for (const ref of Array.from(refs)) {
       const target = adoptedRefTarget(ref);
@@ -12380,10 +12380,10 @@ let omoikaneUserActivationState;
   }
 
   function attachAdoptedRootToSheet(root, sheet) {
-    let refs = adoptedRootsBySheet.get(sheet);
+    let refs = safeWeakMapGet(adoptedRootsBySheet, sheet);
     if (!refs) {
       refs = new Set();
-      adoptedRootsBySheet.set(sheet, refs);
+      safeWeakMapSet(adoptedRootsBySheet, sheet, refs);
     }
     if (!adoptedRootsForSheet(sheet).includes(root)) {
       refs.add(typeof WeakRef === "function" ? new WeakRef(root) : root);
@@ -12496,7 +12496,7 @@ let omoikaneUserActivationState;
         return false;
       },
     });
-    adoptedListReplacers.set(observable, candidate => commit(candidate));
+    safeWeakMapSet(adoptedListReplacers, observable, candidate => commit(candidate));
     if (values.length) commit(values.slice());
     return observable;
   }
@@ -12507,17 +12507,17 @@ let omoikaneUserActivationState;
     // Keep the JS bookkeeping unchanged if the native root has already been
     // detached or otherwise rejects the update.
     __omoikane_set_adopted_stylesheets(root.__id, cssText);
-    const previous = adoptedStyleSheetsByRoot.get(root) || [];
+    const previous = safeWeakMapGet(adoptedStyleSheetsByRoot, root) || [];
     for (const sheet of previous) detachAdoptedRootFromSheet(root, sheet);
-    adoptedStyleSheetsByRoot.set(root, value);
+    safeWeakMapSet(adoptedStyleSheetsByRoot, root, value);
     for (const sheet of value) attachAdoptedRootToSheet(root, sheet);
   }
 
   function adoptedStyleSheetsForRoot(root) {
-    let value = adoptedStyleSheetsByRoot.get(root);
+    let value = safeWeakMapGet(adoptedStyleSheetsByRoot, root);
     if (!value) {
       value = makeAdoptedStyleSheetList(root);
-      adoptedStyleSheetsByRoot.set(root, value);
+      safeWeakMapSet(adoptedStyleSheetsByRoot, root, value);
     }
     return value;
   }
@@ -12532,7 +12532,7 @@ let omoikaneUserActivationState;
     // The ObservableArray setter replaces the backing list, preserving the
     // object returned by earlier getter calls. `commit` validates and rolls
     // back the list itself if the native update fails.
-    adoptedListReplacers.get(list)(values.slice());
+    safeWeakMapGet(adoptedListReplacers, list)(values.slice());
   }
 
   class CSSStyleSheet {
@@ -12577,7 +12577,7 @@ let omoikaneUserActivationState;
     }
     __syncAdoptedRoots() {
       for (const root of adoptedRootsForSheet(this)) {
-        const list = adoptedStyleSheetsByRoot.get(root);
+        const list = safeWeakMapGet(adoptedStyleSheetsByRoot, root);
         if (list) syncAdoptedStyleSheetRoot(root, list);
       }
     }

@@ -88,7 +88,7 @@ mod tests {
         let source = select(super::super::DOM_BOOTSTRAP, false).unwrap();
         assert_eq!(
             format!("{:x}", Sha256::digest(source.as_bytes())),
-            "d8cf8ea805d1d947f3bec5099c8c9e9c4349e831af8f72d14c80bd2d6fa8c265"
+            "ece5dfcded557238bb0bbe12e15d5c7a0e0d9f9904b60ef8b7bb230b3f632a05"
         );
     }
 }
