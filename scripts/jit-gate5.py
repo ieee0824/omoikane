@@ -2,6 +2,7 @@
 """Build, exercise and aggregate the supported distribution targets for Gate 5."""
 
 import argparse
+from collections import Counter
 import ctypes
 import hashlib
 import json
@@ -62,6 +63,21 @@ SERIAL_SUITE_COMMANDS = [
 ]
 
 
+SUITE_PARTS = ("suite-core", "suite-wpt")
+
+
+def suite_commands(kind):
+    """Return original Rust argv once per logical suite, partitioned for CI."""
+    commands = [("full-suite", SUITE_COMMAND), *SERIAL_SUITE_COMMANDS]
+    if kind == "suite":
+        return commands
+    if kind == "suite-core":
+        return commands[:-1]
+    if kind == "suite-wpt":
+        return commands[-1:]
+    raise ValueError(f"unknown suite kind: {kind}")
+
+
 def output(*args):
     return subprocess.check_output(args, text=True).strip()
 
@@ -87,6 +103,7 @@ def identity():
     return {"revision": output("git", "rev-parse", "HEAD"),
             "source_dirty": bool(output("git", "status", "--porcelain", "--untracked-files=no")),
             "lock_sha256": digest(Path("Cargo.lock")), "rustc": rustc,
+            "run_id": os.environ.get("GITHUB_RUN_ID"),
             "target": re.search(r"^host: (.+)$", rustc, re.M).group(1)}
 
 
@@ -144,10 +161,59 @@ def ffi_smoke(library, destination):
     write(destination, {"status": "passed", "library_sha256": digest(library), "cases": cases})
 
 
+def inventory_command(kind):
+    """List the full core universe or only the independently compiled WPT harness."""
+    if kind == "suite-core":
+        return [*SUITE_BASE_COMMAND, "--", "--list", "--include-ignored"]
+    command = SERIAL_SUITE_COMMANDS[-1][1]
+    boundary = command.index("--")
+    test = SENSITIVE_TESTS[-1][2]
+    return [*command[:boundary], "--", test, "--exact", "--list", "--include-ignored"]
+
+
+def run_suite(kind, folder, env, report, run):
+    """Run one suite part with independent setup and coverage evidence."""
+    env.update({"CARGO_TERM_COLOR": "never", "WPT_ROOT": str(Path(env.get("WPT_ROOT", ".cache/wpt")).resolve()),
+                "WPT_REQUIRED": "1", "WPT_REPORT": str(folder / "wpt.json"),
+                "WPT_JUNIT": str(folder / "wpt.xml"),
+                "OMOIKANE_JIT_GATE_REPORT_DIR": str(folder),
+                "OMOIKANE_WEB_API_REPORT": str(folder / "web-api.json")})
+    write(folder / "suite-environment.json", {key: env.get(key) for key in
+        ("WPT_ROOT", "WPT_REQUIRED", "WPT_MANIFEST", "WPT_REPORT", "WPT_JUNIT",
+         "OMOIKANE_JIT_GATE_REPORT_DIR", "OMOIKANE_WEB_API_REPORT", "RUST_TEST_THREADS",
+         "CI", "CARGO_TARGET_DIR", "CARGO_BUILD_JOBS", "CARGO_TERM_COLOR", "TMPDIR", "HOME")})
+    run("fetch-wpt", ["bash", "scripts/fetch-wpt.sh"])
+    if kind in SUITE_PARTS:
+        run("list-tests", inventory_command(kind))
+        report["expected_tests"] = harness_tests(
+            (folder / "list-tests.log").read_text(errors="replace"), listing=True)
+        assert report["expected_tests"], "test inventory is empty"
+    suite_steps = suite_commands(kind)
+    failed_steps = [label for label, command in suite_steps
+                    if run(label, command, required=False)]
+    logs = {label: (folder / f"{label}.log").read_text(errors="replace")
+            for label, _ in suite_steps}
+    report["test_results"] = re.findall(
+        r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored",
+        "\n".join(logs.values()))
+    if kind in SUITE_PARTS:
+        report["executed_tests"] = {label: harness_tests(log) for label, log in logs.items()}
+    if failed_steps:
+        raise RuntimeError(f"suite steps failed: {', '.join(failed_steps)}")
+    if kind in SUITE_PARTS:
+        observed = sum(len(tests) for tests in report["executed_tests"].values())
+        assert observed == sum(int(row[0]) for row in report["test_results"]), "unparsed test execution"
+    assert report["test_results"] and sum(int(row[0]) for row in report["test_results"]) > 0
+    assert all(f == i == "0" for _, f, i in report["test_results"])
+    if kind != "suite-wpt":
+        shutil.copyfile(".artifacts/jit-native/native-report.json", folder / "native.json")
+
+
 def run_target(kind, target, root):
     folder = (root / target / kind).resolve()
     folder.mkdir(parents=True, exist_ok=False)
-    report = {"identity": identity(), "kind": kind, "steps": [], "status": "running"}
+    report = {"identity": identity(), "kind": kind, "steps": [], "status": "running",
+              "attempt": os.environ.get("GITHUB_RUN_ATTEMPT")}
     env = dict(os.environ)
 
     def run(label, command, required=True):
@@ -167,28 +233,8 @@ def run_target(kind, target, root):
         expected = read(root / "inputs/identity.json")
         assert expected and all(report["identity"][key] == expected[key]
                                 for key in ("revision", "lock_sha256")), "revision/lock mismatch"
-        if kind == "suite":
-            env.update({"WPT_ROOT": str(Path(env.get("WPT_ROOT", ".cache/wpt")).resolve()), "WPT_REQUIRED": "1",
-                        "WPT_REPORT": str(folder / "wpt.json"), "WPT_JUNIT": str(folder / "wpt.xml"),
-                        "OMOIKANE_JIT_GATE_REPORT_DIR": str(folder),
-                        "OMOIKANE_WEB_API_REPORT": str(folder / "web-api.json")})
-            if env.get("OMOIKANE_GATE_DIAGNOSTICS") == "1":
-                write(folder / "suite-environment.json", {key: env.get(key) for key in
-                    ("WPT_ROOT", "WPT_REQUIRED", "WPT_MANIFEST", "WPT_REPORT", "WPT_JUNIT",
-                     "OMOIKANE_JIT_GATE_REPORT_DIR", "OMOIKANE_WEB_API_REPORT", "RUST_TEST_THREADS", "CI")})
-            run("fetch-wpt", ["bash", "scripts/fetch-wpt.sh"])
-            suite_steps = [("full-suite", SUITE_COMMAND), *SERIAL_SUITE_COMMANDS]
-            failed_steps = [label for label, command in suite_steps
-                            if run(label, command, required=False)]
-            report["test_results"] = re.findall(
-                r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored",
-                "\n".join((folder / f"{label}.log").read_text(errors="replace")
-                          for label, _ in suite_steps))
-            if failed_steps:
-                raise RuntimeError(f"suite steps failed: {', '.join(failed_steps)}")
-            assert report["test_results"] and sum(int(row[0]) for row in report["test_results"]) > 0
-            assert all(f == i == "0" for _, f, i in report["test_results"])
-            shutil.copyfile(".artifacts/jit-native/native-report.json", folder / "native.json")
+        if kind in ("suite", *SUITE_PARTS):
+            run_suite(kind, folder, env, report, run)
         else:
             library, archive_name = TARGETS[target]
             target_dir = Path(os.environ.get("CARGO_TARGET_DIR", "target")).resolve()
@@ -250,7 +296,74 @@ def valid_probe(probe, target):
         for row in rows)
 
 
-def aggregate(root, jobs_result):
+def harness_tests(log, listing=False):
+    """Read Cargo harness-qualified names, retaining duplicates for coverage checks."""
+    harness = None
+    tests = []
+    for line in log.splitlines():
+        line = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line)
+        header = re.match(r"\s*Running (?:unittests )?(.+?) \([^\n]+\)\s*$", line)
+        docs = re.match(r"\s*Doc-tests (\S+)\s*$", line)
+        if header or docs:
+            harness = header.group(1) if header else "doctest:" + docs.group(1)
+            continue
+        pattern = r"^(.+): test$" if listing else r"\btest (.+?) \.\.\. "
+        matches = re.finditer(pattern, line)
+        for match in matches:
+            if harness is None:
+                raise ValueError("test name without Cargo harness identity")
+            name = match.group(1)
+            if not listing:
+                name = re.sub(r" - (?:should panic|compile fail|compile)$", "", name)
+            tests.append([harness, name])
+    return tests
+
+
+def valid_suite_coverage(parts):
+    """Require each inventory test once, with the full WPT test in its own part."""
+    try:
+        expected = Counter(tuple(row) for row in parts[0]["expected_tests"])
+        wpt_expected = Counter(tuple(row) for row in parts[1]["expected_tests"])
+        actual = []
+        for kind, part in zip(SUITE_PARTS, parts, strict=True):
+            rows = part["executed_tests"]
+            if set(rows) != {label for label, _ in suite_commands(kind)}:
+                return False
+            actual.append(Counter(tuple(row) for tests in rows.values() for row in tests))
+        return (bool(expected) and all(len(row) == 2 and count == 1 for row, count in expected.items())
+                and len(wpt_expected) == 1 and sum(wpt_expected.values()) == 1
+                and next(iter(wpt_expected))[1] == SENSITIVE_TESTS[-1][2]
+                and actual[1] == wpt_expected and actual[0] + actual[1] == expected
+                and not (actual[0] & actual[1]))
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def combine_suite_parts(base):
+    """Compose validated parts without hiding absent or conflicting evidence."""
+    parts = [read(base / kind / "result.json") for kind in SUITE_PARTS]
+    if (base / "suite/result.json").exists():
+        return None
+    for kind, part in zip(SUITE_PARTS, parts, strict=True):
+        if not isinstance(part, dict) or part.get("kind") != kind:
+            return None
+        steps = part.get("steps", [])
+        expected = [("fetch-wpt", ["bash", "scripts/fetch-wpt.sh"]),
+                    ("list-tests", inventory_command(kind)), *suite_commands(kind)]
+        if (part.get("status") != "passed"
+                or [(step.get("name"), step.get("command")) for step in steps] != expected
+                or any(step.get("exit") != 0 for step in steps)
+                or len(part.get("test_results", [])) < len(suite_commands(kind))):
+            return None
+    if parts[0].get("identity") != parts[1].get("identity") or not valid_suite_coverage(parts):
+        return None
+    return {"identity": parts[0]["identity"], "status": "passed", "kind": "suite",
+            "steps": [parts[0]["steps"][0], *parts[0]["steps"][2:], *parts[1]["steps"][2:]],
+            "test_results": [row for part in parts for row in part["test_results"]],
+            "parts": dict(zip(SUITE_PARTS, parts, strict=True))}
+
+
+def aggregate(root, jobs_result, split_suite=False):
     expected = read(root / "inputs/identity.json")
     checks = {"jobs_succeeded": jobs_result == "success", "same_revision": bool(expected)
               and expected.get("revision") == output("git", "rev-parse", "HEAD"),
@@ -258,7 +371,22 @@ def aggregate(root, jobs_result):
     summaries = {}
     for target in TARGETS:
         base = root / target
-        suite, package = (read(base / name / "result.json") for name in ("suite", "package"))
+        suite = combine_suite_parts(base) if split_suite else read(base / "suite/result.json")
+        package = read(base / "package/result.json")
+        core_dir = base / ("suite-core" if split_suite else "suite")
+        wpt_dir = base / ("suite-wpt" if split_suite else "suite")
+        if split_suite:
+            reports = [*(suite or {}).get("parts", {}).values(), package]
+            run_id = (expected or {}).get("run_id")
+            checks[target + ":run-provenance"] = (
+                isinstance(run_id, str) and run_id.isdigit() and int(run_id) > 0
+                and run_id == os.environ.get("GITHUB_RUN_ID") and len(reports) == 3
+                and all(isinstance(part, dict) and part.get("identity", {}).get("run_id") == run_id
+                        and isinstance(part.get("attempt"), str) and part["attempt"].isdigit()
+                        and int(part["attempt"]) > 0 for part in reports))
+            checks[target + ":toolchain"] = bool(suite and package) and (
+                bool(suite["identity"].get("rustc"))
+                and suite["identity"].get("rustc") == package.get("identity", {}).get("rustc"))
         checks[target + ":execution"] = all(
             isinstance(r, dict) and r.get("status") == "passed" and expected
             and all(r.get("identity", {}).get(k) == expected[k] for k in ("revision", "lock_sha256"))
@@ -268,12 +396,12 @@ def aggregate(root, jobs_result):
             for r, steps in ((suite, ["fetch-wpt", "full-suite",
                                       *(label for label, _ in SERIAL_SUITE_COMMANDS)]),
                              (package, ["default-library", "jit-probe-build", "ffi-smoke", "jit-smoke"])))
-        acid = read(base / "suite/acid3.json")
-        wpt = read(base / "suite/wpt.json")
-        web = read(base / "suite/web-api.json")
+        acid = read(core_dir / "acid3.json")
+        wpt = read(wpt_dir / "wpt.json")
+        web = read(core_dir / "web-api.json")
         ffi = read(base / "package/ffi.json")
         probe = read(base / "package/probe/probe.json")
-        native = read(base / "suite/native.json")
+        native = read(core_dir / "native.json")
         checks[target + ":full-suite"] = isinstance(suite, dict) and (
             len(suite.get("test_results", [])) >= 1 + len(SERIAL_SUITE_COMMANDS)
             and sum(int(row[0]) for row in suite["test_results"]) > 0
@@ -337,13 +465,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("prepare").add_argument("root", type=Path)
-    for kind in ("suite", "package"):
+    for kind in ("suite", *SUITE_PARTS, "package"):
         command = commands.add_parser(kind)
         command.add_argument("target", choices=TARGETS)
         command.add_argument("root", type=Path)
     command = commands.add_parser("aggregate")
     command.add_argument("root", type=Path)
     command.add_argument("--jobs-result", default="success")
+    command.add_argument("--split-suite", action="store_true")
     command = commands.add_parser("ffi-smoke")
     command.add_argument("library", type=Path)
     command.add_argument("destination", type=Path)
@@ -355,7 +484,7 @@ def main():
         ffi_smoke(args.library, args.destination)
         return 0
     if args.command == "aggregate":
-        return 0 if aggregate(args.root, args.jobs_result) else 1
+        return 0 if aggregate(args.root, args.jobs_result, args.split_suite) else 1
     return 0 if run_target(args.command, args.target, args.root) else 1
 
 

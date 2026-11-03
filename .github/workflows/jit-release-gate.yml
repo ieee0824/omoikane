@@ -37,7 +37,7 @@ jobs:
           python3 -m unittest discover -s scripts/tests -p test_diagnose_gate5_wpt.py
           python3 -m unittest discover -s scripts/tests -p test_refresh_cached_path_deps.py
           python3 -m unittest discover -s scripts/tests -p test_gate5_space.py
-      - name: Resolve one dependency set for all six jobs
+      - name: Resolve one dependency set for all nine jobs
         run: python3 scripts/jit-gate5.py prepare .artifacts/jit-gate5/inputs
       - uses: actions/upload-artifact@v4
         with:
@@ -56,7 +56,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kind: [suite, package]
+        kind: [suite-core, suite-wpt, package]
         target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, aarch64-apple-darwin]
         include:
           - target: x86_64-unknown-linux-gnu
@@ -79,9 +79,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: Verify capacity and process-group contracts on the actual suite host
-        if: matrix.kind == 'suite'
+        if: matrix.kind != 'package'
         env:
-          GATE_SPACE_OUTPUT: .artifacts/jit-gate5/${{ matrix.target }}/space
+          GATE_SPACE_OUTPUT: .artifacts/jit-gate5/${{ matrix.target }}/${{ matrix.kind }}-space
         run: |
           set -o pipefail
           mkdir -p "$GATE_SPACE_OUTPUT"
@@ -93,17 +93,17 @@ jobs:
       - name: Use the shared lockfile
         run: cp .artifacts/jit-gate5/inputs/Cargo.lock Cargo.lock
       - name: Record capacity before restoring suite caches
-        if: matrix.kind == 'suite'
-        run: python3 scripts/gate5-space.py snapshot before-cache .artifacts/jit-gate5/${{ matrix.target }}/space
+        if: matrix.kind != 'package'
+        run: python3 scripts/gate5-space.py snapshot before-cache .artifacts/jit-gate5/${{ matrix.target }}/${{ matrix.kind }}-space
       # The release package build is short and off the critical path, so only
       # the suite keeps a Rust cache within the 10 GB repository limit (#1451).
       - uses: Swatinem/rust-cache@v2
-        if: matrix.kind == 'suite'
+        if: matrix.kind != 'package'
         with:
           # A failed suite may leave an incomplete cache at a permanent key.
           # Save only after successful jobs on main; PRs restore main's entry.
-          key: jit-gate5-v3-${{ matrix.target }}-${{ matrix.kind }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: jit-gate5-v3-${{ matrix.target }}-suite
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.kind == 'suite-core' }}
           cache-workspace-crates: true
       # rust-cache sees only the root workspace and drops the nested Boa path
       # dependencies from target/debug. Restore them after rust-cache cleanup.
@@ -112,13 +112,13 @@ jobs:
       # rustflags in .cargo/config.toml, because an exact hit
       # is then marked fresh below instead of being rebuilt (#1537).
       - name: Compute Boa suite cache key
-        if: matrix.kind == 'suite'
+        if: matrix.kind != 'package'
         id: boa-key
         run: echo "key=$KEY" >> "$GITHUB_OUTPUT"
         env:
           KEY: boa-gate5-v2-${{ matrix.target }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.cargo/config.toml', '.github/workflows/jit-release-gate.yml', 'scripts/jit-gate5.py', 'engine/boa/Cargo.toml', 'engine/boa/Cargo.lock', 'engine/boa/core/**', 'engine/boa/utils/**', 'engine/regress/**') }}
       - name: Restore Boa suite artifacts
-        if: matrix.kind == 'suite'
+        if: matrix.kind != 'package'
         id: boa-cache
         continue-on-error: true
         uses: actions/cache/restore@v4
@@ -141,53 +141,53 @@ jobs:
       # A fresh checkout makes every source newer than the restored outputs,
       # and Cargo then rebuilds path dependencies by mtime alone.
       - name: Mark restored Boa suite artifacts fresh
-        if: matrix.kind == 'suite' && steps.boa-cache.outputs.cache-hit == 'true'
+        if: matrix.kind != 'package' && steps.boa-cache.outputs.cache-hit == 'true'
         run: python3 scripts/refresh_cached_path_deps.py target/debug
       - uses: actions/cache@v4
-        if: matrix.kind == 'suite'
+        if: matrix.kind != 'package'
         with:
           path: .cache/wpt
           key: wpt-${{ hashFiles('tests/wpt/revision.txt') }}
       - name: Record capacity after restoring suite caches
-        if: matrix.kind == 'suite'
-        run: python3 scripts/gate5-space.py snapshot after-cache .artifacts/jit-gate5/${{ matrix.target }}/space
+        if: matrix.kind != 'package'
+        run: python3 scripts/gate5-space.py snapshot after-cache .artifacts/jit-gate5/${{ matrix.target }}/${{ matrix.kind }}-space
       - name: Install Linux system fonts
-        if: runner.os == 'Linux' && matrix.kind == 'suite'
+        if: runner.os == 'Linux' && matrix.kind != 'package'
         run: |
           sudo apt-get update
           sudo apt-get install -y fonts-dejavu fonts-liberation fonts-noto-core fonts-noto-cjk
       - name: Record capacity before executing the suite
-        if: matrix.kind == 'suite'
-        run: python3 scripts/gate5-space.py snapshot before-suite .artifacts/jit-gate5/${{ matrix.target }}/space
+        if: matrix.kind != 'package'
+        run: python3 scripts/gate5-space.py snapshot before-suite .artifacts/jit-gate5/${{ matrix.target }}/${{ matrix.kind }}-space
       - name: Run the Linux suite with disk headroom monitoring
-        if: runner.os == 'Linux' && matrix.kind == 'suite'
+        if: runner.os == 'Linux' && matrix.kind != 'package'
         env:
           GATE_KIND: ${{ matrix.kind }}
           GATE_TARGET: ${{ matrix.target }}
           OMOIKANE_GATE_DIAGNOSTICS: '1'
           CARGO_LOG: ''
         run: >-
-          python3 scripts/gate5-space.py run .artifacts/jit-gate5/${{ matrix.target }}/space --
+          python3 scripts/gate5-space.py run .artifacts/jit-gate5/${{ matrix.target }}/${{ matrix.kind }}-space --
           python3 scripts/jit-gate5.py "$GATE_KIND" "$GATE_TARGET" .artifacts/jit-gate5
       - name: Run full suite or build and smoke-test the release archive
-        if: runner.os != 'Linux' || matrix.kind != 'suite'
+        if: runner.os != 'Linux' || matrix.kind == 'package'
         env:
           GATE_KIND: ${{ matrix.kind }}
           GATE_TARGET: ${{ matrix.target }}
           OMOIKANE_GATE_DIAGNOSTICS: '1'
-          CARGO_LOG: ${{ matrix.target == 'aarch64-apple-darwin' && matrix.kind == 'suite' && 'cargo::core::compiler::fingerprint=info' || '' }}
+          CARGO_LOG: ${{ matrix.target == 'aarch64-apple-darwin' && matrix.kind != 'package' && 'cargo::core::compiler::fingerprint=info' || '' }}
         run: python3 scripts/jit-gate5.py "$GATE_KIND" "$GATE_TARGET" .artifacts/jit-gate5
       - name: Record capacity after executing the suite
-        if: always() && matrix.kind == 'suite'
-        run: python3 scripts/gate5-space.py snapshot after-suite .artifacts/jit-gate5/${{ matrix.target }}/space
+        if: always() && matrix.kind != 'package'
+        run: python3 scripts/gate5-space.py snapshot after-suite .artifacts/jit-gate5/${{ matrix.target }}/${{ matrix.kind }}-space
       - name: Capture a native WPT crash without replacing the failed suite
-        if: failure() && matrix.kind == 'suite' && matrix.target == 'aarch64-apple-darwin'
+        if: failure() && matrix.kind != 'package' && matrix.target == 'aarch64-apple-darwin'
         continue-on-error: true
         run: >-
           python3 scripts/diagnose-gate5-wpt.py
-          .artifacts/jit-gate5/aarch64-apple-darwin/suite
+          .artifacts/jit-gate5/aarch64-apple-darwin/${{ matrix.kind }}
       - name: Save Boa suite artifacts
-        if: matrix.kind == 'suite' && steps.boa-cache.outputs.cache-hit != 'true' && success() && github.ref == 'refs/heads/main'
+        if: matrix.kind == 'suite-core' && steps.boa-cache.outputs.cache-hit != 'true' && success() && github.ref == 'refs/heads/main'
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
@@ -214,16 +214,17 @@ jobs:
           path: .artifacts/jit-gate5/${{ matrix.target }}/package/${{ matrix.archive }}
           if-no-files-found: error
       - name: Retain WPT server startup logs
-        if: always() && matrix.kind == 'suite'
+        if: always() && matrix.kind != 'package'
         env:
           GATE_TARGET: ${{ matrix.target }}
+          GATE_KIND: ${{ matrix.kind }}
         run: |
           python3 - <<'PYTHON'
           import os
           from pathlib import Path
           import shutil
           source = Path(".artifacts/wptserve")
-          destination = Path(".artifacts/jit-gate5") / os.environ["GATE_TARGET"] / "suite/wptserve"
+          destination = Path(".artifacts/jit-gate5") / os.environ["GATE_TARGET"] / os.environ["GATE_KIND"] / "wptserve"
           for log in source.glob("*/server.log"):
               target = destination / log.relative_to(source)
               target.parent.mkdir(parents=True, exist_ok=True)
@@ -267,7 +268,7 @@ jobs:
         if: always()
         env:
           GATE_JOBS_RESULT: ${{ needs.target.result }}
-        run: python3 scripts/jit-gate5.py aggregate .artifacts/jit-gate5 --jobs-result "$GATE_JOBS_RESULT"
+        run: python3 scripts/jit-gate5.py aggregate .artifacts/jit-gate5 --split-suite --jobs-result "$GATE_JOBS_RESULT"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
