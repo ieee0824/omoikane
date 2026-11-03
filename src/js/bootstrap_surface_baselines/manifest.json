@@ -67,7 +67,11 @@
     "XPathEvaluator",
     "XPathExpression",
     "XPathResult",
+    "__omoikane_close_auxiliary_document",
+    "__omoikane_dispatch_visibilitychange",
     "__omoikane_find_in_page",
+    "__omoikane_flush_parser_autofocus",
+    "__omoikane_install_service_worker_global",
     "getSelection"
   ],
   "generated_source_sha256_scope": "Window SHA is mandatory; child SHA records the pre-adapter control and is not the expected compact-source SHA",
@@ -78,5 +82,18 @@
     "core_variant_groups": 9,
     "reason": "DOM-backed Highlight/XPath constructors and page-only find producer are intentionally omitted. Non-configurable find helper is omitted at definition, not reconfigured. The rest of all nine shape fields remain mandatory.",
     "evidence": "https://github.com/ieee0824/omoikane/issues/1689#issuecomment-6596910131"
+  },
+  "parser_autofocus_removal": {
+    "reason": "DOM-only page LOAD_SCRIPT helper; Rust callers are main page/iframe load paths. Window and ServiceWorker keep the original producer. Child negative and Window positive contracts added.",
+    "baseline_change": "Only the named globals and globalConstructorChains entries removed in three child fixtures; other shape fields and Window unchanged. Execution results must verify these expected fixtures."
+  },
+  "internal_helper_removal": {
+    "names": [
+      "__omoikane_dispatch_visibilitychange",
+      "__omoikane_close_auxiliary_document",
+      "__omoikane_install_service_worker_global"
+    ],
+    "reason": "Native callers require Window document or ServiceWorker runtime; DedicatedWorker, SharedWorker and Worklet have no production caller. Omit producers in compact child source; preserve original Window/ServiceWorker bytes.",
+    "baseline_change": "Only three named globals/globalConstructorChains entries per child fixture; remaining fields and Window unchanged. Runtime validation pending."
   }
 }

@@ -3032,13 +3032,6 @@
           "",
           "Object"
         ],
-        "name": "__omoikane_close_auxiliary_document"
-      },
-      {
-        "ancestors": [
-          "",
-          "Object"
-        ],
         "name": "__omoikane_commit_same_document_navigation"
       },
       {
@@ -3214,13 +3207,6 @@
           "",
           "Object"
         ],
-        "name": "__omoikane_dispatch_visibilitychange"
-      },
-      {
-        "ancestors": [
-          "",
-          "Object"
-        ],
         "name": "__omoikane_dispatch_wheel_input"
       },
       {
@@ -3239,13 +3225,6 @@
       },
       {
         "ancestors": [
-          "",
-          "Object"
-        ],
-        "name": "__omoikane_flush_parser_autofocus"
-      },
-      {
-        "ancestors": [
           "flushStyleSheets",
           "Object"
         ],
@@ -3257,13 +3236,6 @@
           "Object"
         ],
         "name": "__omoikane_forget_discarded_node_wrappers"
-      },
-      {
-        "ancestors": [
-          "",
-          "Object"
-        ],
-        "name": "__omoikane_install_service_worker_global"
       },
       {
         "ancestors": [
@@ -7018,14 +6990,6 @@
         "configurable": true,
         "enumerable": true,
         "kind": "data",
-        "name": "__omoikane_close_auxiliary_document",
-        "type": "function",
-        "writable": true
-      },
-      {
-        "configurable": true,
-        "enumerable": true,
-        "kind": "data",
         "name": "__omoikane_commit_same_document_navigation",
         "type": "function",
         "writable": true
@@ -7234,14 +7198,6 @@
         "configurable": true,
         "enumerable": true,
         "kind": "data",
-        "name": "__omoikane_dispatch_visibilitychange",
-        "type": "function",
-        "writable": true
-      },
-      {
-        "configurable": true,
-        "enumerable": true,
-        "kind": "data",
         "name": "__omoikane_dispatch_wheel_input",
         "type": "function",
         "writable": true
@@ -7259,14 +7215,6 @@
         "enumerable": true,
         "kind": "data",
         "name": "__omoikane_fetch_media_session_artwork",
-        "type": "function",
-        "writable": true
-      },
-      {
-        "configurable": true,
-        "enumerable": true,
-        "kind": "data",
-        "name": "__omoikane_flush_parser_autofocus",
         "type": "function",
         "writable": true
       },
@@ -7299,14 +7247,6 @@
         "enumerable": true,
         "kind": "data",
         "name": "__omoikane_generate_test_report",
-        "type": "function",
-        "writable": true
-      },
-      {
-        "configurable": true,
-        "enumerable": true,
-        "kind": "data",
-        "name": "__omoikane_install_service_worker_global",
         "type": "function",
         "writable": true
       },

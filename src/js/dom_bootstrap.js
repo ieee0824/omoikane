@@ -10,6 +10,11 @@ let omoikaneUserActivationState;
 (() => {
   // Capture intrinsic identities before author code can replace global Symbol.
   /* @omoikane-bootstrap worker-only node-brand */  function workerIsNode(value) { return value !== null && (typeof value === "object" || typeof value === "function") && safeWeakMapHas(canonicalNodeIds, value); }
+  // These DOM image interfaces are unavailable in child globals. Keep their
+  // typeof guards lexical so author-defined globals cannot supply brand hooks.
+  const HTMLImageElement = undefined;
+  const SVGImageElement = undefined;
+  const HTMLVideoElement = undefined;
   // Private genuine brands, with no public or constructible DOM interface.
   const Element = Object.freeze({
     [Symbol.hasInstance](value) {
@@ -1516,7 +1521,7 @@ let omoikaneUserActivationState;
     }
     return windows;
   }
-  class Window {
+/* @omoikane-bootstrap window-only window-focus-bridge */  class Window {
     constructor() {
       throw new TypeError("Illegal constructor");
     }
@@ -1534,7 +1539,25 @@ let omoikaneUserActivationState;
       }
     }
   }
-  // The browsing-context opener is separate from an author's own `opener`
+/* @omoikane-bootstrap end *//* @omoikane-bootstrap worker-only window-focus-bridge */  class Window {
+    constructor() {
+      throw new TypeError("Illegal constructor");
+    }
+
+    focus() {
+      if (!windowObjects.has(this)) {
+        throw new TypeError("Illegal invocation");
+      }
+      focusWindowAcrossDocuments();
+    }
+
+    blur() {
+      if (!windowObjects.has(this)) {
+        throw new TypeError("Illegal invocation");
+      }
+    }
+  }
+/* @omoikane-bootstrap end */  // The browsing-context opener is separate from an author's own `opener`
   // property. A named-window reuse updates this slot without replacing that
   // property; deleting the override reveals the current relation again.
   let browsingOpener = null;
@@ -3481,11 +3504,17 @@ let omoikaneUserActivationState;
     return focusChainIds()[0]?.[0] ?? null;
   }
 
-  function focusDocumentCommand(id, kind, args = []) {
+/* @omoikane-bootstrap window-only focus-command-bridge */  function focusDocumentCommand(id, kind, args = []) {
     if (id === null) return null;
     if (id === __omoikane_document_id) return safeApply(focusDocumentCommands[kind], undefined, args);
     return nativeForwardInput(id, "focus", [kind, ...args]);
-  }
+  }/* @omoikane-bootstrap end *//* @omoikane-bootstrap worker-only focus-command-bridge */  function focusDocumentCommand(id, kind, args = []) {
+    if (id === null) return null;
+    // Child globals have no DOM elements; their viewport snapshot has no element ID.
+    if (id === __omoikane_document_id && kind === "snapshot") return null;
+    if (id === __omoikane_document_id) return safeApply(focusDocumentCommands[kind], undefined, args);
+    return nativeForwardInput(id, "focus", [kind, ...args]);
+  }/* @omoikane-bootstrap end */
 
   const focusDocumentCommands = {
     snapshot() {
@@ -3610,11 +3639,13 @@ let omoikaneUserActivationState;
     focusAcrossDocuments(internalOwnerDocument(node), node, preventScroll);
   }
 
-  function focusWindowAcrossDocuments() {
+/* @omoikane-bootstrap window-only focus-window-id */  function focusWindowAcrossDocuments() {
     focusAcrossDocuments(focusDocument, null, true);
-  }
+  }/* @omoikane-bootstrap end *//* @omoikane-bootstrap worker-only focus-window-id */  function focusWindowAcrossDocuments() {
+    focusAcrossDocumentIds(__omoikane_document_id, null, true);
+  }/* @omoikane-bootstrap end */
 
-  const parserAutofocusProcessedDocuments = new WeakSet();
+/* @omoikane-bootstrap window-only parser-autofocus */  const parserAutofocusProcessedDocuments = new WeakSet();
   globalThis.__omoikane_flush_parser_autofocus = function() {
     const doc = focusDocument;
     if (parserAutofocusProcessedDocuments.has(doc)) return;
@@ -3631,7 +3662,7 @@ let omoikaneUserActivationState;
       const children = internalChildNodes(node);
       for (let index = children.length - 1; index >= 0; index--) pending.push(children[index]);
     }
-  };
+  };/* @omoikane-bootstrap end */
 
   // No focus event is cancelable, and all four are composed so they cross
   // shadow boundaries. Bubbling differs per event — `focusin` and `focusout`
@@ -22991,7 +23022,7 @@ let omoikaneUserActivationState;
     });
   }
 
-  /* @omoikane-bootstrap end */globalThis.__omoikane_dispatch_visibilitychange = function(documentId) {
+  /* @omoikane-bootstrap end *//* @omoikane-bootstrap window-only page-visibility-dispatch */globalThis.__omoikane_dispatch_visibilitychange = function(documentId) {
     const changedDocument = wrapNode(documentId);
     if (changedDocument) {
       if (documentId === __omoikane_document_id) {
@@ -22999,7 +23030,7 @@ let omoikaneUserActivationState;
       }
       changedDocument.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
     }
-  };
+  };/* @omoikane-bootstrap end */
   /* @omoikane-bootstrap window-only dispatchCspEvent-1818 */const dispatchCspEvent = Node.prototype.dispatchEvent;
   /* @omoikane-bootstrap end */globalThis.__omoikane_dispatch_csp_violation = function(targetId, init, workerGlobal) {
     const target = workerGlobal ? globalThis : wrapNode(targetId);
@@ -23013,14 +23044,14 @@ let omoikaneUserActivationState;
       platformEventInterfaces.queueCspReport(init);
     }
   };
-  globalThis.__omoikane_close_auxiliary_document = function() {
+  /* @omoikane-bootstrap window-only auxiliary-document-close */globalThis.__omoikane_close_auxiliary_document = function() {
     if (browsingInput.visibilityHiddenDocumentIds.has(__omoikane_document_id)) return;
     browsingInput.visibilityHiddenDocumentIds.add(__omoikane_document_id);
     globalThis.dispatchEvent(new platformEventInterfaces.PageTransitionEvent("pagehide"));
     recordVisibilityStateEntry("hidden", nativePerformanceNow());
     document.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
     globalThis.dispatchEvent(new Event("unload"));
-  };
+  };/* @omoikane-bootstrap end */
 
   /* @omoikane-bootstrap window-only pointerLockDispatchEvent-1821 */const pointerLockDispatchEvent = Node.prototype.dispatchEvent;
   globalThis.Node = Node;
@@ -38802,7 +38833,7 @@ globalThis.localStorage = storageForDocument("local", workerStorageDocument, glo
     }
   }
 
-  globalThis.__omoikane_install_service_worker_global = function(scope) {
+  /* @omoikane-bootstrap window-only service-worker-installer */globalThis.__omoikane_install_service_worker_global = function(scope) {
     // The common Worker bootstrap supplies importScripts, a separate Trusted
     // Types factory, and the response CSP before the ServiceWorker script runs.
     try { delete globalThis.DedicatedWorkerGlobalScope; } catch (_) { globalThis.DedicatedWorkerGlobalScope = undefined; }
@@ -38871,7 +38902,7 @@ globalThis.localStorage = storageForDocument("local", workerStorageDocument, glo
     });
     try { delete globalThis.postMessage; } catch (_) { globalThis.postMessage = undefined; }
     try { delete globalThis.close; } catch (_) { globalThis.close = undefined; }
-  };
+  };/* @omoikane-bootstrap end */
 
   globalThis.__omoikane_install_shared_worker_global = function(url, sharedWorkerId) {
     // Reuse the dedicated-worker global sanitisation and then install the

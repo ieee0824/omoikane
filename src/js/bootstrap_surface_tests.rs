@@ -36,6 +36,10 @@ const DOM_APIS: &[&str] = &[
     "XPathExpression",
     "XPathResult",
     "__omoikane_find_in_page",
+    "__omoikane_flush_parser_autofocus",
+    "__omoikane_dispatch_visibilitychange",
+    "__omoikane_close_auxiliary_document",
+    "__omoikane_install_service_worker_global",
     "CDATASection",
     "Comment",
     "DOMParser",
@@ -248,6 +252,15 @@ pub(super) fn record_surface(runtime: &mut JsRuntime, kind: &str) {
 #[test]
 fn window_bootstrap_preserves_document_and_common_apis() {
     let mut runtime = runtime_for_surface(None);
+    assert_callable(
+        &mut runtime,
+        &[
+            "__omoikane_flush_parser_autofocus",
+            "__omoikane_dispatch_visibilitychange",
+            "__omoikane_close_auxiliary_document",
+            "__omoikane_install_service_worker_global",
+        ],
+    );
     record_surface(&mut runtime, "window");
     assert_callable(&mut runtime, COMMON_APIS);
     assert_callable(

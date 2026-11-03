@@ -7,6 +7,36 @@
     eventTarget.dispatchEvent(new Event('probe'));
     eventTarget.dispatchEvent(new Event('probe'));
     require(calls === 1, 'EventTarget once');
+    for (const method of ['focus', 'blur']) {
+        require(globalThis[method]() === undefined, method + ' result');
+        require(globalThis[method]() === undefined, method + ' repeated result');
+        let invalidReceiver = false;
+        try { globalThis[method].call({}); }
+        catch (error) { invalidReceiver = error.name === 'TypeError'; }
+        require(invalidReceiver, method + ' invalid receiver');
+    }
+    const brandContext = new OffscreenCanvas(1, 1).getContext('2d');
+    for (const name of ['HTMLImageElement', 'SVGImageElement', 'HTMLVideoElement']) {
+        const previous = Object.getOwnPropertyDescriptor(globalThis, name);
+        let reads = 0, calls = 0;
+        const forged = {[Symbol.hasInstance]: () => { calls++; return true; }};
+        Object.defineProperty(globalThis, name, {
+            configurable: true, get() { reads++; return forged; },
+        });
+        try {
+            for (const operation of [
+                () => brandContext.drawImage({}, 0, 0),
+                () => brandContext.createPattern({}, 'repeat'),
+            ]) {
+                let rejected = false;
+                try { operation(); } catch (error) { rejected = error.name === 'TypeError'; }
+                require(rejected && reads === 0 && calls === 0, name + ' captured brand');
+            }
+        } finally {
+            if (previous) Object.defineProperty(globalThis, name, previous);
+            else delete globalThis[name];
+        }
+    }
     const form = new FormData();
     form.append('word', 'value');
     require(form.get('word') === 'value', 'FormData');
