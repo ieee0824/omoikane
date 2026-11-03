@@ -188,6 +188,8 @@ pub(super) fn register(context: &mut Context, bindings: &mut BootstrapBindings) 
         NativeFunction::from_copy_closure(|_, args, context| {
             let id = parse_node_id(args.first(), context)?;
             ensure_same_origin_node(context, id)?;
+            #[cfg(test)]
+            host_callbacks::record_stylesheet_flush(id)?;
             flush(id, context)?;
             Ok(JsValue::undefined())
         }),

@@ -3,6 +3,7 @@ export let __omoikane_cookie_change_dispatch;
 export let __omoikane_cookie_change_reset;
 export let __omoikane_update_auxiliary_opener;
 export let __omoikane_parser_update;
+export let __omoikane_flush_stylesheets;
 export const __omoikane_service_worker_lifecycle = {};
 // Read by window_members.js; assigned once the activation state exists.
 let omoikaneUserActivationState;
@@ -12753,7 +12754,7 @@ let omoikaneUserActivationState;
     if (validationReady) nativeFlushValidation(internalNodeId(globalThis.document));
     for (const sheet of Array.from(dirtyStyleSheets)) sheet.__flush();
   }
-  globalThis.__omoikane_flush_stylesheets = flushStyleSheets;
+  __omoikane_flush_stylesheets = flushStyleSheets;
 
   const registeredTypedProperties = new Map();
 

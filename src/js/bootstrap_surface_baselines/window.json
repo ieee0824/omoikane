@@ -4616,13 +4616,6 @@
       },
       {
         "ancestors": [
-          "flushStyleSheets",
-          "Object"
-        ],
-        "name": "__omoikane_flush_stylesheets"
-      },
-      {
-        "ancestors": [
           "forgetDiscardedNodeWrappers",
           "Object"
         ],
@@ -9871,14 +9864,6 @@
         "enumerable": true,
         "kind": "data",
         "name": "__omoikane_flush_parser_autofocus",
-        "type": "function",
-        "writable": true
-      },
-      {
-        "configurable": true,
-        "enumerable": true,
-        "kind": "data",
-        "name": "__omoikane_flush_stylesheets",
         "type": "function",
         "writable": true
       },
@@ -15325,6 +15310,6 @@
     ]
   },
   "generated_source_sha256": [
-    "583d03d4b05310b5ddc53300aa1aee58a546d750e65bc3a4f114e5b8c884dc26"
+    "77454117cc573ed5abb960a98021f6a392b20c744da8bc6fda43d8a4d0ee5654"
   ]
 }

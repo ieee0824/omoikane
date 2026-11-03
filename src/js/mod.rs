@@ -170,6 +170,9 @@ mod form_state;
 mod form_submission;
 mod frame_policy;
 mod geolocation;
+#[cfg(test)]
+mod host_callback_factory_tests;
+mod host_callbacks;
 pub use geolocation::GeolocationPositionData;
 mod gamepad;
 pub use gamepad::{
@@ -1096,6 +1099,7 @@ fn capture_window_bootstrap_callbacks(
     document_id: usize,
 ) -> JsResult<()> {
     capture_parser_update_callback(host_state, namespace, document_id, context)?;
+    host_callbacks::capture(host_state, namespace, document_id, context)?;
     let lifecycle = namespace.get(js_string!("__omoikane_service_worker_lifecycle"), context)?;
     let lifecycle = lifecycle.as_object().ok_or_else(|| {
         JsNativeError::error().with_message("ServiceWorker lifecycle callbacks are unavailable")
@@ -2538,6 +2542,7 @@ struct HostState {
     /// Private bootstrap callbacks, keyed by their owning Document realm.
     service_worker_lifecycle_callbacks: HashMap<usize, JsObject>,
     parser_update_callbacks: HashMap<usize, JsValue>,
+    host_callbacks: host_callbacks::DocumentCallbacks,
     /// Default policy callbacks belong to the target Document's realm,
     /// including when an element is adopted or used through another realm.
     /// Slots are TrustedHTML, TrustedScript, and TrustedScriptURL.
@@ -2967,6 +2972,7 @@ unsafe impl Trace for HostState {
         for callbacks in self.service_worker_lifecycle_callbacks.values() {
             unsafe { callbacks.trace(tracer) };
         }
+        unsafe { self.host_callbacks.trace(tracer) };
         for callback in self.parser_update_callbacks.values() {
             unsafe { callback.trace(tracer) };
         }
@@ -3561,6 +3567,7 @@ impl HostState {
             report_observer_dispatchers: HashMap::new(),
             service_worker_lifecycle_callbacks: HashMap::new(),
             parser_update_callbacks: HashMap::new(),
+            host_callbacks: Default::default(),
             trusted_type_default_callbacks: HashMap::new(),
             trusted_script_text_approvals: HashMap::new(),
             current_window_events: HashMap::new(),
@@ -6614,6 +6621,7 @@ impl HostState {
         self.report_observer_dispatchers.remove(&document_id);
         self.service_worker_lifecycle_callbacks.remove(&document_id);
         self.parser_update_callbacks.remove(&document_id);
+        self.host_callbacks.remove(document_id);
         self.clear_document_target(document_id);
         self.document_base_urls.remove(&document_id);
         if let Some(origin) = self.document_security_origins.remove(&document_id) {
@@ -6769,6 +6777,7 @@ impl HostState {
         self.report_observer_dispatchers.remove(&document_id);
         self.service_worker_lifecycle_callbacks.remove(&document_id);
         self.parser_update_callbacks.remove(&document_id);
+        self.host_callbacks.remove(document_id);
         self.clear_document_target(document_id);
         self.document_base_urls.remove(&document_id);
         if let Some(origin) = self.document_security_origins.remove(&document_id) {
@@ -10397,7 +10406,7 @@ impl JsRuntime {
     fn paint_document_at_current_image_time(
         &mut self,
     ) -> Result<crate::paint::Canvas, crate::paint::PaintError> {
-        self.eval("__omoikane_flush_stylesheets()")
+        self.flush_stylesheets()
             .map_err(|_| crate::paint::PaintError::InvalidImageBuffer)?;
         let mut state = self.host_state.borrow_mut();
         let start = Instant::now();
@@ -10481,7 +10490,7 @@ impl JsRuntime {
     /// The adjusted layout is shared with CSSOM geometry queries and rebuilt
     /// only when a tracked style, layout, paint, or scroll generation changes.
     pub(crate) fn hit_test(&mut self, x: f32, y: f32) -> Option<NodeHandle> {
-        self.eval("__omoikane_flush_stylesheets()").ok()?;
+        self.flush_stylesheets().ok()?;
         if !x.is_finite() || !y.is_finite() {
             return None;
         }
@@ -15708,6 +15717,7 @@ impl Drop for JsRuntime {
         state.iframe_context_ids.clear();
         state.node_lifetimes = node_lifetime::NodeLifetimes::default();
         state.event_loop = EventLoop::default();
+        state.host_callbacks = Default::default();
         state.trusted_type_default_callbacks.clear();
         state.auxiliary_opener_updaters.clear();
         state.trusted_script_text_approvals.clear();

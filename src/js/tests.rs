@@ -23983,6 +23983,64 @@ fn get_computed_style_uses_replaced_shadow_and_iframe_layout_sizes() {
 }
 
 #[test]
+fn stylesheet_flush_is_private_and_host_calls_ignore_author_shadowing() {
+    let mut runtime = runtime_from_html(
+        "<html><head><style>#target { width: 20px; height: 20px; }</style></head>\
+         <body><div id='target'></div></body></html>",
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            r#"JSON.stringify([
+            '__omoikane_flush_stylesheets' in globalThis,
+            Object.getOwnPropertyDescriptor(globalThis, '__omoikane_flush_stylesheets') === undefined,
+            typeof __omoikane_flush_stylesheets
+        ])"#
+        ),
+        "[false,true,\"undefined\"]",
+    );
+    runtime
+        .eval(
+            r#"
+        globalThis.flushHijacks = 0;
+        globalThis.__omoikane_flush_stylesheets = () => {
+            flushHijacks++;
+            throw new Error('author stylesheet flush');
+        };
+        document.styleSheets[0].insertRule('#target { width: 37px; }', 1);
+    "#,
+        )
+        .unwrap();
+    let document_id = runtime.document().identity();
+    let entries = |runtime: &JsRuntime| {
+        runtime
+            .host_state
+            .borrow()
+            .host_callbacks
+            .stylesheet_flush_entries(document_id)
+    };
+    boa_gc::force_collect();
+    let before = entries(&runtime);
+    runtime.flush_stylesheets().unwrap();
+    assert_eq!(entries(&runtime), before + 1);
+    let before = entries(&runtime);
+    runtime.paint_current_document().unwrap();
+    assert_eq!(entries(&runtime), before + 1);
+    let before = entries(&runtime);
+    assert!(runtime.hit_test(10.0, 10.0).is_some());
+    assert_eq!(entries(&runtime), before + 1);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "getComputedStyle(document.getElementById('target')).width"
+        ),
+        "37px"
+    );
+    runtime.eval("void document.fonts.size").unwrap();
+    assert_eq!(eval_str(&mut runtime, "String(flushHijacks)"), "0");
+}
+
+#[test]
 fn constructable_stylesheet_adoption_uses_captured_weak_map_methods() {
     let mut runtime = runtime_from_html("<html><body><div id='host'></div></body></html>");
     let result = eval_str(

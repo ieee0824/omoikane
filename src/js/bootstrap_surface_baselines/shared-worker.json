@@ -3239,13 +3239,6 @@
       },
       {
         "ancestors": [
-          "flushStyleSheets",
-          "Object"
-        ],
-        "name": "__omoikane_flush_stylesheets"
-      },
-      {
-        "ancestors": [
           "forgetDiscardedNodeWrappers",
           "Object"
         ],
@@ -7260,14 +7253,6 @@
         "enumerable": true,
         "kind": "data",
         "name": "__omoikane_fetch_media_session_artwork",
-        "type": "function",
-        "writable": true
-      },
-      {
-        "configurable": true,
-        "enumerable": true,
-        "kind": "data",
-        "name": "__omoikane_flush_stylesheets",
         "type": "function",
         "writable": true
       },
@@ -12034,6 +12019,6 @@
     ]
   },
   "generated_source_sha256": [
-    "3fb3c12a74194a847406c70300baf2ede887879405967ae0082d7ce0c95e3122"
+    "b05625ab1d0bb49536ca9c3ea0fab423b06cce5f9f58c28851cf5a278869e5be"
   ]
 }

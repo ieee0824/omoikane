@@ -10751,6 +10751,52 @@ div { color: currentColor; width: 10px; height: 10px; border: 2px solid currentC
 }
 
 #[test]
+fn render_document_uses_the_private_stylesheet_callback() {
+    let document = TreeBuilder::parse(
+        r#"<html><head><style>
+        html, body { margin:0; }
+        #target { width:10px; height:10px; background:white; }
+        #target.red { background:red; }
+    </style></head><body><div id="target"></div><script>
+        document.getElementById('target').className = 'red';
+        globalThis.__omoikane_flush_stylesheets = () => {
+            document.body.setAttribute('data-public-flush-called', 'true');
+            throw new Error('author stylesheet flush');
+        };
+    </script></body></html>"#,
+    )
+    .document();
+    let (canvas, calls) = crate::js::JsRuntime::observe_stylesheet_host_flushes(|| {
+        render_document(
+            &document,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+        )
+        .unwrap()
+    });
+    let render_calls: Vec<_> = calls
+        .iter()
+        .filter(|row| {
+            std::path::Path::new(row.1)
+                .ends_with(std::path::Path::new("src").join("paint").join("mod.rs"))
+        })
+        .collect();
+    assert_eq!(
+        render_calls.len(),
+        1,
+        "successful render host flush calls: {calls:?}"
+    );
+    assert_eq!(render_calls[0].0, document.identity());
+    let body = find_first_descendant_by_tag(&document, "body").unwrap();
+    assert_eq!(body.get_attribute("data-public-flush-called"), None);
+    assert_eq!(canvas.pixel(5, 5), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
 fn render_document_executes_inline_script() {
     let html = r#"<html><head><style>
         body { margin: 0; }
