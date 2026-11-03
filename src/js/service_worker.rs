@@ -417,6 +417,18 @@ fn call_lifecycle_callback(runtime: &mut JsRuntime, name: &str, args: &[JsValue]
     })
 }
 
+/// Dispatches an owned JSON payload through the callback retained for a
+/// ServiceWorker realm. The bootstrap namespace is deliberately not exposed
+/// on the worker global, so host-delivered events must use this retained hook.
+pub(super) fn dispatch_owned_lifecycle_payload(
+    runtime: &mut JsRuntime,
+    name: &str,
+    payload: &serde_json::Value,
+) -> JsResult<()> {
+    let payload = runtime.with_active_host(|context| JsValue::from_json(payload, context))?;
+    call_lifecycle_callback(runtime, name, &[payload])
+}
+
 /// Transfers lifecycle completion to the owner without sharing realm values.
 pub(super) fn lifecycle_complete_native(
     _: &JsValue,

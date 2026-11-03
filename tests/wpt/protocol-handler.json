@@ -1,0 +1,16 @@
+{
+  "tests": [
+    {
+      "path": "html/webappapis/system-state-and-capabilities/the-navigator-object/protocol.https.html",
+      "server": "wptserve"
+    },
+    {
+      "path": "html/webappapis/system-state-and-capabilities/the-navigator-object/historical.https.window.js",
+      "server": "wptserve"
+    },
+    {
+      "path": "html/webappapis/system-state-and-capabilities/the-navigator-object/secure_context.html",
+      "server": "wptserve-http"
+    }
+  ]
+}

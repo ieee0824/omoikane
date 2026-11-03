@@ -1,0 +1,5 @@
+{
+  "tests": [
+    { "path": "serial/idlharness.https.any.js", "server": "wptserve" }
+  ]
+}

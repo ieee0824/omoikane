@@ -1067,6 +1067,163 @@ fn service_worker_register_rejects_insecure_and_opaque_origins() {
 }
 
 #[test]
+fn push_subscription_owns_options_keys_state_and_unsubscribe() {
+    let fixture = super::service_worker_tests::ServiceWorkerFixture::new();
+    let provider = Arc::new(DeterministicPushProvider::default());
+    provider.set_supported(true);
+    provider.set_permission("granted");
+    let mut runtime = JsRuntime::with_document_and_url(
+        default_document(),
+        &format!("{}/app/index.html", fixture.origin),
+    )
+    .unwrap();
+    runtime.set_push_provider(provider.clone());
+    runtime.set_notification_permission("granted").unwrap();
+    runtime
+        .eval(
+            r#"globalThis.pushProbe = 'pending';
+               navigator.serviceWorker.register('/app/push.js', {scope:'/app/'}).then(async registration => {
+                 const key = new Uint8Array(65); key[0] = 4; key.fill(7, 1);
+                 const subscription = await registration.pushManager.subscribe({
+                   userVisibleOnly: true, applicationServerKey: key,
+                 });
+                 const current = await registration.pushManager.getSubscription();
+                 pushProbe = JSON.stringify({
+                   sameEndpoint: current.endpoint === subscription.endpoint,
+                   endpoint: subscription.endpoint,
+                   permission: await registration.pushManager.permissionState({userVisibleOnly:true, applicationServerKey:key}),
+                   optionKey: new Uint8Array(subscription.options.applicationServerKey).length,
+                   p256dh: subscription.getKey('p256dh').byteLength,
+                   auth: subscription.getKey('auth').byteLength,
+                   json: subscription.toJSON(),
+                   removed: await subscription.unsubscribe(),
+                   missing: await registration.pushManager.getSubscription(),
+                 });
+               }).catch(error => pushProbe = error.name + ':' + error.message);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    let value: serde_json::Value = serde_json::from_str(&eval_str(&mut runtime, "pushProbe"))
+        .expect("subscription probe returns JSON");
+    assert_eq!(value["sameEndpoint"], true);
+    assert_eq!(value["permission"], "granted");
+    assert_eq!(value["optionKey"], 65);
+    assert_eq!(value["p256dh"], 65);
+    assert_eq!(value["auth"], 16);
+    assert_eq!(value["removed"], true);
+    assert!(value["missing"].is_null());
+    assert!(value["endpoint"].as_str().unwrap().starts_with("https://"));
+    assert!(provider.subscriptions().is_empty());
+    provider.set_permission("provider-bug");
+    runtime
+        .eval(
+            r#"pushProbe = 'pending';
+               navigator.serviceWorker.ready.then(registration =>
+                 registration.pushManager.permissionState().then(
+                   () => pushProbe = 'resolved', error => pushProbe = error.name));"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "pushProbe"), "OperationError");
+    drop(runtime);
+    assert_eq!(fixture.finish(), vec!["/app/push.js".to_owned()]);
+}
+
+#[test]
+fn push_delivery_reaches_trusted_service_worker_events_and_validates_boundaries() {
+    let mut insecure =
+        JsRuntime::with_document_and_url(default_document(), "http://push-insecure.example.test/")
+            .unwrap();
+    assert_eq!(
+        eval_str(
+            &mut insecure,
+            "typeof PushManager + ':' + ('pushManager' in globalThis)"
+        ),
+        "undefined:false"
+    );
+
+    let fixture = super::service_worker_tests::ServiceWorkerFixture::new();
+    let provider = Arc::new(DeterministicPushProvider::default());
+    provider.set_supported(true);
+    provider.set_permission("granted");
+    let mut runtime = JsRuntime::with_document_and_url(
+        default_document(),
+        &format!("{}/app/index.html", fixture.origin),
+    )
+    .unwrap();
+    runtime.set_push_provider(provider.clone());
+    runtime.set_notification_permission("granted").unwrap();
+    runtime
+        .eval(
+            r#"globalThis.pushReady = false;
+               globalThis.pushErrors = [];
+               navigator.serviceWorker.register('/app/push.js', {scope:'/app/'}).then(async registration => {
+                 for (const key of ['', new Uint8Array(), new Uint8Array([1,2,3])]) {
+                   try { await registration.pushManager.subscribe({applicationServerKey:key}); }
+                   catch (error) { pushErrors.push(error.name); }
+                 }
+                 pushReady = registration.pushManager === registration.pushManager &&
+                   Object.isFrozen(PushManager.supportedContentEncodings) &&
+                   PushManager.supportedContentEncodings.includes('aes128gcm');
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "String(pushReady)"), "true");
+    assert_eq!(
+        eval_str(&mut runtime, "pushErrors.join(',')"),
+        "InvalidAccessError,InvalidAccessError,InvalidAccessError"
+    );
+    let scope = format!("{}/app/", fixture.origin);
+    assert!(
+        runtime
+            .deliver_push_message(&scope, Some("hello".as_bytes()))
+            .unwrap()
+    );
+    let subscription = PushSubscriptionData {
+        endpoint: "https://push.invalid/replacement".into(),
+        expiration_time: None,
+        options: PushSubscriptionOptionsData {
+            user_visible_only: true,
+            application_server_key: None,
+        },
+        p256dh: vec![4; 65],
+        auth: vec![8; 16],
+    };
+    assert!(
+        runtime
+            .deliver_push_subscription_change(&scope, Some(&subscription), None)
+            .unwrap()
+    );
+    let worker = runtime
+        .host_state
+        .borrow()
+        .workers
+        .values()
+        .find(|entry| {
+            entry
+                .borrow()
+                .runtime
+                .host_state
+                .borrow()
+                .worker_service_worker_scope
+                .as_deref()
+                == Some(scope.as_str())
+        })
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        eval_str(
+            &mut worker.borrow_mut().runtime,
+            "JSON.stringify(pushProbe)"
+        ),
+        r#"[{"trusted":true,"brand":"[object PushEvent]","text":"hello","bytes":[104,101,108,108,111]},{"change":true,"old":null,"next":"https://push.invalid/replacement"}]"#
+    );
+    drop(runtime);
+    assert_eq!(fixture.finish(), vec!["/app/push.js".to_owned()]);
+}
+
+#[test]
 fn webrtc_offer_answer_and_data_channel_are_deterministic() {
     let mut runtime = JsRuntime::new().unwrap();
     runtime
@@ -16661,9 +16818,9 @@ fn navigator_storage_is_secure_context_only_and_denial_is_not_fixed_success() {
     assert_eq!(
         eval_str(
             &mut insecure,
-            "typeof StorageManager + ':' + ('storage' in navigator)"
+            "typeof StorageManager + ':' + ('storage' in navigator) + ':' + typeof FileSystemHandle"
         ),
-        "undefined:false"
+        "undefined:false:undefined"
     );
     {
         let mut state = insecure.host_state.borrow_mut();
@@ -16706,7 +16863,7 @@ fn navigator_storage_rejects_operations_for_an_opaque_secure_origin() {
         .insert(document_id, None);
     runtime
         .eval(
-            r#"globalThis.opaqueProbe = { done: false, exposed: false, rejected: false };
+            r#"globalThis.opaqueProbe = { done: false, exposed: false, rejected: false, directoryRejected: false };
                    (() => {
                      opaqueProbe.exposed = typeof StorageManager === 'function' &&
                        navigator.storage instanceof StorageManager;
@@ -16714,6 +16871,7 @@ fn navigator_storage_rejects_operations_for_an_opaque_secure_origin() {
                        () => { opaqueProbe.done = true; },
                        error => { opaqueProbe.done = true; opaqueProbe.rejected = error instanceof TypeError; }
                      );
+                     navigator.storage.getDirectory().catch(error => { opaqueProbe.directoryRejected = error.name === 'SecurityError'; });
                    })();"#,
         )
         .unwrap();
@@ -16721,9 +16879,9 @@ fn navigator_storage_rejects_operations_for_an_opaque_secure_origin() {
     assert_eq!(
         eval_str(
             &mut runtime,
-            "opaqueProbe.done + ':' + opaqueProbe.exposed + ':' + opaqueProbe.rejected"
+            "opaqueProbe.done + ':' + opaqueProbe.exposed + ':' + opaqueProbe.rejected + ':' + opaqueProbe.directoryRejected"
         ),
-        "true:true:true"
+        "true:true:true:true"
     );
 }
 
@@ -18831,6 +18989,1261 @@ fn media_session_actions_use_host_dispatch_and_validate_state_boundaries() {
         !runtime
             .dispatch_media_session_action("seekto", serde_json::json!({"seekTime": 8}))
             .unwrap()
+    );
+}
+
+fn test_gamepad(index: u32, timestamp: f64, axis: f64) -> GamepadSnapshot {
+    GamepadSnapshot {
+        id: "Deterministic Pad".to_string(),
+        index,
+        connected: true,
+        timestamp,
+        mapping: "standard".to_string(),
+        axes: vec![axis, -axis],
+        buttons: vec![GamepadButtonSnapshot {
+            pressed: axis > 0.5,
+            touched: axis > 0.0,
+            value: axis,
+        }],
+        haptic_effects: vec!["dual-rumble".to_string()],
+    }
+}
+
+#[test]
+fn gamepad_provider_preserves_slots_snapshots_and_connection_events() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicGamepadProvider::new(vec![test_gamepad(
+        2, 10.0, 0.25,
+    )]));
+    provider.set_user_gesture(true);
+    runtime.set_gamepad_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.gamepadEvents = [];
+               addEventListener('gamepadconnected', event => gamepadEvents.push('connect:' + event.gamepad.index));
+               addEventListener('gamepaddisconnected', event => gamepadEvents.push('disconnect:' + event.gamepad.index));"#,
+        )
+        .unwrap();
+    runtime.poll_gamepads().unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "gamepadEvents.join(',')"),
+        "connect:2"
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "JSON.stringify([navigator.getGamepads().length, navigator.getGamepads()[0], navigator.getGamepads()[2].id, navigator.getGamepads()[2].axes, navigator.getGamepads()[2].buttons[0].value])"
+        ),
+        r#"[3,null,"Deterministic Pad",[0.25,-0.25],0.25]"#
+    );
+    runtime
+        .eval("globalThis.firstGamepad = navigator.getGamepads()[2]")
+        .unwrap();
+
+    provider.publish(vec![test_gamepad(2, 20.0, 0.75)]);
+    runtime.poll_gamepads().unwrap();
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "String(firstGamepad === navigator.getGamepads()[2]) + ':' + firstGamepad.timestamp + ':' + firstGamepad.buttons[0].pressed"
+        ),
+        "true:20:true"
+    );
+
+    provider.publish(Vec::new());
+    runtime.poll_gamepads().unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "gamepadEvents.join(',')"),
+        "connect:2,disconnect:2"
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "String(firstGamepad.connected) + ':' + navigator.getGamepads().length"
+        ),
+        "false:0"
+    );
+}
+
+#[test]
+fn gamepad_haptics_validate_at_the_provider_boundary() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicGamepadProvider::new(vec![test_gamepad(
+        0, 1.0, 0.0,
+    )]));
+    provider.set_user_gesture(true);
+    runtime.set_gamepad_provider(provider.clone());
+    runtime.poll_gamepads().unwrap();
+    runtime
+        .eval(
+            r#"globalThis.hapticResult = '';
+               navigator.getGamepads()[0].vibrationActuator.playEffect('dual-rumble', {
+                 duration: 25, startDelay: 2, strongMagnitude: 1, weakMagnitude: 0.5
+               }).then(value => hapticResult = value);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "hapticResult"), "complete");
+    let requests = provider.haptic_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, 0);
+    let request = requests[0].1.as_ref().unwrap();
+    assert_eq!(request.effect, "dual-rumble");
+    assert_eq!(request.strong_magnitude, 1.0);
+    assert_eq!(request.weak_magnitude, 0.5);
+}
+
+#[test]
+fn gamepad_exposure_requires_a_gesture_and_permissions_policy() {
+    let mut runtime =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "https://gamepad.example.test/")
+            .unwrap();
+    let provider = Arc::new(DeterministicGamepadProvider::new(vec![test_gamepad(
+        0, 1.0, 0.0,
+    )]));
+    runtime.set_gamepad_provider(provider.clone());
+    assert_eq!(
+        eval_str(&mut runtime, "String(navigator.getGamepads().length)"),
+        "0"
+    );
+    provider.set_user_gesture(true);
+    assert_eq!(
+        eval_str(&mut runtime, "String(navigator.getGamepads().length)"),
+        "1"
+    );
+    runtime
+        .install_response_security_headers(&[("Permissions-Policy".into(), "gamepad=()".into())]);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "(() => { try { navigator.getGamepads(); return 'allowed'; } catch (error) { return error.name; } })()"
+        ),
+        "SecurityError"
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "String(!document.permissionsPolicy.allowsFeature('gamepad'))"
+        ),
+        "true"
+    );
+}
+
+fn orientation_snapshot(
+    orientation_type: ScreenOrientationType,
+    angle: u16,
+) -> ScreenOrientationSnapshot {
+    ScreenOrientationSnapshot {
+        orientation_type,
+        angle,
+    }
+}
+
+#[test]
+fn screen_orientation_lock_updates_state_and_fires_before_resolution() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicScreenOrientationProvider::new(
+        orientation_snapshot(ScreenOrientationType::PortraitPrimary, 0),
+    ));
+    runtime.set_screen_orientation_provider(provider.clone());
+    runtime.refresh_screen_orientation().unwrap();
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "JSON.stringify([screen instanceof Screen, screen.orientation instanceof ScreenOrientation, screen.orientation instanceof EventTarget, screen.orientation === screen.orientation, screen.orientation.type, screen.orientation.angle])"
+        ),
+        r#"[true,true,true,true,"portrait-primary",0]"#
+    );
+    runtime
+        .eval(
+            r#"globalThis.orientationLog = [];
+               screen.orientation.onchange = () => orientationLog.push('change:' + screen.orientation.type);
+               addEventListener('keydown', () => document.documentElement.requestFullscreen(), { once: true });
+               __omoikane_dispatch_keyboard_input('keydown', { key: 'Enter', code: 'Enter' });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime
+        .eval(
+            "screen.orientation.lock('landscape-secondary').then(() => orientationLog.push('resolved'))",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "orientationLog.join(',') + ':' + screen.orientation.angle"
+        ),
+        "change:landscape-secondary,resolved:270"
+    );
+    provider.publish(orientation_snapshot(
+        ScreenOrientationType::PortraitSecondary,
+        180,
+    ));
+    runtime.refresh_screen_orientation().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "orientationLog.slice(-1)[0]"),
+        "change:portrait-secondary"
+    );
+}
+
+#[test]
+fn screen_orientation_enforces_visibility_fullscreen_and_provider_failures() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicScreenOrientationProvider::default());
+    runtime.set_screen_orientation_provider(provider.clone());
+    runtime
+        .eval(
+            "globalThis.orientationError = ''; screen.orientation.lock('portrait').catch(error => orientationError = error.name)",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "orientationError"), "SecurityError");
+
+    runtime
+        .eval(
+            "addEventListener('keydown', () => document.documentElement.requestFullscreen(), { once: true }); __omoikane_dispatch_keyboard_input('keydown', { key: 'Enter', code: 'Enter' })",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    provider.fail_next(ScreenOrientationError::NotSupported("fixed display".into()));
+    runtime
+        .eval(
+            "orientationError = ''; screen.orientation.lock('portrait').catch(error => orientationError = error.name)",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "orientationError"),
+        "NotSupportedError"
+    );
+    runtime.set_page_visibility(true);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "(() => { try { screen.orientation.unlock(); return 'allowed'; } catch (error) { return error.name; } })()"
+        ),
+        "SecurityError"
+    );
+}
+
+#[test]
+fn screen_orientation_pending_child_lock_aborts_when_document_retires() {
+    let document = crate::html::TreeBuilder::parse("<iframe id='child'></iframe>").document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    runtime
+        .eval(
+            "addEventListener('keydown', () => document.documentElement.requestFullscreen(), { once: true }); __omoikane_dispatch_keyboard_input('keydown', { key: 'Enter', code: 'Enter' })",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime
+        .eval(
+            r#"globalThis.orientationAbort = '';
+               const frame = document.getElementById('child');
+               const pending = frame.contentWindow.screen.orientation.lock('portrait-primary');
+               frame.remove();
+               pending.catch(error => orientationAbort = error.name);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "orientationAbort"), "AbortError");
+}
+
+#[test]
+fn screen_orientation_sandbox_requires_allow_orientation_lock() {
+    let document = crate::html::TreeBuilder::parse(
+        "<iframe id='blocked' allow='fullscreen' sandbox='allow-scripts allow-same-origin'></iframe>\
+         <iframe id='allowed' allow='fullscreen' sandbox='allow-scripts allow-same-origin allow-orientation-lock'></iframe>",
+    )
+    .document();
+    let allowed_iframe = document.query_selector("#allowed").unwrap().identity();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    runtime
+        .eval("void document.getElementById('allowed').contentWindow")
+        .unwrap();
+    let allowed_root = runtime.host_state.borrow().iframe_documents[&allowed_iframe]
+        .document
+        .query_selector("html")
+        .unwrap();
+    runtime
+        .eval(
+            r#"globalThis.sandboxResults = [];
+               document.getElementById('blocked').contentWindow.screen.orientation
+                 .lock('portrait-primary').catch(error => sandboxResults.push(error.name));"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert!(
+        runtime
+            .host_state
+            .borrow_mut()
+            .request_fullscreen(&allowed_root)
+    );
+    runtime
+        .eval(
+            "document.getElementById('allowed').contentWindow.screen.orientation.lock('portrait-primary').then(() => sandboxResults.push('allowed'))",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "sandboxResults.sort().join(',')"),
+        "SecurityError,allowed"
+    );
+}
+
+#[test]
+fn wake_lock_aggregates_sentinels_and_releases_on_visibility_loss() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let provider = Arc::new(DeterministicWakeLockProvider::default());
+    runtime.set_wake_lock_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.wakeLog = [];
+               Promise.all([navigator.wakeLock.request(), navigator.wakeLock.request('screen')])
+                 .then(([first, second]) => {
+                   globalThis.firstWake = first;
+                   globalThis.secondWake = second;
+                   first.onrelease = () => wakeLog.push('first');
+                   second.addEventListener('release', () => wakeLog.push('second'));
+                 });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(provider.held_count(), 1);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "[firstWake instanceof WakeLockSentinel, firstWake.type, firstWake.released, navigator.wakeLock === navigator.wakeLock].join(':')"
+        ),
+        "true:screen:false:true"
+    );
+    runtime.eval("firstWake.release()").unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(provider.held_count(), 1);
+    runtime.set_page_visibility(true);
+    assert_eq!(provider.held_count(), 0);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "wakeLog.join(',') + ':' + firstWake.released + ':' + secondWake.released"
+        ),
+        "first,second:true:true"
+    );
+}
+
+#[test]
+fn wake_lock_enforces_type_policy_visibility_and_provider_failure() {
+    let mut runtime =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "https://wake-lock.example.test/")
+            .unwrap();
+    let provider = Arc::new(DeterministicWakeLockProvider::default());
+    runtime.set_wake_lock_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.wakeErrors = [];
+               navigator.wakeLock.request('system').catch(error => wakeErrors.push(error.name));"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    provider.fail_next("battery is low");
+    runtime
+        .eval("navigator.wakeLock.request().catch(error => wakeErrors.push(error.name))")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime.install_response_security_headers(&[(
+        "Permissions-Policy".into(),
+        "screen-wake-lock=()".into(),
+    )]);
+    runtime
+        .eval("navigator.wakeLock.request().catch(error => wakeErrors.push(error.name))")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "wakeErrors.join(',')"),
+        "TypeError,NotAllowedError,NotAllowedError"
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "String(!document.permissionsPolicy.allowsFeature('screen-wake-lock'))"
+        ),
+        "true"
+    );
+}
+
+#[test]
+fn wake_lock_host_revocation_and_document_retirement_release_platform_state() {
+    let document = crate::html::TreeBuilder::parse("<iframe id='child'></iframe>").document();
+    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let provider = Arc::new(DeterministicWakeLockProvider::default());
+    runtime.set_wake_lock_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.revoked = 0;
+               navigator.wakeLock.request().then(lock => {
+                 globalThis.hostLock = lock;
+                 lock.onrelease = () => revoked++;
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime.revoke_wake_locks();
+    assert_eq!(provider.held_count(), 0);
+    assert_eq!(
+        eval_str(&mut runtime, "revoked + ':' + hostLock.released"),
+        "1:true"
+    );
+
+    runtime
+        .eval(
+            r#"globalThis.childFrame = document.getElementById('child');
+               childFrame.contentWindow.navigator.wakeLock.request().then(lock => {
+                 globalThis.childLock = lock;
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(provider.held_count(), 1);
+    runtime.eval("childFrame.remove()").unwrap();
+    assert_eq!(provider.held_count(), 0);
+}
+
+#[test]
+fn web_authn_provider_receives_owned_normalized_requests_and_builds_responses() {
+    let mut runtime =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "https://login.example.test/app")
+            .unwrap();
+    let provider = Arc::new(DeterministicWebAuthnProvider::default());
+    provider.set_capabilities([
+        "conditionalGet".to_owned(),
+        "userVerifyingPlatformAuthenticator".to_owned(),
+        "embedder-private-value".to_owned(),
+    ]);
+    provider.respond_to_next_creation(Ok(WebAuthnCreationResponse {
+        credential_id: vec![1, 2, 3],
+        client_data_json: br#"{"type":"webauthn.create"}"#.to_vec(),
+        attestation_object: vec![0xa0],
+        authenticator_data: vec![4; 37],
+        public_key: Some(vec![5, 6]),
+        public_key_algorithm: -7,
+        transports: vec!["internal".into()],
+        authenticator_attachment: Some("platform".into()),
+        client_extension_results: serde_json::json!({"credProps":{"rk":true}}),
+    }));
+    runtime.set_web_authn_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.webAuthnResult = 'pending';
+               navigator.credentials.create({publicKey:{
+                 challenge: new Uint8Array([9,8,7]),
+                 rp: {name:'Example'},
+                 user: {id:new Uint8Array([6,5]),name:'user',displayName:'User'},
+                 pubKeyCredParams:[{type:'public-key',alg:-7}],
+                 authenticatorSelection:{residentKey:'required',userVerification:'required'}
+               }}).then(value => {
+                 globalThis.createdCredential = value;
+                 webAuthnResult = JSON.stringify(value);
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(provider.creation_requests().len(), 1);
+    let request = &provider.creation_requests()[0];
+    assert_eq!(request.origin, "https://login.example.test");
+    assert_eq!(request.rp_id, "login.example.test");
+    assert_eq!(request.challenge, [9, 8, 7]);
+    assert_eq!(request.user_id, [6, 5]);
+    assert_eq!(request.resident_key, "required");
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "[createdCredential instanceof PublicKeyCredential, createdCredential.response instanceof AuthenticatorAttestationResponse, createdCredential.id, createdCredential.rawId.byteLength, createdCredential.response.getTransports()[0], PublicKeyCredential.name].join(':')"
+        ),
+        "true:true:AQID:3:internal:PublicKeyCredential"
+    );
+    runtime
+        .eval("PublicKeyCredential.getClientCapabilities().then(value => globalThis.capabilityNames = Object.keys(value).join(','))")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "capabilityNames"),
+        "conditionalGet,userVerifyingPlatformAuthenticator"
+    );
+    runtime
+        .eval(
+            "PublicKeyCredential.signalUnknownCredential({}).catch(error => globalThis.signalError = error.name)",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "signalError"), "NotSupportedError");
+    assert!(eval_str(&mut runtime, "webAuthnResult").contains("credProps"));
+
+    provider.respond_to_next_assertion(Ok(WebAuthnAssertionResponse {
+        credential_id: vec![1, 2, 3],
+        client_data_json: br#"{"type":"webauthn.get"}"#.to_vec(),
+        authenticator_data: vec![7; 37],
+        signature: vec![8, 9],
+        user_handle: Some(vec![10]),
+        authenticator_attachment: Some("platform".into()),
+        client_extension_results: serde_json::json!({}),
+    }));
+    runtime
+        .eval(
+            r#"navigator.credentials.get({publicKey:{challenge:new Uint8Array([1]),
+               allowCredentials:[{type:'public-key',id:createdCredential.rawId}]}})
+               .then(value => globalThis.assertedCredential = value);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        provider.assertion_requests()[0].allow_credentials,
+        [vec![1, 2, 3]]
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "[assertedCredential.response.signature.byteLength, assertedCredential.response.userHandle.byteLength, navigator.credentials === navigator.credentials].join(':')"
+        ),
+        "2:1:true"
+    );
+}
+
+#[test]
+fn web_authn_enforces_abort_rp_policy_secure_context_and_retirement() {
+    let mut insecure =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "http://example.test/").unwrap();
+    assert_eq!(
+        eval_str(
+            &mut insecure,
+            "[typeof PublicKeyCredential, 'credentials' in navigator].join(':')"
+        ),
+        "undefined:false"
+    );
+
+    let document = crate::html::TreeBuilder::parse("<iframe id='child'></iframe>").document();
+    let mut runtime =
+        JsRuntime::with_document_and_url(document, "https://a.example.test/").unwrap();
+    let provider = Arc::new(DeterministicWebAuthnProvider::default());
+    runtime.set_web_authn_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.authErrors=[];
+               const controller=new AbortController();
+               navigator.credentials.create({signal:controller.signal,publicKey:{challenge:new Uint8Array([1]),rp:{name:'x'},user:{id:new Uint8Array([1]),name:'u',displayName:'u'},pubKeyCredParams:[{type:'public-key',alg:-7}]}}).catch(error=>authErrors.push(error.name));
+               controller.abort();
+               navigator.credentials.get({publicKey:{challenge:new Uint8Array([1]),rpId:'other.test'}}).catch(error=>authErrors.push(error.name));"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "authErrors.join(',')"),
+        "AbortError,SecurityError"
+    );
+    assert!(provider.creation_requests().is_empty());
+
+    runtime.install_response_security_headers(&[(
+        "Permissions-Policy".into(),
+        "publickey-credentials-get=()".into(),
+    )]);
+    runtime
+        .eval("navigator.credentials.get({publicKey:{challenge:new Uint8Array([1])}}).catch(error=>authErrors.push(error.name))")
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "authErrors.at(-1)"),
+        "NotAllowedError"
+    );
+
+    runtime
+        .eval("globalThis.childFrame=document.getElementById('child'); childFrame.remove()")
+        .unwrap();
+    assert!(!provider.cancelled_documents().is_empty());
+}
+
+#[test]
+fn opfs_handles_persist_owned_bytes_and_enforce_origin_quota() {
+    let storage = StorageManager::with_policy(32, StoragePersistencePolicy::Allow);
+    let mut runtime = JsRuntime::with_document_url_and_storage(
+        NodeHandle::document(),
+        "https://files.example.test/",
+        storage.clone(),
+        storage.create_session(),
+    )
+    .unwrap();
+    runtime
+        .eval(
+            r#"globalThis.opfsResult = 'pending';
+               (async () => {
+                 const root = await navigator.storage.getDirectory();
+                 const dir = await root.getDirectoryHandle('docs', {create:true});
+                 const handle = await dir.getFileHandle('note.txt', {create:true});
+                 const writer = await handle.createWritable();
+                 await writer.write('hello');
+                 await writer.close();
+                 const file = await handle.getFile();
+                 const entries = [];
+                 for await (const [name, value] of dir) entries.push(name + ':' + value.kind);
+                 opfsResult = [root.name, dir.kind, file.name, await file.text(), entries.join(','),
+                   (await root.resolve(handle)).join('/'), await handle.isSameEntry(await dir.getFileHandle('note.txt')),
+                   await handle.isSameEntry(structuredClone(handle))].join('|');
+               })().catch(error => { opfsResult = error.name + ':' + error.message; });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "opfsResult"),
+        "|directory|note.txt|hello|note.txt:file|docs/note.txt|true|true"
+    );
+    assert_eq!(
+        storage
+            .estimate(&StorageOrigin::from_url("https://files.example.test/").unwrap())
+            .usage,
+        17
+    );
+    runtime
+        .eval(
+            "globalThis.heldWriter = null; navigator.storage.getDirectory().then(root => root.getDirectoryHandle('docs')).then(dir => dir.getFileHandle('note.txt')).then(file => file.createWritable({ mode: 'exclusive' })).then(writer => { heldWriter = writer; });",
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    let mut same_origin = JsRuntime::with_document_url_and_storage(
+        NodeHandle::document(),
+        "https://files.example.test/other",
+        storage.clone(),
+        storage.create_session(),
+    )
+    .unwrap();
+    same_origin
+        .eval(
+            "globalThis.lockResult = 'pending'; navigator.storage.getDirectory().then(root => root.getDirectoryHandle('docs')).then(dir => dir.getFileHandle('note.txt')).then(file => file.createWritable()).then(() => { lockResult = 'unlocked'; }, error => { lockResult = error.name; });",
+        )
+        .unwrap();
+    same_origin.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut same_origin, "lockResult"),
+        "NoModificationAllowedError"
+    );
+    runtime.eval("heldWriter.abort()").unwrap();
+    runtime.run_until_idle().unwrap();
+    runtime
+        .eval(
+            r#"__omoikane_install_worker_global('https://files.example.test/worker.js', 'opfs-worker');
+               globalThis.syncResult = 'pending';
+               (async () => {
+                 const root = await navigator.storage.getDirectory();
+                 const file = await (await root.getDirectoryHandle('docs')).getFileHandle('note.txt');
+                 const access = await file.createSyncAccessHandle();
+                 const before = access.getSize();
+                 access.write(new Uint8Array([33]), {at: before});
+                 access.flush();
+                 access.close();
+                 syncResult = before + ':' + await (await file.getFile()).text();
+               })().catch(error => { syncResult = error.name + ':' + error.message; });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "syncResult"), "5:hello!");
+}
+
+#[test]
+fn web_share_normalizes_owned_data_consumes_activation_and_serializes_requests() {
+    let provider = Arc::new(DeterministicShareProvider::default());
+    provider.respond_to_next(Ok(()));
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_share_provider(provider.clone());
+    runtime
+        .eval(
+            r#"document.body.innerHTML = '<button id=share>share</button>';
+               globalThis.shareResult = 'pending';
+               globalThis.secondShare = 'pending';
+               const button = document.getElementById('share');
+               __omoikane_dispatch_mouse_input(button.__id, 'mousedown', {}, true);
+               const first = navigator.share({
+                 title: 42,
+                 text: 'body',
+                 url: '/shared',
+                 files: [new File([new Uint8Array([1, 2, 3])], 'data.bin', {type:'application/octet-stream', lastModified:7})]
+               });
+               navigator.share({text:'second'}).then(
+                 () => { secondShare = 'resolved'; },
+                 error => { secondShare = error.name; }
+               );
+               first.then(() => { shareResult = 'resolved'; }, error => { shareResult = error.name; });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "shareResult + ':' + secondShare"),
+        "resolved:InvalidStateError"
+    );
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "navigator.userActivation.isActive + ':' + navigator.canShare({url:'data:no'}) + ':' + navigator.canShare({text:''})"
+        ),
+        "false:false:true"
+    );
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].title.as_deref(), Some("42"));
+    assert_eq!(requests[0].text.as_deref(), Some("body"));
+    assert_eq!(requests[0].url.as_deref(), Some("http://localhost/shared"));
+    assert_eq!(requests[0].files[0].name, "data.bin");
+    assert_eq!(requests[0].files[0].bytes, vec![1, 2, 3]);
+}
+
+#[test]
+fn badging_normalizes_values_and_passes_owned_origin_to_provider() {
+    let provider = Arc::new(DeterministicBadgeProvider::default());
+    provider.set_disposition(BadgeDisposition::Applied);
+    let mut runtime =
+        JsRuntime::with_document_and_url(default_document(), "https://badge.example.test/inbox")
+            .unwrap();
+    runtime.set_badge_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.badgeResult = 'pending';
+               (async () => {
+                 await navigator.setAppBadge();
+                 await navigator.setAppBadge(10.9);
+                 await navigator.setAppBadge('3');
+                 await navigator.setAppBadge(0);
+                 await navigator.clearAppBadge();
+                 badgeResult = 'resolved';
+               })().catch(error => badgeResult = error.name);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "badgeResult"), "resolved");
+    let origin = "https://badge.example.test:443";
+    assert_eq!(
+        provider.requests(),
+        vec![
+            BadgeRequest {
+                origin: origin.into(),
+                context: BadgeContext::Document,
+                badge: AppBadge::Flag,
+            },
+            BadgeRequest {
+                origin: origin.into(),
+                context: BadgeContext::Document,
+                badge: AppBadge::Number(10),
+            },
+            BadgeRequest {
+                origin: origin.into(),
+                context: BadgeContext::Document,
+                badge: AppBadge::Number(3),
+            },
+            BadgeRequest {
+                origin: origin.into(),
+                context: BadgeContext::Document,
+                badge: AppBadge::Clear,
+            },
+            BadgeRequest {
+                origin: origin.into(),
+                context: BadgeContext::Document,
+                badge: AppBadge::Clear,
+            },
+        ]
+    );
+}
+
+#[test]
+fn badging_enforces_secure_range_provider_failure_and_worker_context() {
+    let mut insecure =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "http://example.test/").unwrap();
+    assert_eq!(
+        eval_str(
+            &mut insecure,
+            "typeof navigator.setAppBadge + ':' + typeof navigator.clearAppBadge"
+        ),
+        "undefined:undefined"
+    );
+
+    let provider = Arc::new(DeterministicBadgeProvider::default());
+    provider.fail_next(BadgeError {
+        name: "NotAllowedError".into(),
+        message: "badge permission denied".into(),
+    });
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_badge_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.badgeChecks = [];
+               for (const value of [-1, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN, 'bad', {}, [], Symbol('badge')]) {
+                 navigator.setAppBadge(value).then(
+                   () => badgeChecks.push('resolved'),
+                   error => badgeChecks.push(error.name));
+               }
+               navigator.setAppBadge(1).catch(error => badgeChecks.push(error.name));"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "badgeChecks.join(',')"),
+        "TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,TypeError,NotAllowedError"
+    );
+
+    runtime
+        .eval(
+            r#"globalThis.workerBadge = 'pending';
+               const source = encodeURIComponent(
+                 "navigator.setAppBadge(7).then(() => postMessage([navigator instanceof WorkerNavigator, Object.prototype.toString.call(navigator)]), error => postMessage(error.name))");
+               const badgeWorker = new Worker('data:text/javascript,' + source);
+               badgeWorker.onmessage = event => workerBadge = JSON.stringify(event.data);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "workerBadge"),
+        "[true,\"[object WorkerNavigator]\"]"
+    );
+    let requests = provider.requests();
+    assert_eq!(requests.last().unwrap().context, BadgeContext::Worker);
+    assert_eq!(requests.last().unwrap().badge, AppBadge::Number(7));
+}
+
+#[test]
+fn protocol_handlers_normalize_and_mutate_only_accepted_host_state() {
+    let provider = Arc::new(DeterministicProtocolHandlerProvider::default());
+    provider.set_disposition(ProtocolHandlerDisposition::Accepted);
+    let mut runtime = JsRuntime::with_document_and_url(
+        default_document(),
+        "https://handlers.example.test/app/page",
+    )
+    .unwrap();
+    runtime.set_protocol_handler_provider(provider.clone());
+    runtime
+        .eval(
+            r#"navigator.registerProtocolHandler('WEB+Mail', './open?target=%s');
+               navigator.registerProtocolHandler('mailto', '/mail?uri=%s');
+               navigator.unregisterProtocolHandler('web+mail', './open?target=%s');"#,
+        )
+        .unwrap();
+
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].0, ProtocolHandlerOperation::Register);
+    assert_eq!(requests[0].1.scheme, "web+mail");
+    assert_eq!(
+        requests[0].1.url_template,
+        "https://handlers.example.test/app/open?target=%s"
+    );
+    assert_eq!(requests[0].1.origin, "https://handlers.example.test");
+    assert_eq!(requests[2].0, ProtocolHandlerOperation::Unregister);
+    assert_eq!(provider.registrations().len(), 1);
+    assert!(
+        provider
+            .registrations()
+            .iter()
+            .any(|handler| handler.scheme == "mailto")
+    );
+
+    provider.set_disposition(ProtocolHandlerDisposition::Rejected);
+    runtime
+        .eval("navigator.registerProtocolHandler('web+denied', '/denied?url=%s')")
+        .unwrap();
+    assert_eq!(provider.registrations().len(), 1);
+}
+
+#[test]
+fn protocol_handlers_enforce_secure_webidl_scheme_template_and_origin_boundaries() {
+    let mut insecure =
+        JsRuntime::with_document_and_url(default_document(), "http://example.test/").unwrap();
+    assert_eq!(
+        eval_str(
+            &mut insecure,
+            "typeof navigator.registerProtocolHandler + ':' + typeof navigator.unregisterProtocolHandler"
+        ),
+        "undefined:undefined"
+    );
+
+    let provider = Arc::new(DeterministicProtocolHandlerProvider::default());
+    let mut runtime =
+        JsRuntime::with_document_and_url(default_document(), "https://handlers.example.test/page")
+            .unwrap();
+    runtime.set_protocol_handler_provider(provider.clone());
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            r#"[
+              (() => { try { navigator.registerProtocolHandler('http', '/?x=%s'); } catch (e) { return e.name; } })(),
+              (() => { try { navigator.registerProtocolHandler('web+ok', '/missing'); } catch (e) { return e.name; } })(),
+              (() => { try { navigator.registerProtocolHandler('web+ok', 'https://other.test/?x=%s'); } catch (e) { return e.name; } })(),
+              (() => { try { navigator.unregisterProtocolHandler('mailto:', '/?x=%s'); } catch (e) { return e.name; } })(),
+              (() => { try { navigator.registerProtocolHandler('web+ok'); } catch (e) { return e.name; } })()
+            ].join(',')"#,
+        ),
+        "SecurityError,SyntaxError,SecurityError,SecurityError,TypeError"
+    );
+    provider.fail_next(ProtocolHandlerError {
+        message: "host policy blocked registration".into(),
+    });
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "(() => { try { navigator.registerProtocolHandler('web+ok', '/?x=%s'); return 'none'; } catch (e) { return e.name; } })()"
+        ),
+        "SecurityError"
+    );
+}
+
+#[test]
+fn web_share_rejects_without_activation_and_reflects_provider_capability() {
+    let provider = Arc::new(DeterministicShareProvider::default());
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_share_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.shareDenied = 'pending';
+               navigator.share({text:'body'}).catch(error => { shareDenied = error.name; });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "shareDenied"), "NotAllowedError");
+    provider.set_supported(false);
+    assert_eq!(
+        eval_str(&mut runtime, "navigator.canShare({text:'body'})"),
+        "false"
+    );
+    assert!(provider.requests().is_empty());
+}
+
+#[test]
+fn web_share_enforces_secure_context_policy_provider_errors_and_retirement() {
+    let mut insecure =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "http://example.test/").unwrap();
+    assert_eq!(
+        eval_str(
+            &mut insecure,
+            "typeof navigator.share + ':' + typeof navigator.canShare"
+        ),
+        "undefined:undefined"
+    );
+
+    let provider = Arc::new(DeterministicShareProvider::default());
+    provider.respond_to_next(Err(ShareError {
+        name: "OperationError".into(),
+        message: "platform failure".into(),
+    }));
+    let mut runtime =
+        JsRuntime::with_document_and_url(default_document(), "https://share.example.test/page")
+            .unwrap();
+    runtime.set_share_provider(provider.clone());
+    runtime
+        .eval(
+            r#"document.body.innerHTML = '<button id=share>share</button>';
+               globalThis.shareFailure = 'pending';
+               const button = document.getElementById('share');
+               __omoikane_dispatch_mouse_input(button.__id, 'mousedown', {}, true);
+               navigator.share({text:'body'}).catch(error => { shareFailure = error.name; });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "shareFailure"), "OperationError");
+
+    runtime
+        .install_response_security_headers(&[("Permissions-Policy".into(), "web-share=()".into())]);
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "navigator.canShare({text:'blocked'}) + ':' + document.permissionsPolicy.allowsFeature('web-share')"
+        ),
+        "false:false"
+    );
+
+    provider.respond_to_next(Ok(()));
+    runtime.install_response_security_headers(&[]);
+    runtime
+        .eval(
+            r#"__omoikane_dispatch_mouse_input(button.__id, 'mousedown', {}, true);
+               globalThis.retiredShare = 'pending';
+               navigator.share({text:'retire'}).then(
+                 () => { retiredShare = 'resolved'; },
+                 error => { retiredShare = error.name; }
+               );"#,
+        )
+        .unwrap();
+    let document_id = runtime.document().identity();
+    runtime
+        .host_state
+        .borrow_mut()
+        .web_share
+        .retire_document(document_id);
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "retiredShare"), "AbortError");
+    assert_eq!(provider.cancelled_documents(), vec![document_id]);
+}
+
+#[test]
+fn web_serial_filters_opens_streams_controls_signals_and_forgets_permission() {
+    let provider = Arc::new(DeterministicSerialProvider::default());
+    provider.add_port(SerialPortInfo {
+        id: "usb-1".into(),
+        usb_vendor_id: Some(0x1234),
+        usb_product_id: Some(0x5678),
+        bluetooth_service_class_id: None,
+        connected: true,
+    });
+    provider.enqueue_read("usb-1", vec![1, 2, 3]);
+    let mut runtime =
+        JsRuntime::with_document_and_url(default_document(), "https://serial.example.test/page")
+            .unwrap();
+    runtime.set_serial_provider(provider.clone());
+    runtime
+        .eval(
+            r#"document.body.innerHTML = '<button id=choose>choose</button>';
+               const choose = document.getElementById('choose');
+               __omoikane_dispatch_mouse_input(choose.__id, 'mousedown', {}, true);
+               globalThis.serialResult = 'pending';
+               (async () => {
+                 const port = await navigator.serial.requestPort({filters:[{usbVendorId:0x1234, usbProductId:0x5678}]});
+                 const info = port.getInfo();
+                 await port.open({baudRate:115200});
+                 const reader = port.readable.getReader();
+                 const read = await reader.read();
+                 reader.releaseLock();
+                 const writer = port.writable.getWriter();
+                 await writer.write(Uint8Array.of(9, 8));
+                 writer.releaseLock();
+                 await port.setSignals({dataTerminalReady:true, requestToSend:true});
+                 const signals = await port.getSignals();
+                 await port.close();
+                 await port.forget();
+                 const remaining = await navigator.serial.getPorts();
+                 serialResult = [info.usbVendorId, info.usbProductId, Array.from(read.value),
+                   signals.clearToSend, remaining.length, port.readable, port.writable].join(':');
+               })().catch(error => serialResult = error.name + ':' + error.message);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "serialResult"),
+        "4660:22136:1,2,3:false:0::"
+    );
+    assert_eq!(provider.writes("usb-1"), vec![vec![9, 8]]);
+}
+
+#[test]
+fn web_serial_enforces_context_activation_validation_and_disconnect_events() {
+    let mut insecure =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "http://example.test/").unwrap();
+    assert_eq!(
+        eval_str(
+            &mut insecure,
+            "typeof navigator.serial + ':' + typeof Serial"
+        ),
+        "undefined:undefined"
+    );
+
+    let provider = Arc::new(DeterministicSerialProvider::default());
+    provider.add_port(SerialPortInfo {
+        id: "usb-2".into(),
+        usb_vendor_id: Some(7),
+        usb_product_id: None,
+        bluetooth_service_class_id: None,
+        connected: true,
+    });
+    let mut runtime =
+        JsRuntime::with_document_and_url(default_document(), "https://serial.example.test/")
+            .unwrap();
+    runtime.set_serial_provider(provider.clone());
+    runtime
+        .eval(
+            r#"globalThis.noActivation = 'pending';
+               navigator.serial.requestPort({}).catch(error => noActivation = error.name);
+               globalThis.invalidFilter = 'pending';
+               document.body.innerHTML = '<button id=choose>choose</button>';
+               const choose = document.getElementById('choose');
+               __omoikane_dispatch_mouse_input(choose.__id, 'mousedown', {}, true);
+               navigator.serial.requestPort({filters:[{usbProductId:1}]}).catch(error => invalidFilter = error.name);"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "noActivation"), "SecurityError");
+    assert_eq!(eval_str(&mut runtime, "invalidFilter"), "TypeError");
+
+    runtime
+        .eval(
+            r#"__omoikane_dispatch_mouse_input(choose.__id, 'mousedown', {}, true);
+               globalThis.disconnects = 0;
+               globalThis.serialDisconnects = 0;
+               navigator.serial.requestPort({filters:[{usbVendorId:7}]}).then(port => {
+                 globalThis.selectedSerialPort = port;
+                 port.ondisconnect = () => disconnects++;
+                 navigator.serial.ondisconnect = () => serialDisconnects++;
+               });"#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    provider.set_connected("usb-2", false);
+    runtime.eval("navigator.serial.getPorts()").unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(
+            &mut runtime,
+            "selectedSerialPort.connected + ':' + disconnects + ':' + serialDisconnects"
+        ),
+        "false:1:1"
+    );
+}
+
+#[test]
+fn web_serial_retires_open_provider_sessions_with_the_document() {
+    let provider = Arc::new(DeterministicSerialProvider::default());
+    provider.add_port(SerialPortInfo {
+        id: "retired-port".into(),
+        usb_vendor_id: Some(9),
+        usb_product_id: None,
+        bluetooth_service_class_id: None,
+        connected: true,
+    });
+    let origin = "https://retire.serial.test";
+    provider.request_port(origin, &[], &[]).unwrap();
+    provider
+        .open(
+            origin,
+            "retired-port",
+            &SerialOptions {
+                baud_rate: 9600,
+                data_bits: 8,
+                stop_bits: 1,
+                parity: "none".into(),
+                buffer_size: 255,
+                flow_control: "none".into(),
+            },
+        )
+        .unwrap();
+    let mut runtime =
+        JsRuntime::with_document_and_url(default_document(), "https://retire.serial.test/page")
+            .unwrap();
+    runtime.set_serial_provider(provider.clone());
+    let document_id = runtime.document().identity();
+    runtime
+        .host_state
+        .borrow()
+        .retire_web_serial_document(document_id);
+    assert_eq!(
+        provider.read(origin, "retired-port").unwrap_err().name,
+        "InvalidStateError"
+    );
+}
+
+#[test]
+fn payment_request_validates_and_passes_owned_data_to_provider() {
+    let provider = Arc::new(DeterministicPaymentProvider::default());
+    provider.set_supported(true);
+    provider.respond_to_next(Ok(PaymentSelection {
+        method_name: "basic-card".into(),
+        details: serde_json::json!({"token":"paid"}),
+        payer_name: Some("Ada".into()),
+        payer_email: None,
+        payer_phone: None,
+    }));
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_payment_provider(provider.clone());
+    runtime
+        .eval(
+            r#"
+      document.body.innerHTML = '<button id=pay>pay</button>';
+      const request = new PaymentRequest(
+        [{supportedMethods:'basic-card', data:{networks:['visa']}}],
+        {id:'order-7', total:{label:'Total', amount:{currency:'usd', value:'12.50'}}},
+        {requestPayerName:true}
+      );
+      globalThis.paymentResult = 'pending';
+      globalThis.canPay = 'pending';
+      request.canMakePayment().then(value => canPay = String(value));
+      __omoikane_dispatch_mouse_input(document.getElementById('pay').__id, 'mousedown', {}, true);
+      request.show().then(response => {
+        paymentResult = [response instanceof PaymentResponse, response.requestId,
+          response.methodName, response.details.token, response.payerName].join(':');
+        return response.complete('success');
+      });
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "canPay + ':' + paymentResult"),
+        "true:true:order-7:basic-card:paid:Ada"
+    );
+    let requests = provider.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].origin, "http://localhost");
+    assert_eq!(requests[0].methods[0].supported_methods, "basic-card");
+    assert_eq!(requests[0].details["total"]["amount"]["currency"], "USD");
+    assert_eq!(
+        provider.completions(),
+        vec![("order-7".into(), "success".into())]
+    );
+}
+
+#[test]
+fn payment_request_requires_activation_handles_failure_and_retirement() {
+    let provider = Arc::new(DeterministicPaymentProvider::default());
+    provider.set_supported(true);
+    provider.respond_to_next(Err(PaymentError {
+        name: "OperationError".into(),
+        message: "provider failed".into(),
+    }));
+    let mut runtime = JsRuntime::new().unwrap();
+    runtime.set_payment_provider(provider.clone());
+    runtime
+        .eval(
+            r#"
+      document.body.innerHTML = '<button id=pay>pay</button>';
+      const details = {total:{label:'Total', amount:{currency:'USD', value:'1'}}};
+      globalThis.denied = 'pending'; globalThis.failed = 'pending';
+      new PaymentRequest([{supportedMethods:'basic-card'}], details).show()
+        .catch(error => denied = error.name);
+      __omoikane_dispatch_mouse_input(document.getElementById('pay').__id, 'mousedown', {}, true);
+      new PaymentRequest([{supportedMethods:'basic-card'}], details).show()
+        .catch(error => failed = error.name);
+    "#,
+        )
+        .unwrap();
+    runtime.run_until_idle().unwrap();
+    assert_eq!(
+        eval_str(&mut runtime, "denied + ':' + failed"),
+        "NotAllowedError:OperationError"
+    );
+
+    provider.respond_to_next(Ok(PaymentSelection {
+        method_name: "basic-card".into(),
+        details: serde_json::json!({}),
+        payer_name: None,
+        payer_email: None,
+        payer_phone: None,
+    }));
+    runtime
+        .eval(
+            r#"
+      __omoikane_dispatch_mouse_input(document.getElementById('pay').__id, 'mousedown', {}, true);
+      globalThis.retiredPayment = 'pending';
+      new PaymentRequest([{supportedMethods:'basic-card'}], details).show()
+        .catch(error => retiredPayment = error.name);
+    "#,
+        )
+        .unwrap();
+    let document_id = runtime.document().identity();
+    runtime
+        .host_state
+        .borrow_mut()
+        .payment_request
+        .retire_document(document_id);
+    runtime.run_until_idle().unwrap();
+    assert_eq!(eval_str(&mut runtime, "retiredPayment"), "AbortError");
+    assert!(!provider.aborted_requests().is_empty());
+
+    let mut insecure =
+        JsRuntime::with_document_and_url(NodeHandle::document(), "http://example.test/").unwrap();
+    assert_eq!(
+        eval_str(&mut insecure, "typeof PaymentRequest"),
+        "undefined"
     );
 }
 

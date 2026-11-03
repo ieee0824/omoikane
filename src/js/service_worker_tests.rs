@@ -37,6 +37,26 @@ const LIFECYCLE_WORKER_SOURCE: &str = r#"
   }));
 "#;
 
+const PUSH_WORKER_SOURCE: &str = r#"
+  globalThis.pushProbe = [];
+  onpush = event => {
+    pushProbe.push({
+      trusted: event.isTrusted,
+      brand: Object.prototype.toString.call(event),
+      text: event.data?.text() ?? null,
+      bytes: event.data ? Array.from(event.data.bytes()) : null,
+    });
+    event.waitUntil(Promise.resolve());
+  };
+  onpushsubscriptionchange = event => {
+    pushProbe.push({
+      change: true,
+      old: event.oldSubscription?.endpoint ?? null,
+      next: event.newSubscription?.endpoint ?? null,
+    });
+  };
+"#;
+
 const CLOSE_ON_ACTIVATE_SOURCE: &str = r#"
   addEventListener('activate', () => terminateDuringActivate());
 "#;
@@ -370,6 +390,7 @@ fn respond_service_worker_fixture(stream: &mut std::net::TcpStream, path: &str, 
             "",
         ),
         "/app/worker.js" | "/app/worker-v2.js" => (LIFECYCLE_WORKER_SOURCE, "", ""),
+        "/app/push.js" => (PUSH_WORKER_SOURCE, "", ""),
         "/app/close-on-activate.js" => (CLOSE_ON_ACTIVATE_SOURCE, "", ""),
         "/app/origin.js" => (ORIGIN_WORKER_SOURCE, "", ""),
         "/app/message-port.js" => (MESSAGE_PORT_WORKER_SOURCE, "", ""),
