@@ -1,4 +1,4 @@
-(() => {
+/* @omoikane-bootstrap window-only highlight */(() => {
   "use strict";
 
   // CSS Custom Highlight API 1: Highlight, HighlightRegistry and
@@ -310,3 +310,4 @@
   Object.defineProperty(Object.getOwnPropertyDescriptor(globalThis.CSS, "highlights").get,
     "name", { value: "get highlights" });
 })();
+/* @omoikane-bootstrap end */

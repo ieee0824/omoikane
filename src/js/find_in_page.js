@@ -1,4 +1,4 @@
-// Browser-owned find state. This runs after the DOM bootstrap in each Realm.
+/* @omoikane-bootstrap window-only find_in_page */// Browser-owned find state. This runs after the DOM bootstrap in each Realm.
 (() => {
   const nativeIsInert = globalThis.__omoikane_is_inert;
   delete globalThis.__omoikane_is_inert;
@@ -215,3 +215,4 @@
     }
   });
 })();
+/* @omoikane-bootstrap end */

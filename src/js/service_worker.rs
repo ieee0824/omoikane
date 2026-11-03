@@ -185,7 +185,7 @@ fn start_service_worker(
         csp_requested_url,
         source,
         mut runtime,
-    } = initialize_dedicated_worker(&owner, fetched)?;
+    } = initialize_dedicated_worker(&owner, fetched, BootstrapKind::ServiceWorker)?;
     let source = source.expect("accepted ServiceWorker fetch retains its script source");
 
     if let Some(previous) = previous {
