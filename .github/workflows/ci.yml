@@ -40,96 +40,148 @@ jobs:
       - name: Verify root crate formatting
         run: python3 scripts/check_rustfmt.py
 
-  test:
+  normal-test-prepare:
     needs: changes
     if: needs.changes.outputs.run_full == 'true'
-    # Pinned to the image the Browser behavior matrix uses: this job also
-    # stands in for its x86_64 interpreter element (#1065).
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Verify Cargo target guard
-        run: python3 -m unittest discover -s scripts/tests -p 'test_cargo_space_guard.py'
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.98.1
-      - uses: Swatinem/rust-cache@v2
+      - name: Verify Cargo guard and complete default test partitioning
+        run: |
+          python3 -m unittest discover -s scripts/tests -p 'test_cargo_space_guard.py'
+          python3 -m unittest discover -s scripts/tests -p 'test_ci_test_partitions.py'
+          python3 -m unittest discover -s scripts/tests -p 'test_benchmark_reference.py'
+          python3 -m unittest discover -s scripts/tests -p 'test_select_gate_artifacts.py'
+      - name: Record one source, lockfile and complete Cargo target inventory
+        run: |
+          set -euo pipefail
+          test "$(rustc --version --verbose | awk '/^host:/ {print $2}')" = x86_64-unknown-linux-gnu
+          python3 scripts/ci-test-partitions.py prepare .artifacts/normal-test-inputs
+      - uses: actions/upload-artifact@v4
         with:
-          # The repository cache limit is 10 GB (#1451). `test` and
-          # `wpt-smoke` build default features on the same image, so they
-          # share one entry; only `test` on main writes it and PRs restore it.
+          name: normal-test-inputs-attempt-${{ github.run_attempt }}
+          path: .artifacts/normal-test-inputs/
+          if-no-files-found: error
+
+  normal-test-partition:
+    needs: normal-test-prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../normal-test-target
+      CARGO_INCREMENTAL: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [unit-build, integration-0, integration-1, integration-2, integration-3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: normal-test-inputs-attempt-*
+          path: .artifacts/normal-test-input-attempts
+      - name: Select latest prepared source without discarding prior evidence
+        run: |
+          mkdir -p .artifacts/normal-test-results
+          python3 scripts/select-gate-artifacts.py .artifacts/normal-test-input-attempts .artifacts/normal-test-inputs --prefix normal-test- > .artifacts/normal-test-results/input-${{ matrix.partition }}-selection.json
+      - name: Reclaim only the unused Android SDK on the hosted normal test runner
+        run: python3 scripts/ci-test-partitions.py clean-runner-sdk .artifacts/normal-test-results/space-${{ matrix.partition }}
+      - name: Record capacity before cache lookup
+        run: python3 scripts/ci-test-partitions.py space .artifacts/normal-test-results/space-${{ matrix.partition }} before-cache
+      - name: Bind the empty target before checking the existing Cargo cache
+        run: |
+          python3 scripts/cargo-space-guard.py run --required-free-gib 2 --maximum-target-gib 10 -- true
+          python3 scripts/ci-test-partitions.py save-cache-binding .artifacts/normal-test-results/space-${{ matrix.partition }}/target-binding.json
+      - uses: Swatinem/rust-cache@v2
+        id: normal-cache
+        with:
+          # Keep #1451's one main-only writer. Integration jobs restore only.
           shared-key: workspace-v2
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: ". -> ../normal-test-target"
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.partition == 'unit-build' }}
           cache-workspace-crates: true
+          # Do not expand an unbounded old archive outside the capacity guard.
+          # Preserve the existing key and main-only writer for sibling jobs.
+          lookup-only: true
+      - name: Record capacity after cache lookup
+        env:
+          OMOIKANE_CI_CACHE_HIT: ${{ steps.normal-cache.outputs.cache-hit }}
+        run: python3 scripts/ci-test-partitions.py space .artifacts/normal-test-results/space-${{ matrix.partition }} after-cache
+      # A partial cache hit cleans root metadata. Restore only the binding saved
+      # before that known cache operation, then repeat all guard checks.
+      - name: Restore guard metadata after cache maintenance and recheck ownership
+        run: |
+          python3 scripts/ci-test-partitions.py restore-cache-binding .artifacts/normal-test-results/space-${{ matrix.partition }}/target-binding.json
+          python3 scripts/cargo-space-guard.py run --required-free-gib 2 --maximum-target-gib 10 -- true
       - name: Install system fonts
         run: |
           sudo apt-get update
           sudo apt-get install -y fonts-dejavu fonts-liberation fonts-noto-core fonts-noto-cjk
-      - name: Verify benchmark reference result validation
-        run: python3 -m unittest discover -s scripts/tests -p 'test_benchmark_reference.py'
-      - name: Record browser build inputs
-        run: |
-          set -euo pipefail
-          mkdir -p .artifacts/browser
-          rustc --version --verbose > .artifacts/browser/toolchain.txt
-          test "$(rustc --version --verbose | awk '/^host:/ {print $2}')" = x86_64-unknown-linux-gnu
-          git rev-parse HEAD > .artifacts/browser/revision.txt
-          cargo metadata --locked --format-version 1 > .artifacts/browser/dependencies.json
-          cp Cargo.lock .artifacts/browser/Cargo.lock
-      # Also covers Browser behavior's x86_64 interpreter contracts: browser
-      # journeys, Acid3, font selection and their painted-frame reports.
-      - name: Run all tests (including ignored)
-        env:
-          OMOIKANE_JS_BENCH_REPORT: .artifacts/js-benchmark/report.json
-          OMOIKANE_BROWSER_REPORT_DIR: .artifacts/browser/journeys
-          OMOIKANE_JIT_GATE_REPORT_DIR: .artifacts/browser/acid3
-        run: |
-          set -o pipefail
-          # Ignored manual utilities are not regression tests: baseline refreshes
-          # are no-ops without OMOIKANE_REFRESH_BASELINE=1, and profiling/A-B
-          # fixtures only print measurements (run them explicitly in release mode).
-          manual_fixtures=(
-            refresh_acid2_baseline_png
-            refresh_fullscreen_top_layer_baseline_png
-            refresh_popover_top_layer_baseline_png
-            profile_inline_style_subtree_invalidation_against_full_cache_clear
-            profile_hidden_subtree_geometry_retention_against_full_rebuild
-            profile_static_document_shadow_frames
-            profile_repeated_and_distinct_frame_shadow_masks
-            profile_offcanvas_outer_shadow_fixed_fixture
-            profile_fixed_transform_property_lookup_hot_paths
-            manual_image_scaling_reference_ab
-            static_transition_sampling_microbenchmark
-            compound_scanline_microbenchmark
-          )
-          skip_args=()
-          for name in "${manual_fixtures[@]}"; do
-            skip_args+=(--skip "$name")
-          done
-          cargo test --locked -- --include-ignored "${skip_args[@]}" 2>&1 | tee .artifacts/browser/tests.log
-      - name: Run Gate 2 differential harness
-        run: cargo test --locked --features jit-differential --test jit_differential
+      - name: Record capacity after fonts
+        run: python3 scripts/ci-test-partitions.py space .artifacts/normal-test-results/space-${{ matrix.partition }} after-fonts
+      - name: Run exact default test partition with capacity guard
+        run: python3 scripts/ci-test-partitions.py run ${{ matrix.partition }} .artifacts/normal-test-inputs .artifacts/normal-test-results/${{ matrix.partition }}
+      - name: Record final capacity even when a partition failed
+        if: always()
+        run: python3 scripts/ci-test-partitions.py space .artifacts/normal-test-results/space-${{ matrix.partition }} after-partition
+      - name: Upload every partition log, source input, report and painted frame
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: normal-test-part-${{ matrix.partition }}-attempt-${{ github.run_attempt }}
+          path: .artifacts/normal-test-results/
+          if-no-files-found: error
 
-      # Native JIT contracts run in jit-native.yml on all three distribution targets.
-      - run: cargo build --locked
-      # The full run already executes js_benchmark; display its saved result.
+  # Preserve the existing check name: it becomes green only after every default
+  # target, compile-only example, doc test, Gate2 and locked build is evidenced.
+  test:
+    needs: [normal-test-prepare, normal-test-partition]
+    if: always() && needs.normal-test-prepare.result != 'skipped'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: normal-test-inputs-attempt-*
+          path: .artifacts/normal-test-input-attempts
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: normal-test-part-*
+          path: .artifacts/normal-test-part-attempts
+      - name: Select latest attempt per partition while retaining failed evidence
+        run: |
+          mkdir -p .artifacts/normal-test-aggregate
+          python3 scripts/select-gate-artifacts.py .artifacts/normal-test-input-attempts .artifacts/normal-test-inputs --prefix normal-test- > .artifacts/normal-test-aggregate/inputs-selection.json
+          python3 scripts/select-gate-artifacts.py .artifacts/normal-test-part-attempts .artifacts/normal-test-results --prefix normal-test-part- > .artifacts/normal-test-aggregate/partitions-selection.json
+      - name: Require complete execution and preserve the unique JS benchmark
+        run: python3 scripts/ci-test-partitions.py aggregate .artifacts/normal-test-inputs .artifacts/normal-test-results .artifacts/normal-test-aggregate --partition-job-result ${{ needs.normal-test-partition.result }}
       - name: Report JS execution benchmark
         run: python3 scripts/report-js-benchmark.py .artifacts/js-benchmark/report.json
       - name: Upload JS benchmark report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: js-benchmark-report
+          name: js-benchmark-report-attempt-${{ github.run_attempt }}
           path: .artifacts/js-benchmark/
           if-no-files-found: error
-      - name: Upload browser logs, reports and painted frames
+      - name: Upload browser logs, reports and painted frames by partition
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: browser-x86_64-unknown-linux-gnu-interpreter
-          path: .artifacts/browser/
+          name: browser-x86_64-unknown-linux-gnu-interpreter-attempt-${{ github.run_attempt }}
+          path: |
+            .artifacts/normal-test-results/
+            .artifacts/normal-test-aggregate/
           if-no-files-found: error
-
 
   gate4-prepare:
     needs: changes
