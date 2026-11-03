@@ -62,6 +62,11 @@ mod clipboard_store;
 use clipboard_store::{HostClipboard, WireRepresentation};
 #[cfg(test)]
 mod bootstrap_module_cache_tests;
+mod bootstrap_sections;
+#[cfg(test)]
+mod bootstrap_source_diagnostic;
+#[cfg(test)]
+mod bootstrap_surface_tests;
 #[cfg(test)]
 mod child_document_tests;
 mod console_trace;
@@ -848,21 +853,89 @@ fn realm_origin_snapshot(
         })
 }
 
+/// Identifies the global whose trusted bootstrap source is cached.
+/// ServiceWorkers retain the full bootstrap while the other child kinds split.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum BootstrapKind {
+    Window,
+    DedicatedWorker,
+    SharedWorker,
+    Worklet,
+    ServiceWorker,
+}
+
+impl BootstrapKind {
+    fn fragments(self) -> &'static [&'static str] {
+        match self {
+            Self::Window | Self::ServiceWorker => &[DOM_BOOTSTRAP],
+            // Named sections are selected before parsing. These child kinds
+            // omit DOM definitions while Window/ServiceWorker retain them.
+            Self::DedicatedWorker | Self::SharedWorker | Self::Worklet => {
+                &[DOM_BOOTSTRAP, "\n", include_str!("worker_dom_surface.js")]
+            }
+        }
+    }
+}
+
+/// Owned identity shared by the generated-source and per-Context parsed caches.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct BootstrapSourceKey {
+    kind: BootstrapKind,
+    names: Vec<String>,
+    #[cfg(test)]
+    prototype_source: Option<Arc<str>>,
+}
+
+impl BootstrapSourceKey {
+    /// Builds module text solely from the immutable kind and binding names.
+    fn build_module_source(&self) -> String {
+        let names: HashSet<&str> = self.names.iter().map(String::as_str).collect();
+        let mut source = format!(
+            "const {{ {} }} = import.meta.__omoikane_private_bindings;\n\
+             delete import.meta.__omoikane_private_bindings;\n\
+             const globalThis = __omoikane_window_object;\n",
+            self.names.join(", ")
+        );
+        #[cfg(test)]
+        if let Some(body) = &self.prototype_source {
+            append_bootstrap_fragment(&mut source, body, &names);
+            return source;
+        }
+        let worker = matches!(
+            self.kind,
+            BootstrapKind::DedicatedWorker | BootstrapKind::SharedWorker | BootstrapKind::Worklet
+        );
+        for fragment in self.kind.fragments() {
+            let selected = bootstrap_sections::select(fragment, worker)
+                .expect("invalid trusted bootstrap section");
+            append_bootstrap_fragment(&mut source, &selected, &names);
+        }
+        source
+    }
+}
+
 /// Host capabilities are handed only to the trusted bootstrap module. Page
 /// scripts never receive these functions as properties of their global object.
 struct BootstrapBindings {
     object: JsObject,
-    names: Vec<String>,
+    key: BootstrapSourceKey,
 }
 
-static BOOTSTRAP_MODULE_SOURCES: OnceLock<Mutex<HashMap<Vec<String>, Arc<String>>>> =
+static BOOTSTRAP_MODULE_SOURCES: OnceLock<Mutex<HashMap<BootstrapSourceKey, Arc<String>>>> =
     OnceLock::new();
 
 impl BootstrapBindings {
-    fn new() -> Self {
+    fn new(kind: BootstrapKind) -> Self {
+        #[cfg(test)]
+        let prototype_source = bootstrap_source_diagnostic::read_source(kind);
         Self {
             object: JsObject::with_null_proto(),
-            names: Vec::new(),
+            key: BootstrapSourceKey {
+                kind,
+                names: Vec::new(),
+                #[cfg(test)]
+                prototype_source,
+            },
         }
     }
 
@@ -873,8 +946,8 @@ impl BootstrapBindings {
         context: &mut Context,
     ) -> JsResult<()> {
         let text = name.to_std_string_escaped();
-        if !self.names.contains(&text) {
-            self.names.push(text);
+        if !self.key.names.contains(&text) {
+            self.key.names.push(text);
         }
         self.object.set(name, value.into(), true, context)?;
         Ok(())
@@ -896,63 +969,56 @@ impl BootstrapBindings {
         self.value(name, callable, context)
     }
 
-    fn build_module_source(&self) -> String {
-        let names: HashSet<&str> = self.names.iter().map(String::as_str).collect();
-        let mut source = format!(
-            "const {{ {} }} = import.meta.__omoikane_private_bindings;\n\
-             delete import.meta.__omoikane_private_bindings;\n\
-             const globalThis = __omoikane_window_object;\n",
-            self.names.join(", ")
-        );
-        // Legacy bootstrap files refer to some bindings as globalThis.name.
-        // Resolve those references to the module-private lexical binding.
-        // Explicit old delete statements become no-ops: no capability was
-        // installed on the page global in the first place.
-        let prefix = "globalThis.__omoikane_";
-        // Limit suffix-based rewrites to the body, preserving the module header.
-        let body_start = source.len();
-        source.reserve(DOM_BOOTSTRAP.len());
-        let mut cursor = 0;
-        while let Some(offset) = DOM_BOOTSTRAP[cursor..].find(prefix) {
-            let start = cursor + offset;
-            source.push_str(&DOM_BOOTSTRAP[cursor..start]);
-            let mut end = start + prefix.len();
-            while DOM_BOOTSTRAP
-                .as_bytes()
-                .get(end)
-                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$')
-            {
-                end += 1;
-            }
-            let name = &DOM_BOOTSTRAP[start + "globalThis.".len()..end];
-            if names.contains(name) {
-                if source[body_start..].ends_with("delete ") {
-                    source.truncate(source.len() - "delete ".len());
-                    source.push_str("void 0");
-                } else {
-                    source.push_str(name);
-                }
-            } else {
-                source.push_str(&DOM_BOOTSTRAP[start..end]);
-            }
-            cursor = end;
-        }
-        source.push_str(&DOM_BOOTSTRAP[cursor..]);
-        source
-    }
-
     fn module_source(&self) -> Arc<String> {
         let sources = BOOTSTRAP_MODULE_SOURCES.get_or_init(|| Mutex::new(HashMap::new()));
         let mut sources = sources
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(source) = sources.get(&self.names) {
+        if let Some(source) = sources.get(&self.key) {
             return Arc::clone(source);
         }
-        let source = Arc::new(self.build_module_source());
-        sources.insert(self.names.clone(), Arc::clone(&source));
+        let source = Arc::new(self.key.build_module_source());
+        sources.insert(self.key.clone(), Arc::clone(&source));
         source
     }
+}
+
+/// Appends one trusted source fragment, keeping native capabilities lexical.
+fn append_bootstrap_fragment(source: &mut String, fragment: &str, names: &HashSet<&str>) {
+    // Legacy bootstrap files refer to some bindings as globalThis.name.
+    // Resolve those references to the module-private lexical binding.
+    // Explicit old delete statements become no-ops: no capability was
+    // installed on the page global in the first place.
+    let prefix = "globalThis.__omoikane_";
+    // Limit suffix-based rewrites to the body, preserving the module header.
+    let body_start = source.len();
+    source.reserve(fragment.len());
+    let mut cursor = 0;
+    while let Some(offset) = fragment[cursor..].find(prefix) {
+        let start = cursor + offset;
+        source.push_str(&fragment[cursor..start]);
+        let mut end = start + prefix.len();
+        while fragment
+            .as_bytes()
+            .get(end)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$')
+        {
+            end += 1;
+        }
+        let name = &fragment[start + "globalThis.".len()..end];
+        if names.contains(name) {
+            if source[body_start..].ends_with("delete ") {
+                source.truncate(source.len() - "delete ".len());
+                source.push_str("void 0");
+            } else {
+                source.push_str(name);
+            }
+        } else {
+            source.push_str(&fragment[start..end]);
+        }
+        cursor = end;
+    }
+    source.push_str(&fragment[cursor..]);
 }
 
 fn capture_parser_update_callback(
@@ -986,7 +1052,7 @@ fn parsed_bootstrap_module(
     if let Some(parsed) = host_state
         .borrow()
         .parsed_bootstrap_modules
-        .get(&bindings.names)
+        .get(&bindings.key)
     {
         return Ok(Rc::clone(parsed));
     }
@@ -998,8 +1064,112 @@ fn parsed_bootstrap_module(
     host_state
         .borrow_mut()
         .parsed_bootstrap_modules
-        .insert(bindings.names.clone(), Rc::clone(&parsed));
+        .insert(bindings.key.clone(), Rc::clone(&parsed));
     Ok(parsed)
+}
+
+/// Verifies private capability isolation independently of the global kind.
+fn validate_private_bootstrap_bindings(
+    context: &mut Context,
+    bindings: &BootstrapBindings,
+) -> JsResult<()> {
+    // Keep the invariant checked at every realm creation, including future
+    // bindings added by a subsystem that might accidentally use a global.
+    for name in &bindings.key.names {
+        if context
+            .global_object()
+            .has_own_property(js_string!(name.as_str()), context)?
+        {
+            return Err(JsNativeError::error()
+                .with_message("a private host binding was exposed on the page global")
+                .into());
+        }
+    }
+    Ok(())
+}
+
+/// Registers the private callbacks supplied by the Window bootstrap namespace.
+fn capture_window_bootstrap_callbacks(
+    context: &mut Context,
+    host_state: &Rc<RefCell<HostState>>,
+    namespace: &JsObject,
+    document_id: usize,
+) -> JsResult<()> {
+    capture_parser_update_callback(host_state, namespace, document_id, context)?;
+    let lifecycle = namespace.get(js_string!("__omoikane_service_worker_lifecycle"), context)?;
+    let lifecycle = lifecycle.as_object().ok_or_else(|| {
+        JsNativeError::error().with_message("ServiceWorker lifecycle callbacks are unavailable")
+    })?;
+    host_state
+        .borrow_mut()
+        .service_worker_lifecycle_callbacks
+        .insert(document_id, lifecycle.clone());
+    let dispatch = namespace.get(js_string!("__omoikane_cookie_change_dispatch"), context)?;
+    let reset = namespace.get(js_string!("__omoikane_cookie_change_reset"), context)?;
+    if dispatch.as_callable().is_some() && reset.as_callable().is_some() {
+        host_state
+            .borrow_mut()
+            .cookie_change_callbacks
+            .insert(document_id, CookieChangeCallbacks { dispatch, reset });
+    }
+    let idle_period = namespace.get(js_string!("__omoikane_idle_period"), context)?;
+    if idle_period.is_object() {
+        host_state
+            .borrow_mut()
+            .idle_period_hooks
+            .insert(document_id, idle_period);
+    }
+    let opener_updater =
+        namespace.get(js_string!("__omoikane_update_auxiliary_opener"), context)?;
+    if opener_updater.as_callable().is_none() {
+        return Err(JsNativeError::error()
+            .with_message("auxiliary opener updater is unavailable")
+            .into());
+    }
+    host_state
+        .borrow_mut()
+        .auxiliary_opener_updaters
+        .insert(document_id, opener_updater);
+    // The module namespace is never exposed to page scripts. Capture the
+    // ReportingObserver dispatcher after bootstrap and root it in HostState.
+    let dispatcher = namespace.get(js_string!("__omoikane_queue_reporting_api_report"), context)?;
+    if dispatcher.as_callable().is_none() {
+        return Err(JsNativeError::error()
+            .with_message("report observer dispatcher is unavailable")
+            .into());
+    }
+    host_state
+        .borrow_mut()
+        .report_observer_dispatchers
+        .insert(document_id, dispatcher);
+    Ok(())
+}
+
+/// Retains callbacks used by non-Document child globals.
+fn capture_child_bootstrap_callbacks(
+    context: &mut Context,
+    host_state: &Rc<RefCell<HostState>>,
+    namespace: &JsObject,
+    document_id: usize,
+) -> JsResult<()> {
+    let dispatcher = namespace.get(js_string!("__omoikane_queue_reporting_api_report"), context)?;
+    if dispatcher.as_callable().is_none() {
+        return Err(JsNativeError::error()
+            .with_message("child report observer dispatcher is unavailable")
+            .into());
+    }
+    host_state
+        .borrow_mut()
+        .report_observer_dispatchers
+        .insert(document_id, dispatcher);
+    let idle_period = namespace.get(js_string!("__omoikane_idle_period"), context)?;
+    if idle_period.is_object() {
+        host_state
+            .borrow_mut()
+            .idle_period_hooks
+            .insert(document_id, idle_period);
+    }
+    Ok(())
 }
 
 fn evaluate_dom_bootstrap(
@@ -1039,68 +1209,17 @@ fn evaluate_dom_bootstrap(
         module.link(context)?;
         complete(module.evaluate(context))?;
         let namespace = module.namespace(context);
-        capture_parser_update_callback(host_state, &namespace, document_id, context)?;
-        let lifecycle =
-            namespace.get(js_string!("__omoikane_service_worker_lifecycle"), context)?;
-        let lifecycle = lifecycle.as_object().ok_or_else(|| {
-            JsNativeError::error().with_message("ServiceWorker lifecycle callbacks are unavailable")
-        })?;
-        host_state
-            .borrow_mut()
-            .service_worker_lifecycle_callbacks
-            .insert(document_id, lifecycle.clone());
-        let dispatch = namespace.get(js_string!("__omoikane_cookie_change_dispatch"), context)?;
-        let reset = namespace.get(js_string!("__omoikane_cookie_change_reset"), context)?;
-        if dispatch.as_callable().is_some() && reset.as_callable().is_some() {
-            host_state
-                .borrow_mut()
-                .cookie_change_callbacks
-                .insert(document_id, CookieChangeCallbacks { dispatch, reset });
-        }
-        let idle_period = namespace.get(js_string!("__omoikane_idle_period"), context)?;
-        if idle_period.is_object() {
-            host_state
-                .borrow_mut()
-                .idle_period_hooks
-                .insert(document_id, idle_period);
-        }
-        let opener_updater =
-            namespace.get(js_string!("__omoikane_update_auxiliary_opener"), context)?;
-        if opener_updater.as_callable().is_none() {
-            return Err(JsNativeError::error()
-                .with_message("auxiliary opener updater is unavailable")
-                .into());
-        }
-        host_state
-            .borrow_mut()
-            .auxiliary_opener_updaters
-            .insert(document_id, opener_updater);
-        // Keep the invariant checked at every realm creation, including future
-        // bindings added by a subsystem that might accidentally use a global.
-        for name in &bindings.names {
-            if context
-                .global_object()
-                .has_own_property(js_string!(name.as_str()), context)?
-            {
-                return Err(JsNativeError::error()
-                    .with_message("a private host binding was exposed on the page global")
-                    .into());
+        validate_private_bootstrap_bindings(context, bindings)?;
+        match bindings.key.kind {
+            BootstrapKind::Window | BootstrapKind::ServiceWorker => {
+                capture_window_bootstrap_callbacks(context, host_state, &namespace, document_id)?;
+            }
+            BootstrapKind::DedicatedWorker
+            | BootstrapKind::SharedWorker
+            | BootstrapKind::Worklet => {
+                capture_child_bootstrap_callbacks(context, host_state, &namespace, document_id)?;
             }
         }
-        // The module namespace is never exposed to page scripts. Capture the
-        // ReportingObserver dispatcher after bootstrap and root it in HostState.
-        let dispatcher = module
-            .namespace(context)
-            .get(js_string!("__omoikane_queue_reporting_api_report"), context)?;
-        if dispatcher.as_callable().is_none() {
-            return Err(JsNativeError::error()
-                .with_message("report observer dispatcher is unavailable")
-                .into());
-        }
-        host_state
-            .borrow_mut()
-            .report_observer_dispatchers
-            .insert(document_id, dispatcher);
         Ok(())
     })();
     loader.bootstrap_modules.borrow_mut().remove(&module);
@@ -2433,10 +2552,11 @@ struct HostState {
     /// Keeps newly constructed native capabilities rooted until the trusted
     /// bootstrap module receives them through its private import.meta hook.
     bootstrap_bindings: HashMap<usize, JsObject>,
-    /// Bootstrap module sources parsed once per runtime, keyed by the private
-    /// binding names that select the generated source. Each Realm still runs
+    /// Bootstrap module sources parsed once per runtime, keyed by global kind
+    /// and the private binding names that select the generated source. Each Realm still runs
     /// its own scope analysis, so reuse only skips repeating the parse.
-    parsed_bootstrap_modules: HashMap<Vec<String>, Rc<boa_engine::module::ParsedModuleSource>>,
+    parsed_bootstrap_modules:
+        HashMap<BootstrapSourceKey, Rc<boa_engine::module::ParsedModuleSource>>,
     promise_reports: script_errors::PromiseReports,
     /// CDP remote object handles are retained by the host rather than by a
     /// page-visible global property.  Keeping these values in HostState also
@@ -9409,6 +9529,7 @@ impl JsRuntime {
             url,
             storage,
             session_id,
+            BootstrapKind::Window,
         )
     }
 
@@ -9424,6 +9545,25 @@ impl JsRuntime {
             url,
             storage,
             session_id,
+            BootstrapKind::Window,
+        )
+    }
+
+    /// Creates a child global with an explicit source-cache identity.
+    fn with_child_bootstrap(
+        document: NodeHandle,
+        url: &str,
+        storage: StorageManager,
+        session_id: u64,
+        kind: BootstrapKind,
+    ) -> JsResult<Self> {
+        Self::with_document_sandbox_url_and_storage(
+            document,
+            SandboxConfig::default(),
+            url,
+            storage,
+            session_id,
+            kind,
         )
     }
 
@@ -9466,7 +9606,14 @@ impl JsRuntime {
     ) -> JsResult<Self> {
         let storage = StorageManager::new();
         let session_id = storage.create_session();
-        Self::with_document_sandbox_url_and_storage(document, sandbox, url, storage, session_id)
+        Self::with_document_sandbox_url_and_storage(
+            document,
+            sandbox,
+            url,
+            storage,
+            session_id,
+            BootstrapKind::Window,
+        )
     }
 
     fn with_document_sandbox_url_and_storage(
@@ -9475,6 +9622,7 @@ impl JsRuntime {
         url: &str,
         storage_manager: StorageManager,
         storage_session_id: u64,
+        bootstrap_kind: BootstrapKind,
     ) -> JsResult<Self> {
         // Object URLs belong to the Document that created them. A fresh global
         // means the previous Document is gone, so nothing can resolve its blob
@@ -9530,28 +9678,36 @@ impl JsRuntime {
             task_turn_depth: 0,
             retained_scroll: retained_scroll::RetainedScrollCapture::default(),
         };
-        let bindings = register_host_bindings(&mut runtime.context, &runtime.host_state)?;
+        runtime.initialize_bootstrap(&document, bootstrap_kind)?;
+        Ok(runtime)
+    }
+
+    /// Installs the trusted global before applying author execution limits.
+    fn initialize_bootstrap(
+        &mut self,
+        document: &NodeHandle,
+        bootstrap_kind: BootstrapKind,
+    ) -> JsResult<()> {
+        let bindings = register_host_bindings(&mut self.context, &self.host_state, bootstrap_kind)?;
         {
-            let _host = activate_host_state(Rc::clone(&runtime.host_state));
-            evaluate_dom_bootstrap(&mut runtime.context, &runtime.host_state, &bindings)?;
-            install_main_window_proxy(&mut runtime.context)?;
+            let _host = activate_host_state(Rc::clone(&self.host_state));
+            evaluate_dom_bootstrap(&mut self.context, &self.host_state, &bindings)?;
+            install_main_window_proxy(&mut self.context)?;
         }
         // DOM bootstrap is runtime initialization rather than page code. Apply
         // the caller's budget only after it has completed so a deliberately
         // small limit (for example in a test or a short-lived page task) cannot
         // abort construction before the runtime is usable.
-        runtime
-            .context
+        self.context
             .runtime_limits_mut()
-            .set_loop_iteration_limit(runtime.sandbox.max_loop_iterations);
+            .set_loop_iteration_limit(self.sandbox.max_loop_iterations);
         // Parsed resource elements are already connected before the JS wrapper
         // exists. Queue their loads only after bootstrap so dispatch can wrap
         // the target element when the macrotask runs.
-        runtime
-            .host_state
+        self.host_state
             .borrow_mut()
-            .schedule_connected_resource_loads(&document, false, None);
-        Ok(runtime)
+            .schedule_connected_resource_loads(document, false, None);
+        Ok(())
     }
 
     /// Returns the current DOM document.
@@ -16215,7 +16371,7 @@ fn ensure_iframe_realm(
     let old_realm = context.enter_realm(realm.clone());
     let previous_resolver = host_state.borrow().canonical_node_identity_resolver.clone();
     let setup = (|| {
-        let mut bindings = register_host_bindings(context, host_state)?;
+        let mut bindings = register_host_bindings(context, host_state, BootstrapKind::Window)?;
         bindings.value(
             js_string!("__omoikane_document_id"),
             JsValue::from(document_id as f64),
@@ -16433,7 +16589,7 @@ fn ensure_auxiliary_realm(
     let previous = context.enter_realm(realm.clone());
     let previous_resolver = host_state.borrow().canonical_node_identity_resolver.clone();
     let setup = (|| -> JsResult<()> {
-        let mut bindings = register_host_bindings(context, host_state)?;
+        let mut bindings = register_host_bindings(context, host_state, BootstrapKind::Window)?;
         bindings.value(
             js_string!("__omoikane_document_id"),
             JsValue::from(document_id as f64),
@@ -16705,8 +16861,9 @@ fn register_private_property(
 fn register_host_bindings(
     context: &mut Context,
     host_state: &Rc<RefCell<HostState>>,
+    kind: BootstrapKind,
 ) -> JsResult<BootstrapBindings> {
-    let mut bindings = BootstrapBindings::new();
+    let mut bindings = BootstrapBindings::new(kind);
     let document_id = context
         .realm()
         .host_defined()
@@ -25724,6 +25881,7 @@ fn fetch_dedicated_worker(
 fn initialize_dedicated_worker(
     owner_state: &Rc<RefCell<HostState>>,
     fetched: FetchedDedicatedWorker,
+    bootstrap_kind: BootstrapKind,
 ) -> JsResult<PreparedDedicatedWorker> {
     let FetchedDedicatedWorker {
         creator,
@@ -25744,11 +25902,12 @@ fn initialize_dedicated_worker(
     } else {
         worker_url.as_str()
     };
-    let mut worker_runtime = JsRuntime::with_document_url_and_storage(
+    let mut worker_runtime = JsRuntime::with_child_bootstrap(
         blank_html_document(),
         bootstrap_url,
         creator.storage,
         creator.session_id,
+        bootstrap_kind,
     )?;
     worker_runtime.set_user_agent(creator.user_agent);
     {
@@ -25840,7 +25999,7 @@ fn create_worker_for_owner_state(
         csp_requested_url,
         source,
         runtime: worker_runtime,
-    } = initialize_dedicated_worker(&owner_state, fetched)?;
+    } = initialize_dedicated_worker(&owner_state, fetched, BootstrapKind::DedicatedWorker)?;
     let entry = Rc::new(RefCell::new(WorkerRuntime {
         runtime: worker_runtime,
         owner_state: Rc::clone(&owner_state),

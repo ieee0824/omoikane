@@ -438,7 +438,7 @@
       }
     });
   }
-  Object.defineProperty(Document.prototype, 'fonts', {
+/* @omoikane-bootstrap window-only document-fonts */  Object.defineProperty(Document.prototype, 'fonts', {
     configurable: true, enumerable: true,
     get() {
       if (!(this instanceof Document)) throw new TypeError('Expected a Document');
@@ -448,7 +448,7 @@
       return set;
     }
   });
-  for (const constructor of [FontFace, FontFaceSet, FontFaceSetLoadEvent]) {
+/* @omoikane-bootstrap end */  for (const constructor of [FontFace, FontFaceSet, FontFaceSetLoadEvent]) {
     Object.defineProperty(constructor.prototype, Symbol.toStringTag, {value: constructor.name, configurable: true});
     globalThis[constructor.name] = constructor;
   }

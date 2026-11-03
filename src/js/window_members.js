@@ -2,7 +2,8 @@
 // the browsing context rather than DOM state (Issue #1291). Runs after the DOM
 // bootstrap in each Document Realm.
 (() => {
-  const nativeHardwareConcurrency = globalThis.__omoikane_navigator_hardware_concurrency;
+/* @omoikane-bootstrap worker-only window-brand */  const Window = globalThis.Window;
+/* @omoikane-bootstrap end */  const nativeHardwareConcurrency = globalThis.__omoikane_navigator_hardware_concurrency;
   const nativeWebdriverActive = globalThis.__omoikane_webdriver_active;
   const nativeLastModified = globalThis.__omoikane_document_last_modified;
   const nativeDocumentOrigin = globalThis.__omoikane_document_origin;

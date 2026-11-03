@@ -1,4 +1,4 @@
-(() => {
+/* @omoikane-bootstrap window-only xpath */(() => {
   "use strict";
 
   // DOM Level 3 XPath bindings backed by the existing JavaScript DOM wrappers.
@@ -655,3 +655,4 @@
   globalThis.XPathExpression = XPathExpression;
   globalThis.XPathResult = XPathResult;
 })();
+/* @omoikane-bootstrap end */
