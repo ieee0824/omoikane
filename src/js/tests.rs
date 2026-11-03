@@ -3838,6 +3838,39 @@ fn canvas_clear_rect_clips_large_untransformed_rectangles() {
 }
 
 #[test]
+fn canvas_clear_rect_applies_transform_and_preserves_device_space_clip() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let result = eval_str(
+        &mut runtime,
+        r#"(() => {
+          const canvas = document.createElement('canvas');
+          canvas.width = 8; canvas.height = 6;
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = 'red'; ctx.fillRect(0, 0, 8, 6);
+          ctx.beginPath(); ctx.rect(1, 1, 5, 4); ctx.clip();
+          ctx.save();
+          ctx.setTransform(2, 0, 0, 1, 2, 1);
+          ctx.clearRect(-1, -1, 3, 4);
+          ctx.restore();
+          return JSON.stringify(Array.from(ctx.getImageData(0, 0, 8, 6).data));
+        })()"#,
+    );
+    let pixels: Vec<u8> = serde_json::from_str(&result).unwrap();
+    assert_eq!(pixels.len(), 8 * 6 * 4);
+    for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+        let (x, y) = (index % 8, index / 8);
+        // The transformed clear covers [0,6) x [0,4), intersected with the
+        // device-space clip [1,6) x [1,5). Integer edges avoid antialiasing.
+        let expected = if (1..6).contains(&x) && (1..4).contains(&y) {
+            [0, 0, 0, 0]
+        } else {
+            [255, 0, 0, 255]
+        };
+        assert_eq!(pixel, expected, "pixel ({x}, {y})");
+    }
+}
+
+#[test]
 fn webgl_canvas_context_state_resources_and_loss_boundary() {
     let mut runtime = JsRuntime::new().unwrap();
     let result = eval_str(
