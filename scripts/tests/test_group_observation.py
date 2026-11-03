@@ -3,6 +3,7 @@ import importlib.util
 import subprocess
 import os
 import signal
+import select
 import sys
 from pathlib import Path
 import unittest
@@ -34,16 +35,24 @@ class GroupObservationTests(unittest.TestCase):
                 guard.process_group_has_live_members(100)
 
     def test_observation_failure_still_kills_owned_process_and_raises(self):
-        process = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(30)"], start_new_session=True)
+        # Keep the leader alive through TERM so the injected observation failure
+        # exercises escalation against a live owned group on every platform.
+        process = subprocess.Popen(
+            [sys.executable, "-u", "-c",
+             "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+             "print('ready',flush=True);time.sleep(30)"],
+            start_new_session=True, stdout=subprocess.PIPE, text=True,
+        )
         failure = RuntimeError("observation unavailable")
         try:
+            self.assertTrue(select.select([process.stdout], [], [], 5)[0], "child readiness timed out")
+            self.assertEqual(process.stdout.readline(), "ready\n")
             with patch.object(guard, "process_group_has_live_members", side_effect=failure):
                 with self.assertRaisesRegex(RuntimeError, "observation unavailable"):
                     guard.stop_process_group(process, timeout_seconds=.01)
             self.assertIsNotNone(process.poll())
         finally:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            if process.poll() is None:
+                process.kill()
             process.wait(timeout=3)
+            process.stdout.close()

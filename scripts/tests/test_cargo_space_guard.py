@@ -37,7 +37,7 @@ class CargoSpaceGuardTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.workspace = self.root / "source"
         self.workspace.mkdir()
 
@@ -61,6 +61,15 @@ class CargoSpaceGuardTests(unittest.TestCase):
             guard.validate_run_target(self.root, self.workspace)
         target = self.root / "cache" / "issue-737"
         self.assertEqual(guard.validate_run_target(target, self.workspace), target)
+
+    def test_run_target_resolves_symlinked_parent(self):
+        alias = self.root / "alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        target = alias / "cache" / "issue-737"
+        self.assertEqual(
+            guard.validate_run_target(target, self.workspace),
+            self.root / "cache" / "issue-737",
+        )
 
     def test_mount_type_uses_longest_matching_mount(self):
         mounts = (
