@@ -134,6 +134,8 @@ mod document_write;
 mod dom_string;
 #[cfg(test)]
 mod dom_string_tests;
+#[cfg(test)]
+mod error_cleanup_tests;
 mod errors;
 #[cfg(test)]
 mod inline_style_assignment_tests;
@@ -9804,6 +9806,8 @@ impl JsRuntime {
             evaluated?;
             self.run_jobs()
         })();
+        // Clearing currentScript can execute JavaScript and collect the pending error.
+        let _error_root = result.as_ref().err().cloned().map(Rooted::new);
         let _ = self.eval("__omoikane_set_current_script(null)");
         self.host_state.borrow_mut().write_insertion_ref = None;
         self.context.enter_realm(old_realm);
