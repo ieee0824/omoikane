@@ -1,0 +1,35 @@
+
+running 6 tests
+test js::web_api_surface_tests::committed_document_exposes_navigation_url ... ok
+test js::web_api_surface_tests::manifest_ids_are_unique_and_well_formed ... ok
+test js::web_api_surface_tests::navigation_probe_checks_destination_and_history_mode ... ok
+test js::web_api_surface_tests::report_classifies_regressions_and_improvements ... ok
+test js::web_api_surface_tests::trusted_surface_probe_rejects_missing_input ... ok
+test js::web_api_surface_tests::web_api_surface_does_not_regress ... Web API surface: supported=137/137 unsupported=0 errors=0
+  canvas: supported=1/1 unsupported=0 errors=0
+  css: supported=6/6 unsupported=0 errors=0
+  cssom: supported=24/24 unsupported=0 errors=0
+  data: supported=7/7 unsupported=0 errors=0
+  dom: supported=25/25 unsupported=0 errors=0
+  editing: supported=2/2 unsupported=0 errors=0
+  forms: supported=1/1 unsupported=0 errors=0
+  geometry: supported=1/1 unsupported=0 errors=0
+  graphics: supported=6/6 unsupported=0 errors=0
+  html: supported=8/8 unsupported=0 errors=0
+  input: supported=1/1 unsupported=0 errors=0
+  layout: supported=1/1 unsupported=0 errors=0
+  media: supported=2/2 unsupported=0 errors=0
+  messaging: supported=3/3 unsupported=0 errors=0
+  navigation: supported=2/2 unsupported=0 errors=0
+  network: supported=8/8 unsupported=0 errors=0
+  platform: supported=5/5 unsupported=0 errors=0
+  realtime: supported=3/3 unsupported=0 errors=0
+  scheduling: supported=6/6 unsupported=0 errors=0
+  security: supported=2/2 unsupported=0 errors=0
+  storage: supported=6/6 unsupported=0 errors=0
+  web-api: supported=5/5 unsupported=0 errors=0
+  web-components: supported=7/7 unsupported=0 errors=0
+  workers: supported=5/5 unsupported=0 errors=0
+ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 5018 filtered out; finished in 9.32s

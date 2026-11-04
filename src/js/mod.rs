@@ -134,6 +134,8 @@ mod document_write;
 mod dom_string;
 #[cfg(test)]
 mod dom_string_tests;
+#[cfg(test)]
+mod error_cleanup_tests;
 mod errors;
 #[cfg(test)]
 mod inline_style_assignment_tests;
@@ -173,7 +175,13 @@ mod geolocation;
 #[cfg(test)]
 mod host_callback_factory_tests;
 mod host_callbacks;
+mod host_input;
+mod host_input_command;
+#[cfg(test)]
+mod host_input_command_tests;
+pub mod host_input_types;
 pub use geolocation::GeolocationPositionData;
+pub(crate) use host_input::HostInputKind;
 mod gamepad;
 pub use gamepad::{
     DeterministicGamepadProvider, GamepadButtonSnapshot, GamepadHapticRequest, GamepadHapticResult,
@@ -244,6 +252,9 @@ pub use web_codecs::{
     WebCodecPacket, WebCodecsProvider,
 };
 mod automation;
+mod automation_input;
+#[cfg(test)]
+mod automation_input_tests;
 #[cfg(test)]
 mod cross_origin_focus_tests;
 mod form_validation;
@@ -9804,6 +9815,8 @@ impl JsRuntime {
             evaluated?;
             self.run_jobs()
         })();
+        // Clearing currentScript can execute JavaScript and collect the pending error.
+        let _error_root = result.as_ref().err().cloned().map(Rooted::new);
         let _ = self.eval("__omoikane_set_current_script(null)");
         self.host_state.borrow_mut().write_insertion_ref = None;
         self.context.enter_realm(old_realm);
@@ -29763,6 +29776,9 @@ mod tests;
 mod clipboard_context_tests;
 
 #[cfg(test)]
+mod clipboard_native_tests;
+
+#[cfg(test)]
 mod individual_transform_tests;
 
 #[cfg(test)]
@@ -29851,3 +29867,6 @@ mod discarded_node_drain_tests {
 
 #[cfg(test)]
 mod inserted_preparation_tests;
+
+#[cfg(test)]
+mod web_api_surface_tests;

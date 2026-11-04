@@ -4880,6 +4880,10 @@ fn exposes_window_console_and_navigator() {
 
 #[test]
 fn navigator_clipboard_shares_utf8_text_and_enforces_permissions() {
+    // Declared before the reset guard so reset completes before unlocking.
+    let _clipboard_lock = super::clipboard_native_tests::CLIPBOARD_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     struct ClipboardResetGuard;
     impl Drop for ClipboardResetGuard {
         fn drop(&mut self) {
@@ -6671,12 +6675,30 @@ fn request_submit_and_enter_dispatch_cancelable_submit_events() {
     let mut runtime = runtime_from_html(
         r#"<form id="f" action="/send"><input id="text" name="q" value="ok"><button id="send" name="via" value="enter">Send</button></form>"#,
     );
+    runtime
+        .eval(r#"globalThis.submitSteps = (function*() { const seen = []; const f = document.getElementById("f"), send = document.getElementById("send"), text = document.getElementById("text"); f.addEventListener("submit", event => { seen.push(event.submitter && event.submitter.id); if (seen.length === 1) event.preventDefault(); }); f.requestSubmit(send); text.focus(); yield "enter"; return seen.join(","); })()"#)
+        .unwrap();
     assert_eq!(
-        eval_str(
-            &mut runtime,
-            r#"(() => { const seen = []; const f = document.getElementById("f"), send = document.getElementById("send"), text = document.getElementById("text"); f.addEventListener("submit", event => { seen.push(event.submitter && event.submitter.id); if (seen.length === 1) event.preventDefault(); }); f.requestSubmit(send); text.focus(); __omoikane_dispatch_keyboard_input("keydown", { key: "Enter" }); return seen.join(","); })()"#
-        ),
-        "send,send"
+        eval_str(&mut runtime, "JSON.stringify(submitSteps.next())"),
+        r#"{"value":"enter","done":false}"#
+    );
+    let document = runtime.document();
+    let result = runtime
+        .dispatch_host_input(
+            &document,
+            super::host_input_types::HostInputCommand::Keyboard {
+                phase: super::host_input_types::HostKeyPhase::Down,
+                input: super::host_input_types::HostKeyInput {
+                    key: "Enter".into(),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+    assert!(result.as_boolean().is_some());
+    assert_eq!(
+        eval_str(&mut runtime, "JSON.stringify(submitSteps.next())"),
+        r#"{"value":"send,send","done":true}"#
     );
     runtime.run_until_idle().unwrap();
     assert_eq!(
@@ -6824,23 +6846,24 @@ fn interactive_form_validation_blocks_submission_and_honors_bypass_flags() {
 fn length_validity_only_tracks_user_edited_values() {
     let mut runtime = runtime_from_html(r#"<input id="text" minlength="4" maxlength="8">"#);
     assert!(
-        runtime
-            .eval(
-                r#"(() => {
+        drive_text_editing_keys(
+            &mut runtime,
+            r#"(function*() {
                       const input = document.getElementById('text');
                       input.value = 'abc';
                       if (input.validity.tooShort || input.validity.tooLong) return false;
                       input.value = '';
                       input.focus();
-                      __omoikane_dispatch_keyboard_input('keydown', { key: 'a' });
+                      (yield 0);
                       if (!input.validity.tooShort || input.validity.tooLong) return false;
                       input.maxLength = 0;
                       return input.validity.tooShort && input.validity.tooLong;
                     })()"#,
-            )
-            .unwrap()
-            .as_boolean()
-            .unwrap()
+            &[("a", "", false)],
+        )
+        .unwrap()
+        .as_boolean()
+        .unwrap()
     );
 }
 
@@ -19161,7 +19184,21 @@ fn screen_orientation_lock_updates_state_and_fires_before_resolution() {
             r#"globalThis.orientationLog = [];
                screen.orientation.onchange = () => orientationLog.push('change:' + screen.orientation.type);
                addEventListener('keydown', () => document.documentElement.requestFullscreen(), { once: true });
-               __omoikane_dispatch_keyboard_input('keydown', { key: 'Enter', code: 'Enter' });"#,
+               "#,
+        )
+        .unwrap();
+    let input_document = runtime.document();
+    runtime
+        .dispatch_host_input(
+            &input_document,
+            super::host_input_types::HostInputCommand::Keyboard {
+                phase: super::host_input_types::HostKeyPhase::Down,
+                input: super::host_input_types::HostKeyInput {
+                    key: "Enter".into(),
+                    code: "Enter".into(),
+                    ..Default::default()
+                },
+            },
         )
         .unwrap();
     runtime.run_until_idle().unwrap();
@@ -19204,7 +19241,21 @@ fn screen_orientation_enforces_visibility_fullscreen_and_provider_failures() {
 
     runtime
         .eval(
-            "addEventListener('keydown', () => document.documentElement.requestFullscreen(), { once: true }); __omoikane_dispatch_keyboard_input('keydown', { key: 'Enter', code: 'Enter' })",
+            "addEventListener('keydown', () => document.documentElement.requestFullscreen(), { once: true });",
+        )
+        .unwrap();
+    let input_document = runtime.document();
+    runtime
+        .dispatch_host_input(
+            &input_document,
+            super::host_input_types::HostInputCommand::Keyboard {
+                phase: super::host_input_types::HostKeyPhase::Down,
+                input: super::host_input_types::HostKeyInput {
+                    key: "Enter".into(),
+                    code: "Enter".into(),
+                    ..Default::default()
+                },
+            },
         )
         .unwrap();
     runtime.run_until_idle().unwrap();
@@ -19235,7 +19286,21 @@ fn screen_orientation_pending_child_lock_aborts_when_document_retires() {
     let mut runtime = JsRuntime::with_document(document).unwrap();
     runtime
         .eval(
-            "addEventListener('keydown', () => document.documentElement.requestFullscreen(), { once: true }); __omoikane_dispatch_keyboard_input('keydown', { key: 'Enter', code: 'Enter' })",
+            "addEventListener('keydown', () => document.documentElement.requestFullscreen(), { once: true });",
+        )
+        .unwrap();
+    let input_document = runtime.document();
+    runtime
+        .dispatch_host_input(
+            &input_document,
+            super::host_input_types::HostInputCommand::Keyboard {
+                phase: super::host_input_types::HostKeyPhase::Down,
+                input: super::host_input_types::HostKeyInput {
+                    key: "Enter".into(),
+                    code: "Enter".into(),
+                    ..Default::default()
+                },
+            },
         )
         .unwrap();
     runtime.run_until_idle().unwrap();
@@ -19648,6 +19713,25 @@ fn opfs_handles_persist_owned_bytes_and_enforce_origin_quota() {
     assert_eq!(eval_str(&mut runtime, "syncResult"), "5:hello!");
 }
 
+// Activation remains a host operation; callers retain their existing job checkpoints.
+fn dispatch_activation_mouse(runtime: &mut JsRuntime, selector: &str) {
+    let document = runtime.document();
+    let target = document
+        .query_selector(selector)
+        .expect("activation fixture target");
+    runtime
+        .dispatch_host_input(
+            &document,
+            super::host_input_types::HostInputCommand::Mouse {
+                target,
+                phase: super::host_input_types::HostMousePhase::Down,
+                input: super::host_input_types::HostMouseInput::default(),
+                focus_target: true,
+            },
+        )
+        .unwrap();
+}
+
 #[test]
 fn web_share_normalizes_owned_data_consumes_activation_and_serializes_requests() {
     let provider = Arc::new(DeterministicShareProvider::default());
@@ -19660,7 +19744,11 @@ fn web_share_normalizes_owned_data_consumes_activation_and_serializes_requests()
                globalThis.shareResult = 'pending';
                globalThis.secondShare = 'pending';
                const button = document.getElementById('share');
-               __omoikane_dispatch_mouse_input(button.__id, 'mousedown', {}, true);
+               "#,
+        )
+        .unwrap();
+    dispatch_activation_mouse(&mut runtime, "#share");
+    runtime.eval(r#"
                const first = navigator.share({
                  title: 42,
                  text: 'body',
@@ -19938,7 +20026,13 @@ fn web_share_enforces_secure_context_policy_provider_errors_and_retirement() {
             r#"document.body.innerHTML = '<button id=share>share</button>';
                globalThis.shareFailure = 'pending';
                const button = document.getElementById('share');
-               __omoikane_dispatch_mouse_input(button.__id, 'mousedown', {}, true);
+               "#,
+        )
+        .unwrap();
+    dispatch_activation_mouse(&mut runtime, "#share");
+    runtime
+        .eval(
+            r#"
                navigator.share({text:'body'}).catch(error => { shareFailure = error.name; });"#,
         )
         .unwrap();
@@ -19957,9 +20051,10 @@ fn web_share_enforces_secure_context_policy_provider_errors_and_retirement() {
 
     provider.respond_to_next(Ok(()));
     runtime.install_response_security_headers(&[]);
+    dispatch_activation_mouse(&mut runtime, "#share");
     runtime
         .eval(
-            r#"__omoikane_dispatch_mouse_input(button.__id, 'mousedown', {}, true);
+            r#"
                globalThis.retiredShare = 'pending';
                navigator.share({text:'retire'}).then(
                  () => { retiredShare = 'resolved'; },
@@ -19997,7 +20092,11 @@ fn web_serial_filters_opens_streams_controls_signals_and_forgets_permission() {
         .eval(
             r#"document.body.innerHTML = '<button id=choose>choose</button>';
                const choose = document.getElementById('choose');
-               __omoikane_dispatch_mouse_input(choose.__id, 'mousedown', {}, true);
+               "#,
+        )
+        .unwrap();
+    dispatch_activation_mouse(&mut runtime, "#choose");
+    runtime.eval(r#"
                globalThis.serialResult = 'pending';
                (async () => {
                  const port = await navigator.serial.requestPort({filters:[{usbVendorId:0x1234, usbProductId:0x5678}]});
@@ -20058,7 +20157,11 @@ fn web_serial_enforces_context_activation_validation_and_disconnect_events() {
                globalThis.invalidFilter = 'pending';
                document.body.innerHTML = '<button id=choose>choose</button>';
                const choose = document.getElementById('choose');
-               __omoikane_dispatch_mouse_input(choose.__id, 'mousedown', {}, true);
+               "#,
+        )
+        .unwrap();
+    dispatch_activation_mouse(&mut runtime, "#choose");
+    runtime.eval(r#"
                navigator.serial.requestPort({filters:[{usbProductId:1}]}).catch(error => invalidFilter = error.name);"#,
         )
         .unwrap();
@@ -20066,9 +20169,10 @@ fn web_serial_enforces_context_activation_validation_and_disconnect_events() {
     assert_eq!(eval_str(&mut runtime, "noActivation"), "SecurityError");
     assert_eq!(eval_str(&mut runtime, "invalidFilter"), "TypeError");
 
+    dispatch_activation_mouse(&mut runtime, "#choose");
     runtime
         .eval(
-            r#"__omoikane_dispatch_mouse_input(choose.__id, 'mousedown', {}, true);
+            r#"
                globalThis.disconnects = 0;
                globalThis.serialDisconnects = 0;
                navigator.serial.requestPort({filters:[{usbVendorId:7}]}).then(port => {
@@ -20157,7 +20261,13 @@ fn payment_request_validates_and_passes_owned_data_to_provider() {
       globalThis.paymentResult = 'pending';
       globalThis.canPay = 'pending';
       request.canMakePayment().then(value => canPay = String(value));
-      __omoikane_dispatch_mouse_input(document.getElementById('pay').__id, 'mousedown', {}, true);
+      "#,
+        )
+        .unwrap();
+    dispatch_activation_mouse(&mut runtime, "#pay");
+    runtime
+        .eval(
+            r#"
       request.show().then(response => {
         paymentResult = [response instanceof PaymentResponse, response.requestId,
           response.methodName, response.details.token, response.payerName].join(':');
@@ -20200,7 +20310,13 @@ fn payment_request_requires_activation_handles_failure_and_retirement() {
       globalThis.denied = 'pending'; globalThis.failed = 'pending';
       new PaymentRequest([{supportedMethods:'basic-card'}], details).show()
         .catch(error => denied = error.name);
-      __omoikane_dispatch_mouse_input(document.getElementById('pay').__id, 'mousedown', {}, true);
+      "#,
+        )
+        .unwrap();
+    dispatch_activation_mouse(&mut runtime, "#pay");
+    runtime
+        .eval(
+            r#"
       new PaymentRequest([{supportedMethods:'basic-card'}], details).show()
         .catch(error => failed = error.name);
     "#,
@@ -20219,10 +20335,10 @@ fn payment_request_requires_activation_handles_failure_and_retirement() {
         payer_email: None,
         payer_phone: None,
     }));
+    dispatch_activation_mouse(&mut runtime, "#pay");
     runtime
         .eval(
             r#"
-      __omoikane_dispatch_mouse_input(document.getElementById('pay').__id, 'mousedown', {}, true);
       globalThis.retiredPayment = 'pending';
       new PaymentRequest([{supportedMethods:'basic-card'}], details).show()
         .catch(error => retiredPayment = error.name);
@@ -22895,14 +23011,52 @@ fn input_value_is_dirty_and_preserves_lone_surrogate() {
     );
 }
 
+// Drives only synchronous success-path fixtures with a fixed host input sequence.
+fn drive_text_editing_keys(
+    runtime: &mut JsRuntime,
+    script: &str,
+    expected: &[(&str, &str, bool)],
+) -> boa_engine::JsResult<boa_engine::JsValue> {
+    runtime.eval(&format!("globalThis.textEditSteps = {script}"))?;
+    let document = runtime.document();
+    let mut next = "textEditSteps.next()".to_owned();
+    for (index, &(key, text, shift_key)) in expected.iter().enumerate() {
+        let step = eval_str(runtime, &format!("JSON.stringify({next})"));
+        let step: serde_json::Value = serde_json::from_str(&step).unwrap();
+        assert_eq!(step, serde_json::json!({"done":false,"value":index}));
+        let result = runtime.dispatch_host_input(
+            &document,
+            super::host_input_types::HostInputCommand::Keyboard {
+                phase: super::host_input_types::HostKeyPhase::Down,
+                input: super::host_input_types::HostKeyInput {
+                    key: key.into(),
+                    text: text.into(),
+                    modifiers: super::host_input_types::HostInputModifiers {
+                        shift: shift_key,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            },
+        )?;
+        next = format!("textEditSteps.next({})", result.as_boolean().unwrap());
+    }
+    runtime.eval(&format!("globalThis.textEditResult = {next}"))?;
+    assert_eq!(
+        runtime.eval("textEditResult.done")?.as_boolean(),
+        Some(true)
+    );
+    runtime.eval("textEditResult.value")
+}
+
 #[test]
 fn text_control_editing_updates_selection_and_input_events() {
     let mut runtime = runtime_from_html(
         r#"<html><body><input id="field" value="abcd"><textarea id="area">hello</textarea></body></html>"#,
     );
-    assert!(runtime
-        .eval(
-            r#"(() => {
+    assert!(drive_text_editing_keys(
+        &mut runtime,
+            r#"(function*() {
                     const field = document.getElementById("field");
                     globalThis.editEvents = [];
                     for (const type of ["beforeinput", "input", "change"]) {
@@ -22911,10 +23065,10 @@ fn text_control_editing_updates_selection_and_input_events() {
                     }
                     field.focus();
                     field.setSelectionRange(1, 3, "forward");
-                    __omoikane_dispatch_keyboard_input("keydown", { key: "X", text: "X" });
+                    (yield 0);
                     const inserted = field.value === "aXd" && field.selectionStart === 2 &&
                       field.selectionEnd === 2 && field.selectionDirection === "none";
-                    __omoikane_dispatch_keyboard_input("keydown", { key: "Backspace" });
+                    (yield 1);
                     const deleted = field.value === "ad" && field.selectionStart === 1;
                     field.blur();
 
@@ -22928,6 +23082,7 @@ fn text_control_editing_updates_selection_and_input_events() {
                       area.selectionEnd === 5 && editEvents.join("|") ===
                       "beforeinput:insertText:X|input:insertText:X|beforeinput:deleteContentBackward:null|input:deleteContentBackward:null|change::";
                 })()"#,
+        &[("X","X",false),("Backspace","",false)],
         )
         .unwrap()
         .as_boolean()
@@ -22939,9 +23094,9 @@ fn textarea_normalizes_newlines_and_enter_inserts_one_lf() {
     let mut runtime =
         runtime_from_html(r#"<html><body><textarea id="area"></textarea></body></html>"#);
     assert_eq!(
-        eval_str(
+        drive_text_editing_keys(
             &mut runtime,
-            r#"(() => {
+            r#"(function*() {
                     const area = document.getElementById("area");
                     area.value = "a\r\nb\rc";
                     const normalized = area.value === "a\nb\nc" &&
@@ -22953,11 +23108,12 @@ fn textarea_normalizes_newlines_and_enter_inserts_one_lf() {
                     }
                     area.focus();
                     area.setSelectionRange(1, 4);
-                    __omoikane_dispatch_keyboard_input("keydown", { key: "Enter" });
+                    (yield 0);
                     return [normalized, area.value, area.selectionStart, area.selectionEnd,
                       events.join("|")].join(";");
                 })()"#,
-        ),
+            &[("Enter", "", false)],
+        ).unwrap().as_string().unwrap().to_std_string_escaped(),
         "true;a\nc;2;2;beforeinput:insertLineBreak:null|input:insertLineBreak:null"
     );
 }
@@ -22967,31 +23123,32 @@ fn text_control_editing_respects_cancelation_readonly_and_maxlength() {
     let mut runtime = runtime_from_html(
         r#"<html><body><input id="field" value="ab" maxlength="3"><input id="readonly" value="locked" readonly></body></html>"#,
     );
-    assert!(runtime
-        .eval(
-            r#"(() => {
+    assert!(drive_text_editing_keys(
+        &mut runtime,
+            r#"(function*() {
                     const field = document.getElementById("field");
                     field.focus();
                     field.setSelectionRange(2, 2);
-                    __omoikane_dispatch_keyboard_input("keydown", { key: "c", text: "c" });
-                    __omoikane_dispatch_keyboard_input("keydown", { key: "d", text: "d" });
+                    (yield 0);
+                    (yield 1);
                     const maxlengthHeld = field.value === "abc" && field.selectionStart === 3;
                     field.addEventListener("beforeinput", event => event.preventDefault(), { once: true });
-                    __omoikane_dispatch_keyboard_input("keydown", { key: "Backspace" });
+                    (yield 2);
                     const beforeInputCanceled = field.value === "abc";
                     field.addEventListener("keydown", event => event.preventDefault(), { once: true });
-                    __omoikane_dispatch_keyboard_input("keydown", { key: "Backspace" });
+                    (yield 3);
                     const keydownCanceled = field.value === "abc";
                     field.disabled = true;
-                    __omoikane_dispatch_keyboard_input("keydown", { key: "x", text: "x" });
+                    (yield 4);
                     const disabledHeld = field.value === "abc";
                     const readonly = document.getElementById("readonly");
                     readonly.focus();
                     readonly.select();
-                    __omoikane_dispatch_keyboard_input("keydown", { key: "x", text: "x" });
+                    (yield 5);
                     return maxlengthHeld && beforeInputCanceled && keydownCanceled && disabledHeld &&
                       readonly.value === "locked" && readonly.selectionStart === 0 && readonly.selectionEnd === 6;
                 })()"#,
+        &[("c","c",false),("d","d",false),("Backspace","",false),("Backspace","",false),("x","x",false),("x","x",false)],
         )
         .unwrap()
         .as_boolean()
@@ -23002,31 +23159,41 @@ fn text_control_editing_respects_cancelation_readonly_and_maxlength() {
 fn text_control_navigation_and_forward_delete_move_the_caret() {
     let mut runtime =
         runtime_from_html(r#"<html><body><input id="field" value="abcd"></body></html>"#);
-    assert!(runtime
-        .eval(
-            r#"(() => {
+    assert!(
+        drive_text_editing_keys(
+            &mut runtime,
+            r#"(function*() {
                     const field = document.getElementById("field");
                     field.focus();
                     field.setSelectionRange(2, 2);
-                    __omoikane_dispatch_keyboard_input("keydown", { key: "Delete" });
+                    (yield 0);
                     const deleted = field.value === "abd" && field.selectionStart === 2;
-                    __omoikane_dispatch_keyboard_input("keydown", { key: "Backspace" });
+                    (yield 1);
                     const backspaced = field.value === "ad" && field.selectionStart === 1;
-                    __omoikane_dispatch_keyboard_input("keydown", { key: "Home" });
+                    (yield 2);
                     const home = field.selectionStart === 0;
-                    __omoikane_dispatch_keyboard_input("keydown", { key: "ArrowRight" });
+                    (yield 3);
                     const right = field.selectionStart === 1;
-                    __omoikane_dispatch_keyboard_input("keydown", { key: "End" });
+                    (yield 4);
                     const end = field.selectionStart === 2;
-                    __omoikane_dispatch_keyboard_input("keydown", { key: "ArrowLeft", shiftKey: true });
+                    (yield 5);
                     return deleted && backspaced && home && right && end &&
                       field.selectionStart === 1 && field.selectionEnd === 2 &&
                       field.selectionDirection === "backward";
                 })()"#,
+            &[
+                ("Delete", "", false),
+                ("Backspace", "", false),
+                ("Home", "", false),
+                ("ArrowRight", "", false),
+                ("End", "", false),
+                ("ArrowLeft", "", true)
+            ],
         )
         .unwrap()
         .as_boolean()
-        .unwrap());
+        .unwrap()
+    );
 }
 
 #[test]
@@ -32829,6 +32996,50 @@ const FOCUS_LOG_SETUP: &str = r#"
         };
     "#;
 
+// Fixed synchronous fixture steps; exceptions propagate and no jobs are drained.
+fn drive_selector_inputs(
+    runtime: &mut JsRuntime,
+    script: &str,
+    commands: Vec<super::host_input_types::HostInputCommand>,
+) -> String {
+    runtime
+        .eval(&format!("globalThis.selectorSteps = {script}"))
+        .unwrap();
+    let document = runtime.document();
+    let mut next = "selectorSteps.next()".to_owned();
+    for (index, command) in commands.into_iter().enumerate() {
+        let step: serde_json::Value =
+            serde_json::from_str(&eval_str(runtime, &format!("JSON.stringify({next})"))).unwrap();
+        assert_eq!(step, serde_json::json!({"done":false,"value":index}));
+        let touch = matches!(
+            command,
+            super::host_input_types::HostInputCommand::Touch { .. }
+        );
+        let result = runtime.dispatch_host_input(&document, command).unwrap();
+        // Touch dispatch returns a numeric default-action mask; mouse and key
+        // dispatch return cancellation booleans. Preserve the original value.
+        let result = if touch {
+            let mask = result.as_number().expect("touch dispatch result mask");
+            assert!(mask.is_finite());
+            mask.to_string()
+        } else {
+            result
+                .as_boolean()
+                .expect("mouse/key dispatch result")
+                .to_string()
+        };
+        next = format!("selectorSteps.next({result})");
+    }
+    runtime
+        .eval(&format!("globalThis.selectorResult = {next}"))
+        .unwrap();
+    assert_eq!(
+        runtime.eval("selectorResult.done").unwrap().as_boolean(),
+        Some(true)
+    );
+    eval_str(runtime, "selectorResult.value")
+}
+
 #[test]
 fn user_action_focus_selectors_follow_focus_and_input_modality() {
     let mut runtime = runtime_from_html(
@@ -32837,9 +33048,26 @@ fn user_action_focus_selectors_follow_focus_and_input_modality() {
                  #button:focus-visible { background-color: rgb(4, 5, 6) }
                  </style></head><body><div id="group"><button id="button">Go</button></div></body></html>"#,
     );
-    let result = eval_str(
+    use super::host_input_types::*;
+    let target = runtime.document().query_selector("#button").unwrap();
+    let commands = vec![
+        HostInputCommand::Mouse {
+            target: target.clone(),
+            phase: HostMousePhase::Down,
+            input: HostMouseInput::default(),
+            focus_target: true,
+        },
+        HostInputCommand::Keyboard {
+            phase: HostKeyPhase::Down,
+            input: HostKeyInput {
+                key: "a".into(),
+                ..Default::default()
+            },
+        },
+    ];
+    let result = drive_selector_inputs(
         &mut runtime,
-        r#"(() => {
+        r#"(function*() {
                 const group = document.getElementById('group');
                 const button = document.getElementById('button');
                 const before = [button.matches(':focus'), group.matches(':focus-within')];
@@ -32847,16 +33075,17 @@ fn user_action_focus_selectors_follow_focus_and_input_modality() {
                 const programmatic = [button.matches(':focus'), button.matches(':focus-visible'),
                   group.matches(':focus-within'), getComputedStyle(group).color];
                 button.blur();
-                __omoikane_dispatch_mouse_input(button.__id, 'mousedown', {}, true);
+                (yield 0);
                 const pointer = [button.matches(':focus'), button.matches(':focus-visible'),
                   getComputedStyle(button).backgroundColor !== 'rgb(4, 5, 6)'];
-                __omoikane_dispatch_keyboard_input('keydown', { key: 'a' });
+                (yield 1);
                 const keyboard = [button.matches(':focus-visible'),
                   getComputedStyle(button).backgroundColor];
                 button.blur();
                 return JSON.stringify([before, programmatic, pointer, keyboard,
                   group.matches(':focus-within')]);
             })()"#,
+        commands,
     );
     assert_eq!(
         result,
@@ -32870,29 +33099,68 @@ fn user_action_hover_and_active_selectors_follow_pointer_target() {
         r#"<html><head><style>#outer:hover { color: rgb(7, 8, 9) }</style></head>
                <body><div id="outer"><button id="inner">Go</button></div></body></html>"#,
     );
-    let result = eval_str(
+    use super::host_input_types::*;
+    let target = runtime.document().query_selector("#inner").unwrap();
+    let commands = vec![
+        HostInputCommand::Mouse {
+            target: target.clone(),
+            phase: HostMousePhase::Move,
+            input: HostMouseInput::default(),
+            focus_target: false,
+        },
+        HostInputCommand::Mouse {
+            target: target.clone(),
+            phase: HostMousePhase::Down,
+            input: HostMouseInput::default(),
+            focus_target: false,
+        },
+        HostInputCommand::Mouse {
+            target: target.clone(),
+            phase: HostMousePhase::Up,
+            input: HostMouseInput::default(),
+            focus_target: false,
+        },
+        HostInputCommand::Touch {
+            target: target.clone(),
+            phase: HostTouchPhase::Start,
+            input: HostTouchInput {
+                touches: vec![HostTouchPoint::default()],
+                ..Default::default()
+            },
+        },
+        HostInputCommand::Touch {
+            target: target.clone(),
+            phase: HostTouchPhase::End,
+            input: HostTouchInput {
+                touches: vec![],
+                ..Default::default()
+            },
+        },
+    ];
+    let result = drive_selector_inputs(
         &mut runtime,
-        r#"(() => {
+        r#"(function*() {
                 const outer = document.getElementById('outer');
                 const inner = document.getElementById('inner');
                 const before = outer.matches(':hover');
                 let invalidFunction = false;
                 try { inner.matches(':hover()'); }
                 catch (error) { invalidFunction = error.name === 'SyntaxError'; }
-                __omoikane_dispatch_mouse_input(inner.__id, 'mousemove', {}, false);
+                (yield 0);
                 const hover = [inner.matches(':hover'), outer.matches(':hover'),
                   getComputedStyle(outer).color];
-                __omoikane_dispatch_mouse_input(inner.__id, 'mousedown', {}, false);
+                (yield 1);
                 const active = [inner.matches(':active'), outer.matches(':active')];
-                __omoikane_dispatch_mouse_input(inner.__id, 'mouseup', {}, false);
+                (yield 2);
                 const released = inner.matches(':active');
-                __omoikane_dispatch_touch_input(inner.__id, 'touchstart', { touches: [{}] });
+                (yield 3);
                 const touchActive = [inner.matches(':active'), outer.matches(':active')];
-                __omoikane_dispatch_touch_input(inner.__id, 'touchend', { touches: [] });
+                (yield 4);
                 const touchReleased = inner.matches(':active');
                 return JSON.stringify([before, hover, active, released,
                   touchActive, touchReleased, invalidFunction]);
             })()"#,
+        commands,
     );
     assert_eq!(
         result,
@@ -32964,23 +33232,67 @@ fn user_action_hover_but_not_active_crosses_iframe_boundary() {
     let mut runtime = runtime_from_html(
         r#"<html><body><div id="outer"><iframe id="frame"></iframe></div></body></html>"#,
     );
-    let result = eval_str(
-        &mut runtime,
-        r#"(() => {
+    runtime
+        .eval(
+            r#"globalThis.frameInputSteps = (function*() {
                 const outer = document.getElementById('outer');
                 const frame = document.getElementById('frame');
                 const inner = frame.contentDocument.createElement('button');
                 frame.contentDocument.body.appendChild(inner);
-                __omoikane_dispatch_mouse_input(inner.__id, 'mousemove', {}, false);
+                (yield 0);
                 const hover = [inner.matches(':hover'), frame.matches(':hover'),
                   outer.matches(':hover')];
-                __omoikane_dispatch_mouse_input(inner.__id, 'mousedown', {}, false);
+                (yield 1);
                 const active = [inner.matches(':active'), frame.matches(':active'),
                   outer.matches(':active')];
-                __omoikane_dispatch_mouse_input(inner.__id, 'mouseup', {}, false);
+                (yield 2);
                 return JSON.stringify([hover, active, inner.matches(':active')]);
             })()"#,
+        )
+        .unwrap();
+    use super::host_input_types::{HostInputCommand, HostMouseInput, HostMousePhase};
+    let document = runtime.document();
+    let frame = document.query_selector("#frame").unwrap();
+    let mut next = "frameInputSteps.next()".to_owned();
+    for (index, phase) in [
+        HostMousePhase::Move,
+        HostMousePhase::Down,
+        HostMousePhase::Up,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let step: serde_json::Value =
+            serde_json::from_str(&eval_str(&mut runtime, &format!("JSON.stringify({next})")))
+                .unwrap();
+        assert_eq!(step, serde_json::json!({"done":false,"value":index}));
+        let child = runtime
+            .frame_content_document(&frame)
+            .expect("initialized child document");
+        let target = child.query_selector("button").unwrap();
+        let result = runtime
+            .dispatch_host_input(
+                &document,
+                HostInputCommand::Mouse {
+                    target,
+                    phase,
+                    input: HostMouseInput::default(),
+                    focus_target: false,
+                },
+            )
+            .unwrap()
+            .as_boolean()
+            .unwrap();
+        next = format!("frameInputSteps.next({result})");
+    }
+    runtime
+        .eval(&format!("globalThis.frameInputResult = {next}"))
+        .unwrap();
+    assert_eq!(
+        runtime.eval("frameInputResult.done").unwrap().as_boolean(),
+        Some(true)
     );
+    let result = eval_str(&mut runtime, "frameInputResult.value");
     assert_eq!(result, "[[true,true,true],[true,false,false],false]");
 }
 
@@ -34457,12 +34769,21 @@ fn dialog_show_modal_close_moves_and_restores_focus() {
 
 #[test]
 fn dialog_escape_cancels_only_the_top_modal_and_honors_prevent_default() {
+    use super::host_input_types::*;
+    let key = |key: &str, code: &str| HostInputCommand::Keyboard {
+        phase: HostKeyPhase::Down,
+        input: HostKeyInput {
+            key: key.into(),
+            code: code.into(),
+            ..Default::default()
+        },
+    };
     let mut runtime = runtime_from_html(
         r#"<html><body><button id="before">before</button><dialog id="outer"><button id="outerButton">outer</button></dialog><dialog id="inner"><button id="innerButton">inner</button></dialog></body></html>"#,
     );
-    eval_str(
+    drive_selector_inputs(
         &mut runtime,
-        r#"(() => {
+        r#"(function*() {
                 const before = document.getElementById("before");
                 const outer = document.getElementById("outer");
                 const inner = document.getElementById("inner");
@@ -34477,28 +34798,33 @@ fn dialog_escape_cancels_only_the_top_modal_and_honors_prevent_default() {
                 inner.addEventListener("close", () => log.push("inner-close"));
                 // User activation separates the dialogs' close watcher groups and
                 // grants the history-action activation that lets cancel block.
-                const activate = () =>
-                  __omoikane_dispatch_keyboard_input("keydown", { key: "Control", code: "ControlLeft" });
                 outer.showModal();
-                activate();
+                (yield 0);
                 inner.showModal();
-                activate();
-                __omoikane_dispatch_keyboard_input("keydown", { key: "Escape", code: "Escape" });
+                (yield 1);
+                (yield 2);
                 log.push("blocked=" + inner.open + ":" + document.activeElement.id);
                 inner.dataset.allowed = "yes";
-                __omoikane_dispatch_keyboard_input("keydown", { key: "Escape", code: "Escape" });
+                (yield 3);
                 return "";
             })()"#,
+        vec![
+            key("Control", "ControlLeft"),
+            key("Control", "ControlLeft"),
+            key("Escape", "Escape"),
+            key("Escape", "Escape"),
+        ],
     );
     // Close events are queued, so run them before observing each step.
     runtime.run_until_idle().unwrap();
-    eval_str(
+    drive_selector_inputs(
         &mut runtime,
-        r#"(() => {
+        r#"(function*() {
                 dialogLog.push("inner=" + document.getElementById("inner").open + ":" + document.activeElement.id);
-                __omoikane_dispatch_keyboard_input("keydown", { key: "Escape", code: "Escape" });
+                (yield 0);
                 return "";
             })()"#,
+        vec![key("Escape", "Escape")],
     );
     runtime.run_until_idle().unwrap();
     let result = eval_str(

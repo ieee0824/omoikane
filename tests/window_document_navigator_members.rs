@@ -3,6 +3,7 @@
 
 use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
+use omoikane::js::host_input_types::{HostInputCommand, HostKeyInput, HostKeyPhase};
 
 fn runtime_at(markup: &str, url: &str) -> JsRuntime {
     JsRuntime::with_document_and_url(TreeBuilder::parse(markup).document(), url).unwrap()
@@ -215,7 +216,26 @@ fn user_activation_tracks_the_shared_transient_and_sticky_activation() {
             document.body.requestFullscreen().catch(() => {});
             during.push(activation.isActive, activation.hasBeenActive);
           }, { once: true });
-          __omoikane_dispatch_keyboard_input('keydown', { key: 'Enter', code: 'Enter' });
+          return true;
+        }"#,
+    );
+    let document = runtime.document();
+    runtime
+        .dispatch_host_input(
+            &document,
+            HostInputCommand::Keyboard {
+                phase: HostKeyPhase::Down,
+                input: HostKeyInput {
+                    key: "Enter".into(),
+                    code: "Enter".into(),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+    check(
+        &mut runtime,
+        r#"() => {
           return during.join() === 'true,true,false,true' || during.join();
         }"#,
     );

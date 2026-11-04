@@ -34,7 +34,15 @@ class GateTests(unittest.TestCase):
         gate.write_json(self.root / "inputs/identity.json", self.identity)
         targets = ["jit_native_gate", "new_test"]
         gate.write_json(self.root / "inputs/integration-targets.json", targets)
-        names = [f"module::test_{i}" for i in range(100)]
+        surface_names = ["js::web_api_surface_tests::" + name for name in (
+            "manifest_ids_are_unique_and_well_formed",
+            "report_classifies_regressions_and_improvements",
+            "committed_document_exposes_navigation_url",
+            "navigation_probe_checks_destination_and_history_mode",
+            "web_api_surface_does_not_regress",
+            "trusted_surface_probe_rejects_missing_input",
+        )]
+        names = [f"module::test_{i}" for i in range(100)] + surface_names
         for shard in gate.SHARDS:
             folder = self.root / shard
             folder.mkdir()
@@ -78,7 +86,19 @@ class GateTests(unittest.TestCase):
             "0 filtered out; finished in 600.1s\n")
         gate.write_json(self.root / "acid3/acid3.json", acid3_report())
         gate.write_json(self.root / "compatibility/wpt.json", {"summary": {"regression": 0}})
-        gate.write_json(self.root / "compatibility/web-api.json", {"regressions": []})
+        features = json.loads(Path("tests/web_api_surface/manifest.json").read_text())["features"]
+        surface_report = {
+            "total": len(features), "regressions": [],
+            "results": [{key: feature[key] for key in
+                         ("id", "area", "description", "baseline_supported")} |
+                        {"status": "supported", "error": None} for feature in features],
+        }
+        for label in ("web-api", "embedded-web-api"):
+            gate.write_json(self.root / f"compatibility/{label}.json", surface_report)
+            (self.root / f"compatibility/{label}.log").write_text(
+                "".join(f"test {name} ... ok\n" for name in surface_names)
+                + "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; "
+                "5018 filtered out; finished in 9.32s\n")
         gate.write_json(self.root / "stress/stress.json", {
             "gc_profile": True, "elapsed_seconds": 600,
             "seeds": [{"seed": i, "success": True} for i in range(64)],
@@ -256,6 +276,91 @@ class GateTests(unittest.TestCase):
                 self.assertFalse(self.decide())
                 (self.root / "acid3/shard.json").write_text(original)
 
+
+class SurfaceGateTests(unittest.TestCase):
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.root=Path(self.tmp.name);(self.root/'unit-0').mkdir();(self.root/'compatibility').mkdir()
+  self.names=['js::web_api_surface_tests::'+x for x in ['manifest_ids_are_unique_and_well_formed','report_classifies_regressions_and_improvements','committed_document_exposes_navigation_url','navigation_probe_checks_destination_and_history_mode','web_api_surface_does_not_regress','trusted_surface_probe_rejects_missing_input']]
+  gate.write_json(self.root/'unit-0/all-tests.json',self.names+['js::unrelated'])
+  features=json.loads(Path('tests/web_api_surface/manifest.json').read_text())['features'];self.report={'total':len(features),'regressions':[],'results':[{k:f[k] for k in ['id','area','description','baseline_supported']}|{'status':'supported','error':None} for f in features]}
+  for label in ['web-api','embedded-web-api']:
+   gate.write_json(self.root/f'compatibility/{label}.json',self.report);(self.root/f'compatibility/{label}.log').write_text(''.join(f'test {n} ... ok\n' for n in self.names)+'test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 5018 filtered out; finished in 9.32s\n')
+ def test_complete(self):self.assertTrue(gate.complete_surface_coverage(self.root))
+ def test_missing_second_report(self):
+  (self.root/'compatibility/embedded-web-api.json').unlink();self.assertFalse(gate.complete_surface_coverage(self.root))
+ def test_missing_case(self):
+  (self.root/'compatibility/web-api.log').write_text(''.join(f'test {n} ... ok\n' for n in self.names[:-1]));self.assertFalse(gate.complete_surface_coverage(self.root))
+ def test_duplicate_case(self):
+  p=self.root/'compatibility/web-api.log';p.write_text(p.read_text()+f'test {self.names[0]} ... ok\n');self.assertFalse(gate.complete_surface_coverage(self.root))
+ def test_missing_report_id(self):
+  self.report['results'].pop();gate.write_json(self.root/'compatibility/web-api.json',self.report);self.assertFalse(gate.complete_surface_coverage(self.root))
+ def test_duplicate_report_id(self):
+  self.report['results'][1]=self.report['results'][0];gate.write_json(self.root/'compatibility/web-api.json',self.report);self.assertFalse(gate.complete_surface_coverage(self.root))
+ def test_false_empty_regressions(self):
+  row=next(x for x in self.report['results'] if x['baseline_supported']);row['status']='error';gate.write_json(self.root/'compatibility/web-api.json',self.report);self.assertFalse(gate.complete_surface_coverage(self.root))
+ def test_metadata_mismatch(self):
+  self.report['results'][0]['baseline_supported']=not self.report['results'][0]['baseline_supported'];gate.write_json(self.root/'compatibility/web-api.json',self.report);self.assertFalse(gate.complete_surface_coverage(self.root))
+
+
+class SurfaceLogTests(unittest.TestCase):
+    def setUp(self):
+        self.raw = (Path(__file__).parent / "fixtures/gate4-surface-nocapture.log").read_text()
+        self.names = [
+            "js::web_api_surface_tests::" + name for name in (
+                "committed_document_exposes_navigation_url",
+                "manifest_ids_are_unique_and_well_formed",
+                "navigation_probe_checks_destination_and_history_mode",
+                "report_classifies_regressions_and_improvements",
+                "trusted_surface_probe_rejects_missing_input",
+                "web_api_surface_does_not_regress",
+            )
+        ]
+
+    def test_saved_nocapture_success_log_covers_every_case(self):
+        self.assertTrue(gate.surface_log_covers_tests(self.raw, self.names))
+
+    def test_missing_or_failed_multiline_outcome_is_rejected(self):
+        for replacement in ("", "FAILED\n", "ignored\n"):
+            with self.subTest(replacement=replacement):
+                damaged = self.raw.replace("\nok\n", "\n" + replacement)
+                self.assertFalse(gate.surface_log_covers_tests(damaged, self.names))
+
+    def test_duplicate_or_unexpected_case_is_rejected(self):
+        for name in (self.names[0], "js::unrelated_test"):
+            with self.subTest(name=name):
+                self.assertFalse(gate.surface_log_covers_tests(
+                    self.raw + f"test {name} ... ok\n", self.names))
+
+    def test_missing_or_conflicting_terminal_summary_is_rejected(self):
+        for damaged in (
+            self.raw.split("test result:")[0],
+            self.raw.replace("6 passed", "5 passed"),
+            self.raw.replace("0 failed", "1 failed"),
+            self.raw.replace("0 ignored", "1 ignored"),
+            self.raw + self.raw[self.raw.index("test result:"):],
+        ):
+            with self.subTest(log=damaged[-150:]):
+                self.assertFalse(gate.surface_log_covers_tests(damaged, self.names))
+
+    def test_orphan_outcome_and_unfinished_case_are_rejected(self):
+        for damaged in ("ok\n" + self.raw, self.raw + f"test {self.names[0]} ... output\n"):
+            with self.subTest(log=damaged[-150:]):
+                self.assertFalse(gate.surface_log_covers_tests(damaged, self.names))
+
+    def test_report_body_cannot_supply_an_extra_outcome(self):
+        for outcome in ("ok", "FAILED"):
+            with self.subTest(outcome=outcome):
+                damaged = self.raw.replace("  canvas:", outcome + "\n  canvas:", 1)
+                self.assertFalse(gate.surface_log_covers_tests(damaged, self.names))
+
+    def test_interleaved_case_start_before_pending_outcome_is_rejected(self):
+        damaged = self.raw.replace(
+            "  canvas:", f"test {self.names[0]} ... ok\n  canvas:", 1)
+        self.assertFalse(gate.surface_log_covers_tests(damaged, self.names))
+
+    def test_colored_success_log_is_supported(self):
+        colored = self.raw.replace("ok", "\x1b[32mok\x1b[0m")
+        self.assertTrue(gate.surface_log_covers_tests(colored, self.names))
 
 if __name__ == "__main__":
     unittest.main()

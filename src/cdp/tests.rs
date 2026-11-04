@@ -5158,7 +5158,15 @@ fn native_wheel_enters_cross_origin_hit_target_realm_without_exposing_it_to_auth
         .as_string()
         .unwrap()
         .to_std_string_escaped();
-    assert_eq!(author_result, "SecurityError");
+    assert_eq!(author_result, "ReferenceError");
+    assert_eq!(
+        session
+            .runtime
+            .eval("typeof __omoikane_dispatch_wheel_input === 'undefined'")
+            .unwrap()
+            .as_boolean(),
+        Some(true),
+    );
 
     let result = session
         .dispatch(

@@ -472,7 +472,9 @@ fn window_proxy_global_native(
     let create_if_missing = args.get(1).is_none_or(JsValue::to_boolean);
     let document =
         resolve_receiver_document_id_with_pending(args.first(), context, create_if_missing)?;
-    let caller = author_script_document_id(context);
+    // Direct host input has no author Script frame. Its scoped client supplies
+    // group membership only; author identity and the origin check still apply.
+    let caller = host_input::window_access_client_document(context)?;
     let same_group = with_host_state(|host| {
         let state = host.borrow();
         Ok(caller.is_some_and(|caller| {

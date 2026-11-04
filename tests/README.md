@@ -353,10 +353,10 @@ JavaScript results or change upstream assertions.
 
 # Web API surface probe
 
-主要なWeb APIの存在・型・基本挙動は、manifest駆動のintegration testで継続計測します。
+主要なWeb APIの存在・型・基本挙動は、manifest駆動のunit testで継続計測します。
 
 ```bash
-cargo test --test web_api_surface -- --nocapture
+cargo test --lib js::web_api_surface_tests:: -- --nocapture
 ```
 
 manifestは [`web_api_surface/manifest.json`](web_api_surface/manifest.json) にあります。
@@ -376,7 +376,7 @@ machine-readable JSON reportが必要な場合は出力先を指定します。
 
 ```bash
 OMOIKANE_WEB_API_REPORT=target/web-api-surface.json \
-  cargo test --test web_api_surface -- --nocapture
+  cargo test --lib js::web_api_surface_tests:: -- --nocapture
 ```
 
 ## Browser operation journeys

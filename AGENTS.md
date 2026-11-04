@@ -73,7 +73,7 @@ CI=1 cargo test --locked -- --include-ignored
 cargo check --locked --features gui
 
 # Web APIの互換性
-cargo test --locked --test web_api_surface -- --nocapture
+cargo test --locked --lib js::web_api_surface_tests:: -- --nocapture
 
 # 固定revisionのWPTを取得して検証
 scripts/fetch-wpt.sh

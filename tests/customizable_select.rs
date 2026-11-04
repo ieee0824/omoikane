@@ -3,6 +3,7 @@
 
 use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
+use omoikane::js::host_input_types::*;
 
 fn runtime(body: &str) -> JsRuntime {
     let markup = format!("<!doctype html><html><body>{body}</body></html>");
@@ -190,6 +191,78 @@ fn base_appearance_select_uses_html_ua_rules() {
     );
 }
 
+fn check_picker_input(runtime: &mut JsRuntime, script: &str) {
+    let document = runtime.document();
+    let select = document.query_selector("#s").unwrap();
+    let button_child = document
+        .query_selector("#b")
+        .unwrap()
+        .first_child()
+        .unwrap();
+    let first_option = select.query_selector("option").unwrap();
+    let outside = document.query_selector("#outside").unwrap();
+    let click = |target| HostInputCommand::Mouse {
+        target,
+        phase: HostMousePhase::Click,
+        input: HostMouseInput::default(),
+        focus_target: false,
+    };
+    let key = |key: &str| HostInputCommand::Keyboard {
+        phase: HostKeyPhase::Down,
+        input: HostKeyInput {
+            key: key.into(),
+            ..Default::default()
+        },
+    };
+    let commands = [
+        click(button_child),
+        key("ArrowDown"),
+        key("ArrowDown"),
+        key("Enter"),
+        key(" "),
+        key("Escape"),
+        click(select.clone()),
+        click(first_option),
+        click(select.clone()),
+        click(select.clone()),
+        click(select.clone()),
+        click(outside),
+    ];
+    runtime
+        .eval(&format!("globalThis.pickerSteps = ({script})()"))
+        .unwrap();
+    let mut next = "pickerSteps.next()".to_owned();
+    for (index, command) in commands.into_iter().enumerate() {
+        let json = runtime
+            .eval(&format!("JSON.stringify({next})"))
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            serde_json::json!({"done":false,"value":index}),
+            "input {index}"
+        );
+        let result = runtime
+            .dispatch_host_input(&document, command)
+            .unwrap()
+            .as_boolean()
+            .expect("mouse/key cancellation result");
+        next = format!("pickerSteps.next({result})");
+    }
+    let json = runtime
+        .eval(&format!("JSON.stringify({next})"))
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+        serde_json::json!({"done":true,"value":true})
+    );
+}
+
 #[test]
 fn base_picker_opens_renders_options_and_handles_keys() {
     let mut runtime = runtime(
@@ -199,46 +272,44 @@ fn base_picker_opens_renders_options_and_handles_keys() {
          <p id=outside>outside</p>",
     );
     runtime.set_viewport(400.0, 300.0);
-    check(
+    check_picker_input(
         &mut runtime,
-        r#"() => {
+        r#"function*() {
           const select = document.getElementById('s');
           const button = document.getElementById('b');
           const [one, two] = select.options;
           const events = [];
           select.addEventListener('change', () => events.push('change'));
-          const click = node => __omoikane_dispatch_mouse_input(node.__id, 'click', {button: 0}, false);
-          const key = k => __omoikane_dispatch_keyboard_input('keydown', {key: k});
           button.focus();
           if (document.activeElement === button) return 'select button is not focusable';
           if (one.getBoundingClientRect().height !== 0) return 'closed picker hides options';
-          click(button.firstChild);
+          (yield 0);
           if (!select.matches(':open')) return 'clicking the button opens the picker';
           if (document.activeElement !== one) return 'selected option focused: ' + document.activeElement;
           const selectRect = select.getBoundingClientRect();
           const rect = two.getBoundingClientRect();
           if (!(rect.height > 0 && rect.top >= selectRect.bottom)) return 'picker below select';
           if (document.elementFromPoint(rect.left + 2, rect.top + 2) !== two) return 'option hit testing';
-          key('ArrowDown');
+          (yield 1);
           if (document.activeElement !== two || select.value !== 'one') return 'arrow moves focus';
-          key('ArrowDown');
+          (yield 2);
           if (document.activeElement !== two) return 'disabled options are skipped';
-          key('Enter');
+          (yield 3);
           if (select.matches(':open') || select.value !== 'two') return 'enter picks';
           if (document.activeElement !== select) return 'focus returns to the select';
           if (events.join() !== 'change') return 'events ' + events;
-          key(' ');
+          (yield 4);
           if (!select.matches(':open') || document.activeElement !== two) return 'space opens';
-          key('Escape');
+          (yield 5);
           if (select.matches(':open') || document.activeElement !== select) return 'escape closes';
-          click(select);
-          click(one);
+          (yield 6);
+          (yield 7);
           if (select.matches(':open') || select.value !== 'one') return 'clicking an option picks it';
-          click(select);
-          click(select);
+          (yield 8);
+          (yield 9);
           if (select.matches(':open')) return 'clicking the select again closes it';
-          click(select);
-          click(document.getElementById('outside'));
+          (yield 10);
+          (yield 11);
           if (select.matches(':open')) return 'light dismiss';
           return true;
         }"#,

@@ -1,3 +1,6 @@
+use super::host_input_types::{
+    HostInputCommand, HostKeyInput, HostKeyPhase, HostMouseInput, HostMousePhase,
+};
 use super::*;
 
 struct FocusPages(HashMap<String, String>);
@@ -48,6 +51,23 @@ fn eval_document(runtime: &mut JsRuntime, document: &NodeHandle, source: &str) {
     runtime
         .eval_in_document_realm(document.identity(), source)
         .unwrap();
+    assert_eq!(runtime.take_task_errors(), Vec::<String>::new());
+}
+
+// Keep setup, input and observations together before the original job drain.
+fn input_in_document(
+    runtime: &mut JsRuntime,
+    document: &NodeHandle,
+    action: impl FnOnce(&mut JsRuntime) -> JsResult<()>,
+) {
+    let realm = runtime
+        .realm_for_document(document.identity())
+        .unwrap()
+        .unwrap();
+    let old = runtime.context.enter_realm(realm);
+    let result = action(runtime).and_then(|()| runtime.run_jobs());
+    runtime.context.enter_realm(old);
+    result.unwrap();
     assert_eq!(runtime.take_task_errors(), Vec::<String>::new());
 }
 
@@ -120,19 +140,26 @@ fn cross_origin_focus_requires_delegation_or_user_activation() {
     runtime
         .eval("document.getElementById('old').focus()")
         .unwrap();
-    eval_document(
-        &mut runtime,
-        &child,
-        "const target=document.getElementById('target'); \
+    input_in_document(&mut runtime, &child, |runtime| {
+        runtime.eval("const target=document.getElementById('target'); \
          document.documentElement.setAttribute('data-policy', \
          String(document.permissionsPolicy.allowsFeature('focus-without-user-activation'))); \
          target.focus(); \
          document.documentElement.setAttribute('data-denied', String(document.activeElement===target)); \
          window.focus(); \
-         document.documentElement.setAttribute('data-window-denied', String(document.hasFocus())); \
-         __omoikane_dispatch_mouse_input(target.__id,'mousedown',{},true); \
-         document.documentElement.setAttribute('data-activated', String(document.activeElement===target))",
-    );
+         document.documentElement.setAttribute('data-window-denied', String(document.hasFocus()));")?;
+        runtime.dispatch_host_input(
+            &child,
+            HostInputCommand::Mouse {
+                target: child.query_selector("#target").unwrap(),
+                phase: HostMousePhase::Down,
+                input: HostMouseInput::default(),
+                focus_target: true,
+            },
+        )?;
+        runtime.eval("document.documentElement.setAttribute('data-activated', String(document.activeElement===target))")?;
+        Ok(())
+    });
     assert_eq!(attribute(&child, "data-policy").as_deref(), Some("false"));
     assert_eq!(attribute(&child, "data-denied").as_deref(), Some("false"));
     assert_eq!(
@@ -223,12 +250,21 @@ fn response_policy_blocks_script_focus_but_allows_user_input() {
             .as_boolean(),
         Some(false)
     );
+    let document = runtime.document();
+    runtime
+        .dispatch_host_input(
+            &document,
+            HostInputCommand::Mouse {
+                target: document.query_selector("#old").unwrap(),
+                phase: HostMousePhase::Down,
+                input: HostMouseInput::default(),
+                focus_target: true,
+            },
+        )
+        .unwrap();
     assert_eq!(
         runtime
-            .eval(
-                "__omoikane_dispatch_mouse_input(old.__id,'mousedown',{},true); \
-            document.activeElement===old"
-            )
+            .eval("document.activeElement===old")
             .unwrap()
             .as_boolean(),
         Some(true)
@@ -275,27 +311,68 @@ fn cross_origin_child_focus_updates_its_own_and_parent_active_elements() {
 fn cross_origin_mouse_click_and_parent_keyboard_route_to_the_focused_child() {
     let mut runtime = runtime(&[("https://child.test/child", INPUT_PAGE)]);
     let child = frame_document(&runtime, &runtime.document(), "#child");
-    eval_document(
-        &mut runtime,
-        &child,
-        r#"
+    input_in_document(&mut runtime, &child, |runtime| {
+        runtime.eval(r#"
         const target = document.getElementById('target');
         const types = [];
         for (const type of ['mousedown','mouseup','click']) target.addEventListener(type, () => types.push(type));
         target.addEventListener('keydown', event => document.documentElement.setAttribute('data-key', event.key));
         const rect = target.getBoundingClientRect();
         const init = {clientX:rect.left+rect.width/2, clientY:rect.top+rect.height/2, button:0};
-        for (const type of ['mousedown','mouseup','click']) {
-          __omoikane_dispatch_mouse_input(target.__id, type, init, type === 'mousedown');
+"#)?;
+        let coordinates = runtime
+            .eval("JSON.stringify([init.clientX,init.clientY])")?
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        let client: [f64; 2] = serde_json::from_str(&coordinates).unwrap();
+        let target = child.query_selector("#target").unwrap();
+        for (phase, focus_target) in [
+            (HostMousePhase::Down, true),
+            (HostMousePhase::Up, false),
+            (HostMousePhase::Click, false),
+        ] {
+            runtime.dispatch_host_input(
+                &child,
+                HostInputCommand::Mouse {
+                    target: target.clone(),
+                    phase,
+                    input: HostMouseInput {
+                        client,
+                        button: 0,
+                        ..Default::default()
+                    },
+                    focus_target,
+                },
+            )?;
         }
-        document.documentElement.setAttribute('data-input', types.join('|'));
-    "#,
-    );
+        runtime.eval("document.documentElement.setAttribute('data-input', types.join('|'))")?;
+        Ok(())
+    });
     assert_eq!(
         attribute(&child, "data-input").as_deref(),
         Some("mousedown|mouseup|click")
     );
-    runtime.eval("__omoikane_dispatch_composition_input('commit','abc'); __omoikane_dispatch_keyboard_input('keydown',{key:'ArrowRight',code:'ArrowRight'})").unwrap();
+    let parent = runtime.document();
+    runtime
+        .dispatch_host_input(
+            &parent,
+            HostInputCommand::CommitComposition { text: "abc".into() },
+        )
+        .unwrap();
+    runtime
+        .dispatch_host_input(
+            &parent,
+            HostInputCommand::Keyboard {
+                phase: HostKeyPhase::Down,
+                input: HostKeyInput {
+                    key: "ArrowRight".into(),
+                    code: "ArrowRight".into(),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
     eval_document(
         &mut runtime,
         &child,

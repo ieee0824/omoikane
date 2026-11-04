@@ -3092,24 +3092,10 @@
       },
       {
         "ancestors": [
-          "dispatchCompositionInput",
-          "Object"
-        ],
-        "name": "__omoikane_dispatch_composition_input"
-      },
-      {
-        "ancestors": [
           "",
           "Object"
         ],
         "name": "__omoikane_dispatch_csp_violation"
-      },
-      {
-        "ancestors": [
-          "",
-          "Object"
-        ],
-        "name": "__omoikane_dispatch_drag_input"
       },
       {
         "ancestors": [
@@ -3130,13 +3116,6 @@
           "",
           "Object"
         ],
-        "name": "__omoikane_dispatch_keyboard_input"
-      },
-      {
-        "ancestors": [
-          "",
-          "Object"
-        ],
         "name": "__omoikane_dispatch_lifecycle_event"
       },
       {
@@ -3145,13 +3124,6 @@
           "Object"
         ],
         "name": "__omoikane_dispatch_media_session_action"
-      },
-      {
-        "ancestors": [
-          "",
-          "Object"
-        ],
-        "name": "__omoikane_dispatch_mouse_input"
       },
       {
         "ancestors": [
@@ -3193,21 +3165,7 @@
           "",
           "Object"
         ],
-        "name": "__omoikane_dispatch_touch_input"
-      },
-      {
-        "ancestors": [
-          "",
-          "Object"
-        ],
         "name": "__omoikane_dispatch_viewport_events"
-      },
-      {
-        "ancestors": [
-          "",
-          "Object"
-        ],
-        "name": "__omoikane_dispatch_wheel_input"
       },
       {
         "ancestors": [
@@ -3305,13 +3263,6 @@
           "",
           "Object"
         ],
-        "name": "__omoikane_prepare_drag_input"
-      },
-      {
-        "ancestors": [
-          "",
-          "Object"
-        ],
         "name": "__omoikane_prepare_window_message"
       },
       {
@@ -3341,13 +3292,6 @@
           "Object"
         ],
         "name": "__omoikane_record_resource_timing"
-      },
-      {
-        "ancestors": [
-          "",
-          "Object"
-        ],
-        "name": "__omoikane_release_pointer_capture"
       },
       {
         "ancestors": [
@@ -7063,23 +7007,7 @@
         "configurable": true,
         "enumerable": true,
         "kind": "data",
-        "name": "__omoikane_dispatch_composition_input",
-        "type": "function",
-        "writable": true
-      },
-      {
-        "configurable": true,
-        "enumerable": true,
-        "kind": "data",
         "name": "__omoikane_dispatch_csp_violation",
-        "type": "function",
-        "writable": true
-      },
-      {
-        "configurable": true,
-        "enumerable": true,
-        "kind": "data",
-        "name": "__omoikane_dispatch_drag_input",
         "type": "function",
         "writable": true
       },
@@ -7103,14 +7031,6 @@
         "configurable": true,
         "enumerable": true,
         "kind": "data",
-        "name": "__omoikane_dispatch_keyboard_input",
-        "type": "function",
-        "writable": true
-      },
-      {
-        "configurable": true,
-        "enumerable": true,
-        "kind": "data",
         "name": "__omoikane_dispatch_lifecycle_event",
         "type": "function",
         "writable": true
@@ -7120,14 +7040,6 @@
         "enumerable": true,
         "kind": "data",
         "name": "__omoikane_dispatch_media_session_action",
-        "type": "function",
-        "writable": true
-      },
-      {
-        "configurable": true,
-        "enumerable": true,
-        "kind": "data",
-        "name": "__omoikane_dispatch_mouse_input",
         "type": "function",
         "writable": true
       },
@@ -7175,23 +7087,7 @@
         "configurable": true,
         "enumerable": true,
         "kind": "data",
-        "name": "__omoikane_dispatch_touch_input",
-        "type": "function",
-        "writable": true
-      },
-      {
-        "configurable": true,
-        "enumerable": true,
-        "kind": "data",
         "name": "__omoikane_dispatch_viewport_events",
-        "type": "function",
-        "writable": true
-      },
-      {
-        "configurable": true,
-        "enumerable": true,
-        "kind": "data",
-        "name": "__omoikane_dispatch_wheel_input",
         "type": "function",
         "writable": true
       },
@@ -7335,14 +7231,6 @@
         "configurable": true,
         "enumerable": true,
         "kind": "data",
-        "name": "__omoikane_prepare_drag_input",
-        "type": "function",
-        "writable": true
-      },
-      {
-        "configurable": true,
-        "enumerable": true,
-        "kind": "data",
         "name": "__omoikane_prepare_window_message",
         "type": "function",
         "writable": true
@@ -7376,14 +7264,6 @@
         "enumerable": true,
         "kind": "data",
         "name": "__omoikane_record_resource_timing",
-        "type": "function",
-        "writable": true
-      },
-      {
-        "configurable": true,
-        "enumerable": true,
-        "kind": "data",
-        "name": "__omoikane_release_pointer_capture",
         "type": "function",
         "writable": true
       },
@@ -11846,6 +11726,6 @@
     ]
   },
   "generated_source_sha256": [
-    "b05625ab1d0bb49536ca9c3ea0fab423b06cce5f9f58c28851cf5a278869e5be"
+    "440cea7c3b4a9df00c100eec94806d10f057a09d55b3240fdd592878399de796"
   ]
 }

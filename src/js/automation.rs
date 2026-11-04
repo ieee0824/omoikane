@@ -124,13 +124,25 @@ impl JsRuntime {
         };
         let previous = self.context.enter_realm(realm);
         let _document = activate_module_document(&self.host_state, document);
-        let result = self.with_active_host(|context| {
-            driver.as_callable().expect("registered test driver").call(
-                &JsValue::undefined(),
-                &[execute.into()],
-                context,
-            )
-        });
+        let result = (|| {
+            // The capability belongs to this captured driver invocation, not
+            // to a registry entry that polling jobs may have replaced.
+            let scope = execute
+                .then(|| automation_input::InputScope::new(self, document))
+                .transpose()?;
+            let arguments = scope.as_ref().map_or_else(
+                || vec![JsValue::from(false)],
+                |scope| vec![JsValue::from(true), scope.value()],
+            );
+            self.with_active_host(|context| {
+                driver.as_callable().expect("registered test driver").call(
+                    &JsValue::undefined(),
+                    &arguments,
+                    context,
+                )
+            })
+            // scope drops here, before the caller runs any queued jobs.
+        })();
         self.context.enter_realm(previous);
         result
     }

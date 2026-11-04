@@ -1,3 +1,4 @@
+use super::host_input_types::{HostInputCommand, HostKeyInput, HostKeyPhase};
 use super::{FullscreenTransition, JsRuntime};
 use crate::cdp::CdpSession;
 use crate::html::TreeBuilder;
@@ -55,15 +56,33 @@ fn bool_result(runtime: &mut JsRuntime, source: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn dispatch_key(runtime: &mut JsRuntime, key: &str, code: &str) {
+    let document = runtime.document().clone();
+    runtime
+        .dispatch_host_input(
+            &document,
+            HostInputCommand::Keyboard {
+                phase: HostKeyPhase::Down,
+                input: HostKeyInput {
+                    key: key.into(),
+                    code: code.into(),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+}
+
 fn activate_with_key(runtime: &mut JsRuntime, handler: &str) {
     runtime
         .eval(&format!(
             "globalThis.activationError=''; \
              document.addEventListener('keydown', () => {{ try {{ {handler} }} catch (error) {{ \
                activationError=error.name+':'+error.message; }} }}, {{ once: true }}); \
-             __omoikane_dispatch_keyboard_input('keydown', {{ key: 'Enter', code: 'Enter' }});"
+             "
         ))
         .unwrap();
+    dispatch_key(runtime, "Enter", "Enter");
     runtime.run_jobs().unwrap();
     let error = runtime
         .eval("activationError")
@@ -191,9 +210,7 @@ fn fullscreen_escape_removal_and_host_exit_clear_state() {
         Some(FullscreenTransition::Enter)
     );
 
-    runtime
-        .eval("__omoikane_dispatch_keyboard_input('keydown',{key:'Escape',code:'Escape'})")
-        .unwrap();
+    dispatch_key(&mut runtime, "Escape", "Escape");
     runtime.run_jobs().unwrap();
     assert!(bool_result(
         &mut runtime,
@@ -239,6 +256,31 @@ fn fullscreen_escape_removal_and_host_exit_clear_state() {
     );
 }
 
+fn dispatch_frame_key(runtime: &mut JsRuntime) {
+    let frame = runtime.document().query_selector("#frame").unwrap();
+    let document = runtime
+        .host_state
+        .borrow()
+        .iframe_documents
+        .get(&frame.identity())
+        .unwrap()
+        .document
+        .clone();
+    runtime
+        .dispatch_host_input(
+            &document,
+            HostInputCommand::Keyboard {
+                phase: HostKeyPhase::Down,
+                input: HostKeyInput {
+                    key: "Enter".into(),
+                    code: "Enter".into(),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+}
+
 #[test]
 fn fullscreen_iframe_permission_boundary_and_reflection() {
     let document = TreeBuilder::parse(
@@ -252,9 +294,10 @@ fn fullscreen_iframe_permission_boundary_and_reflection() {
              globalThis.child=frame.contentWindow; \
              child.eval(\"globalThis.result=''; document.addEventListener('keydown',()=> \
                document.getElementById('target').requestFullscreen().then(()=>result='ok',e=>result=e.name),{once:true}); \
-               document.getElementById('target').focus(); __omoikane_dispatch_keyboard_input('keydown',{key:'Enter',code:'Enter'});\");",
+               document.getElementById('target').focus();\");",
         )
         .unwrap();
+    dispatch_frame_key(&mut runtime);
     runtime.run_jobs().unwrap();
     assert!(bool_result(
         &mut runtime,
@@ -272,9 +315,10 @@ fn fullscreen_iframe_permission_boundary_and_reflection() {
             "frame.setAttribute('allow', \"fullscreen 'none'\"); frame.srcdoc='<button id=blocked>no</button>'; \
              globalThis.child=frame.contentWindow; child.eval(\"globalThis.result=''; \
                document.addEventListener('keydown',()=>document.getElementById('blocked').requestFullscreen().then(()=>result='ok',e=>result=e.name),{once:true}); \
-               document.getElementById('blocked').focus(); __omoikane_dispatch_keyboard_input('keydown',{key:'Enter',code:'Enter'});\");",
+               document.getElementById('blocked').focus();\");",
         )
         .unwrap();
+    dispatch_frame_key(&mut runtime);
     runtime.run_jobs().unwrap();
     assert!(bool_result(
         &mut runtime,
@@ -588,7 +632,13 @@ fn navigation_exits_native_fullscreen() {
     session
         .dispatch(
             "Runtime.evaluate",
-            json!({"expression":"document.addEventListener('keydown',()=>document.getElementById('target').requestFullscreen(),{once:true}); __omoikane_dispatch_keyboard_input('keydown',{key:'Enter',code:'Enter'})"}),
+            json!({"expression":"document.addEventListener('keydown',()=>document.getElementById('target').requestFullscreen(),{once:true});"}),
+        )
+        .unwrap();
+    session
+        .dispatch(
+            "Input.dispatchKeyEvent",
+            json!({"type":"keyDown", "key":"Enter", "code":"Enter"}),
         )
         .unwrap();
     assert_eq!(

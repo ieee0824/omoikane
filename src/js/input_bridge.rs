@@ -6,10 +6,22 @@ use super::*;
 pub(super) struct State {
     shared: Option<JsObject>,
     dispatchers: HashMap<usize, JsValue>,
+    pub(super) host_client_document: Option<usize>,
     pub(super) automation: automation::State,
 }
 
 impl State {
+    /// Retains the private callback for a host-owned automation execution scope.
+    pub(super) fn automation_input_callback(&self, document: usize) -> Option<JsValue> {
+        self.dispatchers.get(&document).cloned()
+    }
+
+    /// Retains the real private callback for scoped unit-fixture capabilities.
+    #[cfg(test)]
+    pub(super) fn retained_dispatcher_for_test(&self, document: usize) -> Option<JsValue> {
+        self.dispatchers.get(&document).cloned()
+    }
+
     pub(super) unsafe fn trace(&self, tracer: &mut Tracer) {
         unsafe { self.automation.trace(tracer) };
         if let Some(shared) = &self.shared {
@@ -71,6 +83,17 @@ impl JsRuntime {
         kind: &str,
         arguments: &[serde_json::Value],
     ) -> JsResult<JsValue> {
+        self.dispatch_private_input_with_related_target(document, kind, arguments, None)
+    }
+
+    /// Resolves a validated host node into the input dictionary in the entry Realm.
+    pub(super) fn dispatch_private_input_with_related_target(
+        &mut self,
+        document: usize,
+        kind: &str,
+        arguments: &[serde_json::Value],
+        related_target: Option<(usize, usize)>,
+    ) -> JsResult<JsValue> {
         let (active, callback, main_document, main_realm) = {
             let state = self.host_state.borrow();
             (
@@ -109,7 +132,14 @@ impl JsRuntime {
                 .expect("registered input dispatcher")
                 .call(
                     &JsValue::undefined(),
-                    &[js_string!(kind).into(), values.into()],
+                    &[
+                        js_string!(kind).into(),
+                        values.into(),
+                        related_target
+                            .map_or(JsValue::null(), |(index, _)| JsValue::from(index as f64)),
+                        related_target
+                            .map_or(JsValue::null(), |(_, node)| JsValue::from(node as f64)),
+                    ],
                     context,
                 )
         });
@@ -330,4 +360,85 @@ pub(super) fn native_scroll_axes_have_no_range(
         }
         Ok(JsValue::from(empty))
     })
+}
+
+#[cfg(test)]
+mod retained_input_tests {
+    use super::*;
+    use crate::js::host_input_types::{HostInputCommand, HostKeyInput, HostKeyPhase};
+
+    #[test]
+    fn saved_private_dispatcher_is_inert_after_nested_document_retirement() {
+        let mut runtime = JsRuntime::new().unwrap();
+        runtime.eval(r#"
+            document.body.innerHTML='<input id=topField><iframe id=frame></iframe>';
+            globalThis.order=[];
+            globalThis.frame=document.getElementById('frame');
+            globalThis.child=frame.contentDocument;
+            globalThis.nested=child.createElement('iframe');
+            child.body.appendChild(nested);
+            nested.contentDocument.body.innerHTML='<input id=deep>';
+            document.getElementById('topField').onkeydown=e=>order.push('top:'+e.key);
+            nested.contentWindow.eval("document.getElementById('deep').onkeydown=e=>top.order.push('deep:'+e.key); document.getElementById('deep').focus();");
+        "#).unwrap();
+        let main = runtime.document();
+        let outer_frame = main.query_selector("#frame").unwrap();
+        let outer = runtime.frame_content_document(&outer_frame).unwrap();
+        let inner_frame = outer.query_selector("iframe").unwrap();
+        let retired = runtime.frame_content_document(&inner_frame).unwrap();
+        let saved = {
+            let state = runtime.host_state.borrow();
+            Rooted::new(state.input_bridge.dispatchers[&retired.identity()].clone())
+        };
+        assert!(saved.as_callable().is_some());
+        runtime
+            .dispatch_host_input(
+                &main,
+                HostInputCommand::Keyboard {
+                    phase: HostKeyPhase::Down,
+                    input: HostKeyInput {
+                        key: "k".into(),
+                        code: "KeyK".into(),
+                        ..Default::default()
+                    },
+                },
+            )
+            .unwrap();
+        assert!(runtime.eval("order.join('|')==='deep:k' && document.activeElement===frame && child.activeElement===nested").unwrap().to_boolean());
+        runtime.eval("nested.srcdoc='<p>new generation</p>'; void nested.contentDocument; document.getElementById('topField').focus();").unwrap();
+        assert!(
+            !runtime
+                .host_state
+                .borrow()
+                .input_bridge
+                .dispatchers
+                .contains_key(&retired.identity())
+        );
+        runtime
+            .dispatch_host_input(
+                &main,
+                HostInputCommand::Keyboard {
+                    phase: HostKeyPhase::Down,
+                    input: HostKeyInput {
+                        key: "z".into(),
+                        code: "KeyZ".into(),
+                        ..Default::default()
+                    },
+                },
+            )
+            .unwrap();
+        runtime.context.clear_kept_objects();
+        boa_gc::force_collect();
+        // Invoke the exact saved callable, not a new registry lookup or an absent global.
+        let result = runtime
+            .call_function_with_arguments(
+                "function(callback) { return callback('keyboard', ['keydown', {key:'stale'}]); }",
+                JsValue::undefined(),
+                vec![(*saved).clone()],
+            )
+            .unwrap();
+        assert_eq!(result.as_boolean(), Some(true));
+        runtime.run_jobs().unwrap();
+        assert!(runtime.eval("order.join('|')==='deep:k|top:z' && document.activeElement===document.getElementById('topField')").unwrap().to_boolean());
+    }
 }

@@ -16,7 +16,7 @@
 | --- | --- |
 | Scriptのparse・compile・evaluate、let/for/算術 | [jit_gate1](../../tests/jit_gate1.rs)の`public_boa_bytecode_pipeline_compiles_and_runs_arithmetic`がCodeBlockを生成し、0〜99の和4950を検査 |
 | 関数・クロージャ・プロパティ・文字列・配列 | 固定[11 workload](../../tests/js_benchmark/shapes.js)と[jit_gate1](../../tests/jit_gate1.rs)。shapeのown/prototype/accessor、old-to-young参照、Promise 45・timer 46を検査 |
-| Object/Reflect/SymbolとDOM receiver・identity | [DOM bootstrap](../../src/js/dom_bootstrap.js)、[Web API surface](../../tests/web_api_surface.rs)、[browser_journeys](../../tests/browser_journeys.rs)。APIの存在に加え、実際の入力・DOM変更・画面座標・画素を検査 |
+| Object/Reflect/SymbolとDOM receiver・identity | [DOM bootstrap](../../src/js/dom_bootstrap.js)、[Web API surface](../../src/js/web_api_surface_tests.rs)、[browser_journeys](../../tests/browser_journeys.rs)。APIの存在に加え、実際の入力・DOM変更・画面座標・画素を検査 |
 | class/extends・Symbol.species・Array callback | [array tests](../../engine/boa/core/engine/src/builtins/array/tests.rs)の`filter_species_callback_can_collect`。speciesが返す関数オブジェクトに要素7が残り、callback中のGCを越えることを検査 |
 | Map/Set・Date/RegExp・ArrayBuffer/TypedArray・BigInt・例外 | [JS tests](../../src/js/mod.rs)の`structured_clone_snapshots_cycles_builtins_and_rejects_unsupported_values`と`dedicated_worker_messages_preserve_supported_clone_builtins`。値・循環・realm側prototype・NaN/負のゼロ・DataCloneErrorを検査 |
 | 言語機能全体と既知の未対応 | [固定Test262設定](../../engine/boa/test262_config.toml)と[比較runner](../../scripts/engine-test262.py)。原本と現行を同じ50,595ケースで比較し、case消失・退行・skip化・panicを拒否 |
@@ -48,7 +48,7 @@
 | --- | --- |
 | #549 HTTP→入力→fetch→DOM→描画 | [browser_journeys](../../tests/browser_journeys.rs)の`http_page_input_fetch_and_dom_changes_reach_the_painted_frame`。固定HTTP応答、クリック/キー入力、表示文字・色とPNGを検査 |
 | #549 フォーム・履歴・CSS/geometry/paint | 同ファイルの`form_submission_and_back_navigation_preserve_saved_state`、`normal_flow_form_controls_accept_input_and_submit_using_painted_coordinates`、stylesheetの2ケース。送信内容、保存値、戻る操作、描画位置を検査 |
-| #549 全体互換性 | [Web API](../../tests/web_api_surface.rs)、[WPT smoke](../../tests/wpt_smoke.rs)、[Acid3](../../tests/acid3_harness.rs)、DOM/CDPを含む全suite。両Acid3駆動方式が[Selectors 4の固定期待結果](../../tests/fixtures/acid3/selectors4-expectation.json)（生の99/100、旧test 35の正確な失敗1件、完走）に一致し、WPT/Web API regression 0が必要 |
+| #549 全体互換性 | [Web API](../../src/js/web_api_surface_tests.rs)、[WPT smoke](../../tests/wpt_smoke.rs)、[Acid3](../../tests/acid3_harness.rs)、DOM/CDPを含む全suite。両Acid3駆動方式が[Selectors 4の固定期待結果](../../tests/fixtures/acid3/selectors4-expectation.json)（生の99/100、旧test 35の正確な失敗1件、完走）に一致し、WPT/Web API regression 0が必要 |
 | #550 child Realm・WindowProxy | [module_loading_tests](../../src/js/module_loading_tests.rs)の`concurrent_iframe_imports_keep_separate_realms_and_csp`、[JS tests](../../src/js/mod.rs)のWindowProxy・iframe回帰。各childでmodule実行1回、別token、親のglobal非変更とorigin境界を検査 |
 | #550 Dedicated/Shared/Service Worker・messaging | [JS tests](../../src/js/mod.rs)の`dedicated_worker_messages_are_fifo_cloned_and_microtask_checkpointed`、`shared_worker_is_shared_across_same_origin_runtimes`、`service_worker_registration_scopes_lifecycle_and_controller_selection`等。FIFO・clone後の値、共有接続、登録scope/lifecycleを検査 |
 | #550 task errorの観測 | [JS tests](../../src/js/mod.rs)の`dedicated_worker_runtime_task_errors_are_observable_without_stopping_page`。timerのエラーが1件観測でき、親ページの計算6×7が42を返すことを検査 |

@@ -1,3 +1,4 @@
+use omoikane::js::host_input_types::{HostInputCommand, HostMouseInput};
 use omoikane::{html::TreeBuilder, js::JsRuntime};
 
 fn check(source: &str) {
@@ -148,26 +149,64 @@ fn explicit_null_signal_is_rejected_even_for_null_listener() {
 
 #[test]
 fn root_wheel_listeners_default_to_passive_but_can_opt_out() {
-    check(
-        r#"(() => {
-            const button = document.querySelector('button');
-            const listener = event => event.preventDefault();
-            document.addEventListener('wheel', listener);
-            const passiveEvent = new Event('wheel', {bubbles: true, cancelable: true});
-            const passiveResult = button.dispatchEvent(passiveEvent);
-            const passiveInput = __omoikane_dispatch_wheel_input(button.__id,
-                {deltaX: 0, deltaY: 1});
-            document.removeEventListener('wheel', listener);
-            document.addEventListener('wheel', listener, {passive: false});
-            const activeEvent = new Event('wheel', {bubbles: true, cancelable: true});
-            const activeResult = button.dispatchEvent(activeEvent);
-            const activeInput = __omoikane_dispatch_wheel_input(button.__id,
-                {deltaX: 0, deltaY: 1});
-            return passiveResult && !passiveEvent.defaultPrevented &&
-                (passiveInput & 1) === 1 && !activeResult &&
-                activeEvent.defaultPrevented && activeInput === 0;
-        })()"#,
+    let document = TreeBuilder::parse("<html><body><button></button></body></html>").document();
+    let button = document.query_selector("button").unwrap();
+    let mut runtime = JsRuntime::with_document(document.clone()).unwrap();
+    assert_eq!(
+        runtime
+            .eval(
+                r#"(() => {
+        globalThis.button = document.querySelector('button');
+        globalThis.listener = event => event.preventDefault();
+        document.addEventListener('wheel', listener);
+        const passiveEvent = new Event('wheel', {bubbles: true, cancelable: true});
+        const passiveResult = button.dispatchEvent(passiveEvent);
+        return passiveResult && !passiveEvent.defaultPrevented;
+    })()"#
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
     );
+    let passive_input = runtime
+        .dispatch_host_input(
+            &document,
+            HostInputCommand::Wheel {
+                target: button.clone(),
+                input: HostMouseInput::default(),
+                delta: [0.0, 1.0, 0.0],
+            },
+        )
+        .unwrap()
+        .as_number()
+        .unwrap();
+    assert_eq!((passive_input as i32) & 1, 1);
+    assert_eq!(
+        runtime
+            .eval(
+                r#"(() => {
+        document.removeEventListener('wheel', listener);
+        document.addEventListener('wheel', listener, {passive: false});
+        const activeEvent = new Event('wheel', {bubbles: true, cancelable: true});
+        const activeResult = button.dispatchEvent(activeEvent);
+        return !activeResult && activeEvent.defaultPrevented;
+    })()"#
+            )
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    let active_input = runtime
+        .dispatch_host_input(
+            &document,
+            HostInputCommand::Wheel {
+                target: button,
+                input: HostMouseInput::default(),
+                delta: [0.0, 1.0, 0.0],
+            },
+        )
+        .unwrap();
+    assert_eq!(active_input.as_number(), Some(0.0));
 }
 
 #[test]

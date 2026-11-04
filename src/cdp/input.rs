@@ -1,6 +1,7 @@
 //! `Input` domain: keyboard, mouse, touch, and IME event dispatch.
 
 use super::*;
+use crate::js::HostInputKind;
 
 fn mouse_button(button: Option<&str>) -> Result<i32, JsonRpcError> {
     match button.unwrap_or("none") {
@@ -206,8 +207,9 @@ impl CdpSession {
         });
         let trusted_activation = dom_type == "keydown"
             && !matches!(key, "Escape" | "Shift" | "Control" | "Alt" | "Meta");
-        let not_canceled = self.eval_input_bool_with_activation(
-            &format!("__omoikane_dispatch_keyboard_input({dom_type:?}, {init})"),
+        let not_canceled = self.dispatch_input_bool_with_activation(
+            HostInputKind::Keyboard,
+            &[json!(dom_type), init],
             trusted_activation,
         )?;
         Ok(json!({ "defaultPrevented": !not_canceled }))
@@ -294,9 +296,10 @@ impl CdpSession {
             init["deltaY"] = json!(optional_f64(params, "deltaY", 0.0)?);
             init["deltaZ"] = json!(0);
             init["deltaMode"] = json!(0);
-            let outcome = self.eval_input_number_in_document(
+            let outcome = self.dispatch_input_number_in_document(
                 target_document_id,
-                &format!("__omoikane_dispatch_wheel_input({target_id}, {init})"),
+                HostInputKind::Wheel,
+                &[json!(target_id), init],
             )?;
             let not_canceled = outcome & 1 != 0;
             return Ok(json!({
@@ -306,11 +309,14 @@ impl CdpSession {
                 "hostOverscrollY": outcome & 4 != 0,
             }));
         }
-        let not_canceled = self.eval_input_bool_with_activation(
-            &format!(
-                "__omoikane_dispatch_mouse_input({target_id}, {dom_type:?}, {init}, {})",
-                dom_type == "mousedown"
-            ),
+        let not_canceled = self.dispatch_input_bool_with_activation(
+            HostInputKind::Mouse,
+            &[
+                json!(target_id),
+                json!(dom_type),
+                init.clone(),
+                json!(dom_type == "mousedown"),
+            ],
             button == 0 && matches!(dom_type, "mousedown" | "click"),
         )?;
         if locked {
@@ -319,15 +325,17 @@ impl CdpSession {
         }
         if dom_type == "mousedown" && !locked {
             if self.drag_active {
-                let _ = self.eval_input_bool(&format!(
-                    "__omoikane_dispatch_drag_input(0, \"cancel\", {init})"
-                ))?;
+                let _ = self.dispatch_input_bool(
+                    HostInputKind::Drag,
+                    &[json!(0), json!("cancel"), init.clone()],
+                )?;
             }
             self.drag_active = false;
             self.drag_candidate = if not_canceled {
-                self.eval_input_bool(&format!(
-                    "__omoikane_prepare_drag_input({target_id}, {init})"
-                ))?
+                self.dispatch_input_bool(
+                    HostInputKind::PrepareDrag,
+                    &[json!(target_id), init.clone()],
+                )?
             } else {
                 false
             };
@@ -336,9 +344,10 @@ impl CdpSession {
             && buttons & button_mask(0) != 0
             && (self.drag_candidate || self.drag_active)
         {
-            let active = self.eval_input_bool(&format!(
-                "__omoikane_dispatch_drag_input({target_id}, \"move\", {init})"
-            ))?;
+            let active = self.dispatch_input_bool(
+                HostInputKind::Drag,
+                &[json!(target_id), json!("move"), init.clone()],
+            )?;
             self.drag_active = active;
             if active {
                 self.drag_candidate = false;
@@ -356,9 +365,10 @@ impl CdpSession {
             let was_drag = self.drag_active;
             let pressed = self.mouse_pressed_target.take();
             if was_drag || self.drag_candidate {
-                drag_consumed = self.eval_input_bool(&format!(
-                    "__omoikane_dispatch_drag_input({target_id}, \"end\", {init})"
-                ))? || was_drag;
+                drag_consumed = self.dispatch_input_bool(
+                    HostInputKind::Drag,
+                    &[json!(target_id), json!("end"), init.clone()],
+                )? || was_drag;
                 self.drag_active = false;
                 self.drag_candidate = false;
             }
@@ -366,18 +376,15 @@ impl CdpSession {
                 && pressed.is_some()
                 && pressed == target.as_ref().map(NodeHandle::identity)
             {
-                let click_not_canceled = self.eval_input_bool_with_activation(
-                    &format!(
-                        "__omoikane_dispatch_mouse_input({target_id}, \"click\", {init}, false)"
-                    ),
+                let click_not_canceled = self.dispatch_input_bool_with_activation(
+                    HostInputKind::Mouse,
+                    &[json!(target_id), json!("click"), init.clone(), json!(false)],
                     button == 0,
                 )?;
                 click_default_prevented = !click_not_canceled;
             }
-            let _ = self.eval_input_bool(&format!(
-                "__omoikane_release_pointer_capture({})",
-                pointer_id
-            ))?;
+            let _ = self
+                .dispatch_input_bool(HostInputKind::ReleasePointerCapture, &[json!(pointer_id)])?;
         }
         Ok(json!({
             "defaultPrevented": !not_canceled,
@@ -471,9 +478,10 @@ impl CdpSession {
             "metaKey": modifiers & 4 != 0,
             "shiftKey": modifiers & 8 != 0,
         });
-        let outcome = self.eval_input_number(&format!(
-            "__omoikane_dispatch_touch_input({target_id}, {dom_type:?}, {init})"
-        ))?;
+        let outcome = self.dispatch_input_number(
+            HostInputKind::Touch,
+            &[json!(target_id), json!(dom_type), init],
+        )?;
         if dom_type == "touchstart" && outcome & 1 == 0 {
             self.touch_scroll_allowed = false;
         }
@@ -503,33 +511,42 @@ impl CdpSession {
                 "Composition selection must be ordered and within the text".to_string(),
             ));
         }
-        let handled = self.eval_input_bool(&format!(
-            "__omoikane_dispatch_composition_input(\"set\", {}, {selection_start}, {selection_end})",
-            serde_json::to_string(&text).expect("a string is JSON serializable"),
-        ))?;
+        let handled = self.dispatch_input_bool(
+            HostInputKind::Composition,
+            &[
+                json!("set"),
+                json!(text),
+                json!(selection_start),
+                json!(selection_end),
+            ],
+        )?;
         Ok(json!({ "handled": handled }))
     }
 
     pub(super) fn input_insert_text(&mut self, params: &Value) -> Result<Value, JsonRpcError> {
         let text = require_string(params, "text")?;
-        let handled = self.eval_input_bool(&format!(
-            "__omoikane_dispatch_composition_input(\"commit\", {})",
-            serde_json::to_string(&text).expect("a string is JSON serializable"),
-        ))?;
+        let handled =
+            self.dispatch_input_bool(HostInputKind::Composition, &[json!("commit"), json!(text)])?;
         Ok(json!({ "handled": handled }))
     }
 
-    fn eval_input_bool(&mut self, script: &str) -> Result<bool, JsonRpcError> {
-        self.eval_input_bool_with_activation(script, false)
+    fn dispatch_input_bool(
+        &mut self,
+        kind: HostInputKind,
+        arguments: &[Value],
+    ) -> Result<bool, JsonRpcError> {
+        self.dispatch_input_bool_with_activation(kind, arguments, false)
     }
 
-    fn eval_input_bool_with_activation(
+    fn dispatch_input_bool_with_activation(
         &mut self,
-        script: &str,
+        kind: HostInputKind,
+        arguments: &[Value],
         trusted_activation: bool,
     ) -> Result<bool, JsonRpcError> {
         let evaluate = |runtime: &mut JsRuntime| {
-            let value = runtime.eval(script)?;
+            let document = runtime.document().identity();
+            let value = runtime.dispatch_host_input_primitive(document, kind, arguments)?;
             runtime.run_jobs()?;
             Ok(value.as_boolean().unwrap_or(true))
         };
@@ -543,27 +560,24 @@ impl CdpSession {
         Ok(not_canceled)
     }
 
-    fn eval_input_number(&mut self, script: &str) -> Result<u8, JsonRpcError> {
-        let outcome = self
-            .runtime
-            .eval(script)
-            .and_then(|value| {
-                self.runtime.run_jobs()?;
-                Ok(value.as_number().unwrap_or(1.0) as u8)
-            })
-            .map_err(js_error)?;
-        self.commit_pending_navigation_requests()?;
-        Ok(outcome)
+    fn dispatch_input_number(
+        &mut self,
+        kind: HostInputKind,
+        arguments: &[Value],
+    ) -> Result<u8, JsonRpcError> {
+        let document = self.runtime.document().identity();
+        self.dispatch_input_number_in_document(document, kind, arguments)
     }
 
-    fn eval_input_number_in_document(
+    fn dispatch_input_number_in_document(
         &mut self,
         document_id: usize,
-        script: &str,
+        kind: HostInputKind,
+        arguments: &[Value],
     ) -> Result<u8, JsonRpcError> {
         let outcome = self
             .runtime
-            .eval_input_in_document_realm(document_id, script)
+            .dispatch_host_input_primitive(document_id, kind, arguments)
             .and_then(|value| {
                 self.runtime.run_jobs()?;
                 Ok(value.as_number().unwrap_or(1.0) as u8)

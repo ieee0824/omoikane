@@ -2,6 +2,7 @@
 
 use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
+use omoikane::js::host_input_types::{HostInputCommand, HostKeyInput, HostKeyPhase};
 
 #[test]
 fn constructed_input_event_owns_a_snapshot_and_clears_it_after_dispatch() {
@@ -64,24 +65,32 @@ fn text_control_beforeinput_exposes_no_dom_target_ranges() {
     let document =
         TreeBuilder::parse("<!doctype html><body><textarea id='editor'>ab</textarea></body>")
             .document();
-    let mut runtime = JsRuntime::with_document(document).unwrap();
+    let mut runtime = JsRuntime::with_document(document.clone()).unwrap();
+    runtime.eval(r#"(() => {
+        const editor = document.getElementById('editor');
+        let count = -1, type = '';
+        editor.addEventListener('beforeinput', event => {
+            count = event.getTargetRanges().length;
+            type = event.inputType;
+        });
+        editor.focus();
+        globalThis.inputRangeResult = () => count === 0 && type === 'insertText' && editor.value.includes('x');
+    })()"#).unwrap();
+    runtime
+        .dispatch_host_input(
+            &document,
+            HostInputCommand::Keyboard {
+                phase: HostKeyPhase::Down,
+                input: HostKeyInput {
+                    key: "x".into(),
+                    text: "x".into(),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
     assert_eq!(
-        runtime
-            .eval(
-                r#"(() => {
-                  const editor = document.getElementById('editor');
-                  let count = -1, type = '';
-                  editor.addEventListener('beforeinput', event => {
-                    count = event.getTargetRanges().length;
-                    type = event.inputType;
-                  });
-                  editor.focus();
-                  __omoikane_dispatch_keyboard_input('keydown', {key:'x', text:'x'});
-                  return count === 0 && type === 'insertText' && editor.value.includes('x');
-                })()"#,
-            )
-            .unwrap()
-            .as_boolean(),
+        runtime.eval("inputRangeResult()").unwrap().as_boolean(),
         Some(true)
     );
 }

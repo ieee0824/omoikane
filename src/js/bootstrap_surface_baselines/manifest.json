@@ -95,5 +95,23 @@
     ],
     "reason": "Native callers require Window document or ServiceWorker runtime; DedicatedWorker, SharedWorker and Worklet have no production caller. Omit producers in compact child source; preserve original Window/ServiceWorker bytes.",
     "baseline_change": "Only three named globals/globalConstructorChains entries per child fixture; remaining fields and Window unchanged. Runtime validation pending."
+  },
+  "host_input_global_removal": {
+    "issue": 1697,
+    "globals": [
+      "__omoikane_dispatch_mouse_input",
+      "__omoikane_dispatch_wheel_input",
+      "__omoikane_dispatch_touch_input",
+      "__omoikane_dispatch_keyboard_input",
+      "__omoikane_dispatch_composition_input",
+      "__omoikane_dispatch_drag_input",
+      "__omoikane_prepare_drag_input",
+      "__omoikane_release_pointer_capture"
+    ],
+    "validation": "Executed Window, DedicatedWorker, SharedWorker, Worklet and DedicatedWorker factory snapshots matched exactly the expected eight global/constructor-chain removals; all remaining shape fields unchanged. Fixtures require rerun after this explicit regeneration.",
+    "generated_source_sha256": "Regenerated from executed snapshots, including the previously recorded Window source-hash mismatch.",
+    "not_completed": [
+      "Full suite/build and JIT validation are separate."
+    ]
   }
 }

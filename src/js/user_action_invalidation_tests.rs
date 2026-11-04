@@ -10,6 +10,23 @@ fn runtime(css: &str) -> JsRuntime {
     JsRuntime::with_document(crate::html::TreeBuilder::parse(&html).document()).unwrap()
 }
 
+fn move_mouse(runtime: &mut JsRuntime, id: &str) {
+    use super::host_input_types::{HostInputCommand, HostMouseInput, HostMousePhase};
+    let document = runtime.document();
+    let target = document.query_selector(&format!("#{id}")).unwrap();
+    runtime
+        .dispatch_host_input(
+            &document,
+            HostInputCommand::Mouse {
+                target,
+                phase: HostMousePhase::Move,
+                input: HostMouseInput::default(),
+                focus_target: false,
+            },
+        )
+        .unwrap();
+}
+
 fn check(runtime: &mut JsRuntime, source: &str) {
     assert_eq!(
         runtime.eval(source).unwrap().as_boolean(),
@@ -21,17 +38,17 @@ fn check(runtime: &mut JsRuntime, source: &str) {
 #[test]
 fn moving_inside_a_hovered_anchor_keeps_layout_and_updates_selector_state() {
     let mut runtime = runtime("a:hover{width:64px}");
+    move_mouse(&mut runtime, "left");
     check(
         &mut runtime,
         "(() => { const left=document.getElementById('left'); \
-        __omoikane_dispatch_mouse_input(left.__id,'mousemove',{},false); \
         return document.getElementById('link').getBoundingClientRect().width===64; })()",
     );
     let before = runtime.render_generations();
+    move_mouse(&mut runtime, "right");
     check(
         &mut runtime,
         "(() => { const right=document.getElementById('right'); \
-        __omoikane_dispatch_mouse_input(right.__id,'mousemove',{},false); \
         return right.matches(':hover') && !document.getElementById('left').matches(':hover') \
         && document.getElementById('link').matches(':hover') \
         && document.getElementById('link').getBoundingClientRect().width===64; })()",
@@ -45,10 +62,10 @@ fn moving_inside_a_hovered_anchor_keeps_layout_and_updates_selector_state() {
         after.layout, before.layout,
         "the anchor geometry is still valid"
     );
+    move_mouse(&mut runtime, "other");
     check(
         &mut runtime,
         "(() => { const other=document.getElementById('other'); \
-        __omoikane_dispatch_mouse_input(other.__id,'mousemove',{},false); \
         return !document.getElementById('link').matches(':hover') \
         && document.getElementById('link').getBoundingClientRect().width===32; })()",
     );
@@ -63,10 +80,10 @@ fn hovering_without_observing_rules_keeps_geometry_and_live_matches() {
         "document.getElementById('link').getBoundingClientRect().width===32",
     );
     let before = runtime.render_generations();
+    move_mouse(&mut runtime, "left");
     check(
         &mut runtime,
         "(() => { const left=document.getElementById('left'); \
-        __omoikane_dispatch_mouse_input(left.__id,'mousemove',{},false); \
         return left.matches(':hover') && document.getElementById('link').matches(':hover') \
         && document.getElementById('link').getBoundingClientRect().width===32; })()",
     );
@@ -84,10 +101,10 @@ fn paint_only_hover_updates_cssom_pixels_and_hit_testing_without_relayout() {
     );
     let before_pixels = runtime.paint_current_document().unwrap();
     let before = runtime.render_generations();
+    move_mouse(&mut runtime, "link");
     check(
         &mut runtime,
         "(() => { const link=document.getElementById('link'); \
-        __omoikane_dispatch_mouse_input(link.__id,'mousemove',{},false); \
         return getComputedStyle(link).opacity==='0.25' \
         && link.getBoundingClientRect().width===32 \
         && document.elementFromPoint(16,16)===link; })()",
@@ -112,10 +129,10 @@ fn filter_hover_with_fixed_descendant_invalidates_geometry() {
         "document.getElementById('fixed').getBoundingClientRect().left===5",
     );
     let before = runtime.render_generations();
+    move_mouse(&mut runtime, "link");
     check(
         &mut runtime,
         "(() => { const link=document.getElementById('link'); \
-        __omoikane_dispatch_mouse_input(link.__id,'mousemove',{},false); \
         return getComputedStyle(link).filter!=='none' \
         && Number.isFinite(document.getElementById('fixed').getBoundingClientRect().left); })()",
     );
@@ -142,11 +159,12 @@ fn opacity_hover_hit_order_matches_full_layout_reference() {
     let optimized_before = optimized.render_generations();
     let reference_before = reference.render_generations();
     let hover = "(() => { const link=document.getElementById('link'); \
-        __omoikane_dispatch_mouse_input(link.__id,'mousemove',{},false); \
         return getComputedStyle(link).opacity==='0.75' \
         && document.elementFromPoint(8,16).id==='other' \
         && document.elementFromPoint(24,16).id==='left'; })()";
+    move_mouse(&mut optimized, "link");
     check(&mut optimized, hover);
+    move_mouse(&mut reference, "link");
     check(&mut reference, hover);
     let optimized_pixels_after = optimized.paint_current_document().unwrap();
     let reference_pixels_after = reference.paint_current_document().unwrap();
@@ -177,10 +195,10 @@ fn nested_geometry_rule_under_hover_rebuilds_layout() {
         "document.getElementById('left').getBoundingClientRect().width===32",
     );
     let before = runtime.render_generations();
+    move_mouse(&mut runtime, "link");
     check(
         &mut runtime,
         "(() => { const link=document.getElementById('link'); \
-        __omoikane_dispatch_mouse_input(link.__id,'mousemove',{},false); \
         return document.getElementById('left').getBoundingClientRect().width===100; })()",
     );
     assert!(runtime.render_generations().layout > before.layout);
@@ -216,10 +234,10 @@ fn observed_hover_updates_geometry_and_inheritance_without_discarding_unrelated_
     );
     let before = cached_element_style(&mut runtime, "other");
     let before_generations = runtime.render_generations();
+    move_mouse(&mut runtime, "left");
     check(
         &mut runtime,
         "(() => { const left=document.getElementById('left');\
-        __omoikane_dispatch_mouse_input(left.__id,'mousemove',{},false);\
         return document.getElementById('link').getBoundingClientRect().width===64\
         && getComputedStyle(left).color==='rgb(255, 0, 0)'; })()",
     );
@@ -232,10 +250,10 @@ fn observed_hover_updates_geometry_and_inheritance_without_discarding_unrelated_
         Arc::ptr_eq(&before, &after),
         "the unrelated style survives the real hover/reflow path"
     );
+    move_mouse(&mut runtime, "other");
     check(
         &mut runtime,
         "(() => {const other=document.getElementById('other');\
-        __omoikane_dispatch_mouse_input(other.__id,'mousemove',{},false);\
         return document.getElementById('link').getBoundingClientRect().width===32\
         && getComputedStyle(document.getElementById('left')).color==='rgb(0, 0, 255)'; })()",
     );

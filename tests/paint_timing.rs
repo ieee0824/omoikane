@@ -2,6 +2,7 @@
 
 use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
+use omoikane::js::host_input_types::{HostInputCommand, HostKeyInput, HostKeyPhase};
 
 fn runtime(body: &str) -> JsRuntime {
     let markup = format!("<!doctype html><html><body>{body}</body></html>");
@@ -87,7 +88,25 @@ fn largest_contentful_paint_grows_until_input() {
           if (second.element !== document.getElementById('big') || second.url !== '') return 'element';
           if (second.startTime !== second.renderTime || second.loadTime !== 0) return 'times';
           if (second.toJSON().size !== second.size) return 'toJSON';
-          __omoikane_dispatch_keyboard_input('keydown', { key: 'a' });
+          return true;
+        }"#,
+    );
+    let document = runtime.document();
+    runtime
+        .dispatch_host_input(
+            &document,
+            HostInputCommand::Keyboard {
+                phase: HostKeyPhase::Down,
+                input: HostKeyInput {
+                    key: "a".into(),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+    check(
+        &mut runtime,
+        r#"() => {
           const huge = document.createElement('div');
           huge.style.fontSize = '60px';
           huge.textContent = 'after input';
