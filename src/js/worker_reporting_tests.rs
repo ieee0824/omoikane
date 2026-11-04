@@ -102,66 +102,32 @@ impl WorkerCspFixture {
             .map(|(name, value)| (name.to_owned(), value.replace("{ORIGIN}", &origin)));
         let import_worker_source = import_worker_source.to_owned();
         let worker = FixtureWorker::spawn(move || {
-            let deadline = Instant::now() + ACCEPT_TIMEOUT;
             let mut requests = Vec::new();
             while !worker_stopped.load(Ordering::Acquire) {
-                assert!(Instant::now() < deadline, "Worker CSP fixture timed out");
                 let mut stream = match accept_with_timeout(&listener, Duration::from_millis(20)) {
                     Ok(stream) => stream,
                     Err(error) if error.kind() == io::ErrorKind::TimedOut => continue,
                     Err(error) => panic!("Worker CSP accept failed: {error}"),
                 };
-                let headers = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
-                let mut request_line = headers.lines().next().unwrap().split_whitespace();
-                let method = request_line.next().unwrap().to_owned();
-                let path = request_line.next().unwrap().to_owned();
-                let length = headers
-                    .lines()
-                    .find_map(|line| {
-                        line.split_once(':')
-                            .filter(|(name, _)| name.eq_ignore_ascii_case("Content-Length"))
-                    })
-                    .and_then(|(_, length)| length.trim().parse::<usize>().ok())
-                    .unwrap_or(0);
-                let mut body = vec![0; length];
-                stream.read_exact(&mut body).unwrap();
-                let is_preflight = method == "OPTIONS";
-                requests.push(CspRequest {
-                    method,
-                    path: path.clone(),
-                    body: String::from_utf8_lossy(&body).into_owned(),
-                });
-                match path.as_str() {
-                    "/dedicated.js" => {
-                        let body = "postMessage('started');";
-                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                let request = match read_worker_csp_request(&mut stream, &worker_stopped) {
+                    Ok(request) => request,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => break,
+                    Err(error) => panic!("Worker CSP request failed: {error}"),
+                };
+                let response = worker_csp_response(
+                    &request.path,
+                    request.method == "OPTIONS",
+                    &import_header,
+                    &import_worker_source,
+                );
+                requests.push(request);
+                if let Err(error) =
+                    write_worker_csp_response(&mut stream, &response, READ_TIMEOUT, &worker_stopped)
+                {
+                    if error.kind() == io::ErrorKind::Interrupted {
+                        break;
                     }
-                    "/shared.js" => {
-                        let body = "let connections=0;onconnect=e=>e.ports[0].postMessage(++connections);";
-                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-                    }
-                    "/dedicated-globals.js" => {
-                        let body = "postMessage([typeof DedicatedWorkerGlobalScope, typeof SharedWorkerGlobalScope]);";
-                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-                    }
-                    "/shared-globals.js" => {
-                        let body = "onconnect=e=>e.ports[0].postMessage([typeof DedicatedWorkerGlobalScope, typeof SharedWorkerGlobalScope]);";
-                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-                    }
-                    "/import-worker.js" => {
-                        let security_header = import_header.as_ref().map_or_else(String::new, |(name, value)| format!("{name}: {value}\r\nReporting-Endpoints: imports=\"/reports\"\r\n"));
-                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\n{security_header}Content-Length: {}\r\nConnection: close\r\n\r\n{import_worker_source}", import_worker_source.len()).unwrap();
-                    }
-                    "/import.js" => {
-                        let body = "globalThis.imported=true;";
-                        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-                    }
-                    "/redirect" => stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: https://other.test/import.js\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap(),
-                    "/import-redirect" => stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: /import.js\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap(),
-                    "/worker-redirect" => stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: /dedicated.js\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap(),
-                    "/reports" if is_preflight => stream.write_all(b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST\r\nAccess-Control-Allow-Headers: content-type\r\nAccess-Control-Max-Age: 600\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap(),
-                    "/reports" => stream.write_all(b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap(),
-                    _ => stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap(),
+                    panic!("Worker CSP response failed: {error}");
                 }
             }
             requests
@@ -179,10 +145,347 @@ impl WorkerCspFixture {
     }
 }
 
+// CSP reports in these fixtures are small JSON documents. Bound allocation
+// before trusting Content-Length, independently of the transport deadline.
+const WORKER_CSP_MAX_BODY: usize = 64 * 1024;
+const WORKER_CSP_IO_POLL: Duration = Duration::from_millis(20);
+
+fn worker_csp_io_remaining(deadline: Instant, stopped: &AtomicBool) -> io::Result<Duration> {
+    if stopped.load(Ordering::Acquire) {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "fixture stopped",
+        ));
+    }
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "fixture I/O deadline",
+        ));
+    }
+    Ok(remaining.min(WORKER_CSP_IO_POLL))
+}
+
+fn read_worker_csp_request(
+    stream: &mut std::net::TcpStream,
+    stopped: &AtomicBool,
+) -> io::Result<CspRequest> {
+    // The shared header helper retains its absolute five-second cap. Body
+    // and response waits additionally observe the owner's stop at each poll.
+    let headers = read_request_headers(stream, READ_TIMEOUT)?;
+    let length = worker_csp_content_length(&headers)?;
+    let mut fields = headers
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace();
+    let method = fields
+        .next()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?
+        .to_owned();
+    let path = fields
+        .next()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?
+        .to_owned();
+    let body = read_worker_csp_body(stream, length, READ_TIMEOUT, stopped)?;
+    Ok(CspRequest {
+        method,
+        path,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    })
+}
+
+fn worker_csp_content_length(headers: &str) -> io::Result<usize> {
+    let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid CSP Content-Length");
+    let mut length = None;
+    for line in headers.lines().skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if !name.eq_ignore_ascii_case("Content-Length") {
+            continue;
+        }
+        let value = value.trim();
+        if length.is_some() || value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(invalid());
+        }
+        let parsed = value.parse::<usize>().map_err(|_| invalid())?;
+        length = Some(parsed);
+    }
+    Ok(length.unwrap_or(0))
+}
+
+fn read_worker_csp_body(
+    stream: &mut std::net::TcpStream,
+    length: usize,
+    timeout: Duration,
+    stopped: &AtomicBool,
+) -> io::Result<Vec<u8>> {
+    read_worker_csp_body_with(length, timeout, stopped, |bytes, remaining| {
+        stream.set_read_timeout(Some(remaining))?;
+        stream.read(bytes)
+    })
+}
+
+fn read_worker_csp_body_with(
+    length: usize,
+    timeout: Duration,
+    stopped: &AtomicBool,
+    mut read: impl FnMut(&mut [u8], Duration) -> io::Result<usize>,
+) -> io::Result<Vec<u8>> {
+    if length > WORKER_CSP_MAX_BODY {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "CSP body too large",
+        ));
+    }
+    let deadline = Instant::now() + timeout;
+    let mut body = vec![0; length];
+    let mut offset = 0;
+    while offset < length {
+        let remaining = worker_csp_io_remaining(deadline, stopped)?;
+        match read(&mut body[offset..], remaining) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+            Ok(count) => offset += count,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(body)
+}
+
+fn write_worker_csp_response(
+    stream: &mut std::net::TcpStream,
+    mut response: &[u8],
+    timeout: Duration,
+    stopped: &AtomicBool,
+) -> io::Result<()> {
+    let deadline = Instant::now() + timeout;
+    while !response.is_empty() {
+        stream.set_write_timeout(Some(worker_csp_io_remaining(deadline, stopped)?))?;
+        match stream.write(response) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::WriteZero)),
+            Ok(count) => response = &response[count..],
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn worker_csp_response(
+    path: &str,
+    is_preflight: bool,
+    import_header: &Option<(String, String)>,
+    import_worker_source: &str,
+) -> Vec<u8> {
+    match path {
+        "/dedicated.js" => {
+            let body = "postMessage('started');";
+            format!("HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes()
+        }
+        "/shared.js" => {
+            let body = "let connections=0;onconnect=e=>e.ports[0].postMessage(++connections);";
+            format!("HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes()
+        }
+        "/dedicated-globals.js" => {
+            let body = "postMessage([typeof DedicatedWorkerGlobalScope, typeof SharedWorkerGlobalScope]);";
+            format!("HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes()
+        }
+        "/shared-globals.js" => {
+            let body = "onconnect=e=>e.ports[0].postMessage([typeof DedicatedWorkerGlobalScope, typeof SharedWorkerGlobalScope]);";
+            format!("HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes()
+        }
+        "/import-worker.js" => {
+            let security_header = import_header.as_ref().map_or_else(String::new, |(name, value)| format!("{name}: {value}\r\nReporting-Endpoints: imports=\"/reports\"\r\n"));
+            format!("HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\n{security_header}Content-Length: {}\r\nConnection: close\r\n\r\n{import_worker_source}", import_worker_source.len()).into_bytes()
+        }
+        "/import.js" => {
+            let body = "globalThis.imported=true;";
+            format!("HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).into_bytes()
+        }
+        "/redirect" => b"HTTP/1.1 302 Found\r\nLocation: https://other.test/import.js\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        "/import-redirect" => b"HTTP/1.1 302 Found\r\nLocation: /import.js\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        "/worker-redirect" => b"HTTP/1.1 302 Found\r\nLocation: /dedicated.js\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        "/reports" if is_preflight => b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: POST\r\nAccess-Control-Allow-Headers: content-type\r\nAccess-Control-Max-Age: 600\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        "/reports" => b"HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        _ => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+    }
+}
+
 impl Drop for WorkerCspFixture {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::Release);
     }
+}
+
+fn worker_csp_socket_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+    let listener = bind_loopback().unwrap();
+    let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let server = accept_with_timeout(&listener, READ_TIMEOUT).unwrap();
+    (client, server)
+}
+
+#[test]
+fn worker_csp_fixture_serves_requests_after_the_accept_timeout() {
+    let fixture = WorkerCspFixture::new(None, "postMessage('started');");
+    std::thread::sleep(ACCEPT_TIMEOUT + Duration::from_millis(100));
+    let mut stream =
+        std::net::TcpStream::connect(fixture.origin.strip_prefix("http://").unwrap()).unwrap();
+    stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+    stream.set_write_timeout(Some(READ_TIMEOUT)).unwrap();
+    stream
+        .write_all(b"GET /dedicated.js HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    let requests = fixture.finish();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/dedicated.js");
+}
+
+#[test]
+fn worker_csp_body_deadline_expires_despite_partial_progress() {
+    let (mut client, mut server) = worker_csp_socket_pair();
+    let sender = std::thread::spawn(move || {
+        for _ in 0..32 {
+            if client.write_all(b"x").is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let result = read_worker_csp_body(
+        &mut server,
+        32,
+        Duration::from_millis(80),
+        &AtomicBool::new(false),
+    );
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+    drop(server);
+    sender.join().unwrap();
+}
+
+#[test]
+fn worker_csp_body_rejects_oversized_content_length() {
+    let (_client, mut server) = worker_csp_socket_pair();
+    let result = read_worker_csp_body(
+        &mut server,
+        WORKER_CSP_MAX_BODY + 1,
+        READ_TIMEOUT,
+        &AtomicBool::new(false),
+    );
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn worker_csp_body_observes_stop_after_an_actual_read_wait() {
+    let (_client, mut server) = worker_csp_socket_pair();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let worker_stopped = Arc::clone(&stopped);
+    let (waiting, observed_wait) = std::sync::mpsc::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        read_worker_csp_body_with(1, READ_TIMEOUT, &worker_stopped, |bytes, remaining| {
+            server.set_read_timeout(Some(remaining))?;
+            let result = server.read(bytes);
+            if result.as_ref().is_err_and(|error| {
+                matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                )
+            }) {
+                // Signal only after the real socket read has waited and expired.
+                waiting.send(()).unwrap();
+                resume.recv_timeout(READ_TIMEOUT).unwrap();
+            }
+            result
+        })
+    });
+    observed_wait.recv_timeout(READ_TIMEOUT).unwrap();
+    stopped.store(true, Ordering::Release);
+    release.send(()).unwrap();
+    assert_eq!(
+        reader.join().unwrap().unwrap_err().kind(),
+        io::ErrorKind::Interrupted
+    );
+}
+
+#[test]
+fn worker_csp_request_rejects_invalid_content_length_at_the_header_boundary() {
+    for header in [
+        "Content-Length: invalid",
+        "Content-Length: -1",
+        "Content-Length: +1",
+        "Content-Length: 999999999999999999999999999999999999999999999999999999999999",
+        "Content-Length: 65537",
+        "Content-Length: ",
+        "Content-Length: 0\r\nContent-Length: 0",
+    ] {
+        let (mut client, mut server) = worker_csp_socket_pair();
+        write!(
+            client,
+            "POST /reports HTTP/1.1\r\nHost: localhost\r\n{header}\r\n\r\n"
+        )
+        .unwrap();
+        let result = read_worker_csp_request(&mut server, &AtomicBool::new(false));
+        assert_eq!(
+            result.unwrap_err().kind(),
+            io::ErrorKind::InvalidData,
+            "{header}"
+        );
+    }
+}
+
+#[test]
+fn worker_csp_request_keeps_valid_body_and_missing_length_semantics() {
+    for (header, body) in [("Content-Length: 3\r\n", "abc"), ("", "")] {
+        let (mut client, mut server) = worker_csp_socket_pair();
+        write!(
+            client,
+            "POST /reports HTTP/1.1\r\nHost: localhost\r\n{header}\r\n{body}"
+        )
+        .unwrap();
+        let request = read_worker_csp_request(&mut server, &AtomicBool::new(false)).unwrap();
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, "/reports");
+        assert_eq!(request.body, body);
+    }
+}
+
+#[test]
+fn worker_csp_response_deadline_expires_under_backpressure() {
+    let (_client, mut server) = worker_csp_socket_pair();
+    // Exceed the loopback socket's send buffer while the peer never reads.
+    let response = vec![b'x'; 32 * 1024 * 1024];
+    let result = write_worker_csp_response(
+        &mut server,
+        &response,
+        Duration::from_millis(100),
+        &AtomicBool::new(false),
+    );
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
 }
 
 impl Drop for WorkerOwnerFixture {
