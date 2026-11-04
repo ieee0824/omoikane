@@ -175,7 +175,13 @@ mod geolocation;
 #[cfg(test)]
 mod host_callback_factory_tests;
 mod host_callbacks;
+mod host_input;
+mod host_input_command;
+#[cfg(test)]
+mod host_input_command_tests;
+pub mod host_input_types;
 pub use geolocation::GeolocationPositionData;
+pub(crate) use host_input::HostInputKind;
 mod gamepad;
 pub use gamepad::{
     DeterministicGamepadProvider, GamepadButtonSnapshot, GamepadHapticRequest, GamepadHapticResult,
@@ -246,6 +252,9 @@ pub use web_codecs::{
     WebCodecPacket, WebCodecsProvider,
 };
 mod automation;
+mod automation_input;
+#[cfg(test)]
+mod automation_input_tests;
 #[cfg(test)]
 mod cross_origin_focus_tests;
 mod form_validation;
@@ -29767,6 +29776,9 @@ mod tests;
 mod clipboard_context_tests;
 
 #[cfg(test)]
+mod clipboard_native_tests;
+
+#[cfg(test)]
 mod individual_transform_tests;
 
 #[cfg(test)]
@@ -29855,3 +29867,6 @@ mod discarded_node_drain_tests {
 
 #[cfg(test)]
 mod inserted_preparation_tests;
+
+#[cfg(test)]
+mod web_api_surface_tests;

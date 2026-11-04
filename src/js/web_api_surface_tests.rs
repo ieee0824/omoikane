@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use omoikane::html::TreeBuilder;
-use omoikane::http::{HttpParseError, HttpRequest, HttpResponse, HttpTransport};
-use omoikane::js::{JsRuntime, NavigationRequest};
+use crate::html::TreeBuilder;
+use crate::http::{HttpParseError, HttpRequest, HttpResponse, HttpTransport};
+use crate::js::{JsRuntime, NavigationRequest};
 use serde::{Deserialize, Serialize};
 
 const MANIFEST_PATH: &str = "tests/web_api_surface/manifest.json";
@@ -122,8 +122,42 @@ fn run_probe(runtime: &mut JsRuntime, feature: &Feature) -> ProbeResult {
 }
 
 fn run_probe_inner(runtime: &mut JsRuntime, feature: &Feature) -> ProbeResult {
+    let key = match feature.id.as_str() {
+        "html.popover" => "Escape",
+        "html.fullscreen" | "input.pointer-lock" => "Enter",
+        _ => return run_probe_body(runtime, feature, None),
+    };
+    let input = super::host_input_types::HostKeyInput {
+        key: key.into(),
+        code: if feature.id == "input.pointer-lock" {
+            String::new()
+        } else {
+            key.into()
+        },
+        ..Default::default()
+    };
+    let (mut result, consumed) =
+        super::clipboard_native_tests::with_input_plan(runtime, vec![input], |runtime, next| {
+            run_probe_body(runtime, feature, Some(next))
+        });
+    if !consumed && result.status != ProbeStatus::Error {
+        result.status = ProbeStatus::Error;
+        result.error = Some("required host input was not consumed".into());
+    }
+    result
+}
+
+fn run_probe_body(
+    runtime: &mut JsRuntime,
+    feature: &Feature,
+    input: Option<boa_engine::JsValue>,
+) -> ProbeResult {
     if let Some(setup) = &feature.setup
-        && let Err(error) = runtime.eval(setup)
+        && let Err(error) = match input.as_ref() {
+            Some(next) => runtime
+                .call_function_with_value(&format!("nextInput => {{ {setup}; }}"), next.clone()),
+            None => runtime.eval(setup),
+        }
     {
         return ProbeResult {
             id: feature.id.clone(),
@@ -205,7 +239,12 @@ fn run_probe_inner(runtime: &mut JsRuntime, feature: &Feature) -> ProbeResult {
         }
     }
 
-    match runtime.eval(&format!("Boolean(({}))", feature.probe)) {
+    let probe = format!("Boolean(({}))", feature.probe);
+    let value = match input {
+        Some(next) => runtime.call_function_with_value(&format!("nextInput => {probe}"), next),
+        None => runtime.eval(&probe),
+    };
+    match value {
         Ok(value) => ProbeResult {
             id: feature.id.clone(),
             area: feature.area.clone(),
@@ -449,5 +488,23 @@ fn web_api_surface_does_not_regress() {
         report.regressions.is_empty(),
         "previously supported Web API probes regressed: {}",
         report.regressions.join(", ")
+    );
+}
+
+#[test]
+fn trusted_surface_probe_rejects_missing_input() {
+    let mut manifest = load_manifest();
+    let feature = manifest
+        .features
+        .iter_mut()
+        .find(|f| f.id == "html.fullscreen")
+        .unwrap();
+    feature.setup = Some(String::new());
+    feature.probe = "true".into();
+    let result = run_probe(&mut JsRuntime::new().unwrap(), feature);
+    assert_eq!(result.status, ProbeStatus::Error);
+    assert_eq!(
+        result.error.as_deref(),
+        Some("required host input was not consumed")
     );
 }

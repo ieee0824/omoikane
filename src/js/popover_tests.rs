@@ -69,12 +69,7 @@ fn popover_idl_reflection_events_and_validity() {
     ));
 }
 
-#[test]
-fn popover_auto_manual_nesting_focus_escape_disconnect_and_dialog() {
-    let mut runtime = JsRuntime::new().unwrap();
-    runtime
-        .eval(
-            r#"(() => {
+const POPOVER_INPUT_SCENARIO: &str = r#"globalThis.popoverSteps = (function* () {
               document.body.innerHTML = `
                 <button id="before">before</button>
                 <div id="parent" popover="auto"><button id="inside" autofocus>inside</button>
@@ -117,7 +112,7 @@ fn popover_auto_manual_nesting_focus_escape_disconnect_and_dialog() {
               const unrelatedClosesStack = !parentPopover.matches(":popover-open") &&
                 !childPopover.matches(":popover-open") && otherPopover.matches(":popover-open");
               manualPopover.showPopover();
-              __omoikane_dispatch_keyboard_input("keydown", { key: "Escape", code: "Escape" });
+              yield "close-auto";
               const escapeOnlyAuto = !otherPopover.matches(":popover-open") && manualPopover.matches(":popover-open");
               manualPopover.hidePopover();
               manualPopover.showPopover();
@@ -127,11 +122,11 @@ fn popover_auto_manual_nesting_focus_escape_disconnect_and_dialog() {
               dialogElement.showModal();
               // A user activation (the invoker press) starts a new close
               // watcher group, so Escape reaches the popover before the dialog.
-              __omoikane_dispatch_keyboard_input("keydown", { key: "Control", code: "ControlLeft" });
+              yield "activate-dialog-popover";
               dialogPopoverElement.showPopover({ source: dialogButtonElement });
-              __omoikane_dispatch_keyboard_input("keydown", { key: "Escape", code: "Escape" });
+              yield "close-dialog-popover";
               const dialogPopoverFirst = dialogElement.open && !dialogPopoverElement.matches(":popover-open");
-              __omoikane_dispatch_keyboard_input("keydown", { key: "Escape", code: "Escape" });
+              yield "close-dialog";
               const dialogThenCloses = !dialogElement.open;
               manualPopover.showPopover();
               const remainingManualOpen = manualPopover.matches(":popover-open");
@@ -139,10 +134,103 @@ fn popover_auto_manual_nesting_focus_escape_disconnect_and_dialog() {
                 canceled, parentFocused, nested, unrelatedClosesStack, escapeOnlyAuto,
                 disconnectedHides, dialogPopoverFirst, dialogThenCloses, remainingManualOpen,
               };
-            })()"#,
-        )
-        .unwrap();
+            })()"#;
+
+fn run_original_popover_script(runtime: &mut JsRuntime, script: &str) {
+    let mut original = script.replace("globalThis.popoverSteps = (function* () {", "(() => {");
+    let mut keys = Vec::new();
+    for (marker, key, code) in [
+        ("close-auto", "Escape", "Escape"),
+        ("activate-dialog-popover", "Control", "ControlLeft"),
+        ("close-dialog-popover", "Escape", "Escape"),
+        ("close-dialog", "Escape", "Escape"),
+    ] {
+        let marker = format!("yield {marker:?};");
+        assert_eq!(original.matches(&marker).count(), 1);
+        original = original.replace(&marker, "nextInput();");
+        keys.push(super::host_input_types::HostKeyInput {
+            key: key.into(),
+            code: code.into(),
+            ..Default::default()
+        });
+    }
+    super::clipboard_native_tests::run_synchronous_input_fixture(
+        runtime,
+        &format!("nextInput => {{ {original}; }}"),
+        keys,
+    );
+}
+
+fn assert_popover_checkpoint_equivalence(script: &str, runtime: &mut JsRuntime) {
+    let mut baseline = JsRuntime::new().unwrap();
+    run_original_popover_script(&mut baseline, script);
+    baseline.tick(0).unwrap();
+    let observation = "JSON.stringify({events:popoverLog,snapshot:popoverSnapshot})";
+    let expected = baseline
+        .eval(observation)
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    let actual = runtime
+        .eval(observation)
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        actual, expected,
+        "checkpoint migration changed popover observations"
+    );
+}
+
+fn drive_popover_steps(runtime: &mut JsRuntime) {
+    use super::host_input_types::{HostInputCommand, HostKeyInput, HostKeyPhase};
+    let document = runtime.document();
+    for (marker, key, code) in [
+        ("close-auto", "Escape", "Escape"),
+        ("activate-dialog-popover", "Control", "ControlLeft"),
+        ("close-dialog-popover", "Escape", "Escape"),
+        ("close-dialog", "Escape", "Escape"),
+    ] {
+        let step = runtime.eval("JSON.stringify(popoverSteps.next())").unwrap();
+        assert_eq!(
+            step.as_string().unwrap().to_std_string_escaped(),
+            format!("{{\"value\":\"{marker}\",\"done\":false}}")
+        );
+        runtime
+            .dispatch_host_input(
+                &document,
+                HostInputCommand::Keyboard {
+                    phase: HostKeyPhase::Down,
+                    input: HostKeyInput {
+                        key: key.into(),
+                        code: code.into(),
+                        ..Default::default()
+                    },
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        runtime
+            .eval("JSON.stringify(popoverSteps.next())")
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped(),
+        "{\"done\":true}"
+    );
+}
+
+#[test]
+fn popover_auto_manual_nesting_focus_escape_disconnect_and_dialog() {
+    let mut runtime = JsRuntime::new().unwrap();
+    let script = POPOVER_INPUT_SCENARIO;
+    runtime.eval(script).unwrap();
+    drive_popover_steps(&mut runtime);
     runtime.tick(0).unwrap();
+    assert_popover_checkpoint_equivalence(script, &mut runtime);
     let event_log = runtime
         .eval("popoverLog.join('|')")
         .unwrap()
@@ -357,4 +445,63 @@ fn refresh_popover_top_layer_baseline_png() {
         render_popover_fixture().encode_png(),
     )
     .unwrap();
+}
+
+#[test]
+fn popover_checkpoints_preserve_explicit_microtask_boundary() {
+    let mut script = POPOVER_INPUT_SCENARIO.to_owned();
+    let mut synchronous = Vec::new();
+    let mut jobs = Vec::new();
+    for (index, marker) in [
+        "close-auto",
+        "activate-dialog-popover",
+        "close-dialog-popover",
+        "close-dialog",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let before = format!("before-{index}");
+        let after = format!("after-{index}");
+        let job_before = format!("job-before-{index}");
+        let job_after = format!("job-after-{index}");
+        script = script.replace(&format!("yield {marker:?};"), &format!(
+            "checkpointTrace.push({before:?}); queueMicrotask(()=>checkpointTrace.push({job_before:?})); yield {marker:?}; checkpointTrace.push({after:?}); queueMicrotask(()=>checkpointTrace.push({job_after:?}));"
+        ));
+        synchronous.extend([before, after]);
+        jobs.extend([job_before, job_after]);
+    }
+    script = format!("globalThis.checkpointTrace=[]; {script}");
+    let before_jobs = serde_json::to_string(&synchronous).unwrap();
+    synchronous.extend(jobs);
+    let after_jobs = serde_json::to_string(&synchronous).unwrap();
+    for staged in [false, true] {
+        let mut runtime = JsRuntime::new().unwrap();
+        if staged {
+            runtime.eval(&script).unwrap();
+            drive_popover_steps(&mut runtime);
+        } else {
+            run_original_popover_script(&mut runtime, &script);
+        }
+        assert_eq!(
+            checkpoint_trace(&mut runtime),
+            before_jobs,
+            "unexpected job drain before tick: staged={staged}"
+        );
+        runtime.tick(0).unwrap();
+        assert_eq!(
+            checkpoint_trace(&mut runtime),
+            after_jobs,
+            "job ordering changed: staged={staged}"
+        );
+    }
+}
+
+fn checkpoint_trace(runtime: &mut JsRuntime) -> String {
+    runtime
+        .eval("JSON.stringify(checkpointTrace)")
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped()
 }

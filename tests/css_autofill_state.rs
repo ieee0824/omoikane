@@ -1,4 +1,5 @@
 //! Autofill selectors follow browser-owned fill state until accepted user edits.
+use omoikane::js::host_input_types::{HostInputCommand, HostKeyInput, HostKeyPhase};
 use omoikane::{html::TreeBuilder, js::JsRuntime};
 
 fn runtime(markup: &str) -> JsRuntime {
@@ -65,20 +66,36 @@ fn host_autofill_sets_value_and_invalidates_relational_styles() {
 #[test]
 fn accepted_user_edit_clears_autofill_but_canceled_edit_does_not() {
     let mut runtime = runtime("<head></head><body><input id=field></body>");
-    let input = runtime.document().query_selector("#field").unwrap();
+    let document = runtime.document();
+    let input = document.query_selector("#field").unwrap();
     assert!(runtime.autofill_input(&input, "filled").unwrap());
-    assert_eq!(
-        string(
-            &mut runtime,
-            r#"(()=>{const input=document.querySelector('input');input.focus();
-const cancel=e=>e.preventDefault();input.addEventListener('beforeinput',cancel,{once:true});
-__omoikane_dispatch_keyboard_input('keydown',{key:'x',text:'x'});
-if(input.value!=='filled'||!input.matches(':autofill'))return 'canceled';
-__omoikane_dispatch_keyboard_input('keydown',{key:'y',text:'y'});
-return input.value==='filledy'&&!input.matches(':autofill')?'ok':'accepted';})()"#,
-        ),
-        "ok"
-    );
+    runtime.eval("(() => { const input=document.querySelector('input'); input.focus(); const cancel=e=>e.preventDefault(); input.addEventListener('beforeinput',cancel,{once:true}); })()").unwrap();
+    for (key, expected, state) in [("x", "filled", true), ("y", "filledy", false)] {
+        runtime
+            .dispatch_host_input(
+                &document,
+                HostInputCommand::Keyboard {
+                    phase: HostKeyPhase::Down,
+                    input: HostKeyInput {
+                        key: key.into(),
+                        text: key.into(),
+                        ..Default::default()
+                    },
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            string(&mut runtime, "document.querySelector('input').value"),
+            expected
+        );
+        assert_eq!(
+            runtime
+                .eval("document.querySelector('input').matches(':autofill')")
+                .unwrap()
+                .as_boolean(),
+            Some(state)
+        );
+    }
 }
 
 #[test]

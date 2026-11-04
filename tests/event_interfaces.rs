@@ -1,6 +1,9 @@
 //! Platform event payload identity, dictionary conversion and native dispatch.
 use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
+use omoikane::js::host_input_types::{
+    HostInputCommand, HostTouchInput, HostTouchPhase, HostTouchPoint,
+};
 
 fn check(script: &str) {
     let mut runtime = JsRuntime::with_document(
@@ -8,6 +11,49 @@ fn check(script: &str) {
     )
     .unwrap();
     assert_eq!(runtime.eval(script).unwrap().as_boolean(), Some(true));
+}
+
+// The two success-only fixtures suspend at exactly one native touch operation.
+fn check_touch_input(script: &str, selector: &str, input: HostTouchInput) {
+    let document = TreeBuilder::parse("<!doctype html><html><body></body></html>").document();
+    let mut runtime = JsRuntime::with_document(document.clone()).unwrap();
+    runtime
+        .eval(&format!("globalThis.touchSteps = {script}"))
+        .unwrap();
+    let step = runtime
+        .eval("JSON.stringify(touchSteps.next())")
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&step).unwrap(),
+        serde_json::json!({"done":false,"value":"touchstart"})
+    );
+    let target = document.query_selector(selector).unwrap();
+    let mask = runtime
+        .dispatch_host_input(
+            &document,
+            HostInputCommand::Touch {
+                target,
+                phase: HostTouchPhase::Start,
+                input,
+            },
+        )
+        .unwrap()
+        .as_number()
+        .expect("touch default-action mask");
+    assert!(mask.is_finite());
+    let result = runtime
+        .eval(&format!("JSON.stringify(touchSteps.next({mask}))"))
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&result).unwrap(),
+        serde_json::json!({"done":true,"value":true})
+    );
 }
 
 #[test]
@@ -376,8 +422,8 @@ fn formdata_event_exposes_live_entries_and_guards_recursive_construction() {
 
 #[test]
 fn touch_event_lists_are_snapshots_and_native_input_uses_touch_instances() {
-    check(
-        r#"(() => {
+    check_touch_input(
+        r#"(function*() {
         const target = document.body, touch = new Touch({ identifier: 3, target, clientX: 9 });
         const source = [touch], event = new TouchEvent('touchstart', { touches: source, changedTouches: source, ctrlKey: true });
         source.length = 0;
@@ -391,12 +437,24 @@ fn touch_event_lists_are_snapshots_and_native_input_uses_touch_instances() {
         catch (error) { if (!(error instanceof TypeError)) return false; }
         let received;
         target.addEventListener('touchstart', value => received = value);
-        __omoikane_dispatch_touch_input(target.__id, 'touchstart', {
-            touches: [{ identifier: 4, clientX: 12 }], changedTouches: [{ identifier: 4, clientX: 12 }],
-        });
+        (yield "touchstart");
         return received instanceof TouchEvent && received.touches[0] instanceof Touch &&
             received.touches[0].target === target && received.touches[0].identifier === 4;
     })()"#,
+        "body",
+        HostTouchInput {
+            touches: vec![HostTouchPoint {
+                identifier: Some(4),
+                client: [12.0, 0.0],
+                ..Default::default()
+            }],
+            changed_touches: vec![HostTouchPoint {
+                identifier: Some(4),
+                client: [12.0, 0.0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
     );
 }
 
@@ -513,20 +571,31 @@ fn borrowed_window_event_accessors_use_the_receiver_window() {
 
 #[test]
 fn native_touch_input_supplies_missing_contact_identifiers() {
-    check(
-        r#"(() => {
+    check_touch_input(
+        r#"(function*() {
         const element = document.createElement('div');
         document.body.append(element);
         let event;
         element.ontouchstart = value => { event = value; };
-        __omoikane_dispatch_touch_input(element.__id, 'touchstart', {
-            touches: [{}, {}, {identifier: 7}], changedTouches: [{}]
-        });
+        (yield "touchstart");
         return event instanceof TouchEvent && event.touches.length === 3 &&
             [...event.touches].every(touch => touch instanceof Touch && touch.target === element) &&
             [...event.touches].map(touch => touch.identifier).join() === '0,1,7' &&
             event.changedTouches[0].identifier === 0;
     })()"#,
+        "div",
+        HostTouchInput {
+            touches: vec![
+                HostTouchPoint::default(),
+                HostTouchPoint::default(),
+                HostTouchPoint {
+                    identifier: Some(7),
+                    ..Default::default()
+                },
+            ],
+            changed_touches: vec![HostTouchPoint::default()],
+            ..Default::default()
+        },
     );
 }
 

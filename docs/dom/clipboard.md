@@ -81,7 +81,7 @@ Promise が返す内部レコードは null prototype とし、author の `Objec
 
 - `tests/clipboard_events.rs`: readonly payload、WebIDL の読み取り順、別realm、Worker、合成イベントの既定動作抑止。
 - `tests/clipboard_items.rs`: MIME 正規化・重複、metadata snapshot、Promise、公開範囲、別realm、内部 thenable の露出抑止。
-- `tests/clipboard_native_events.rs`: trusted native event、DataTransferのmode/lifetime、cut/paste順序、HTML表現、editing hostのcaret/selection/designMode。
+- `src/js/clipboard_native_tests.rs`: trusted native event、DataTransferのmode/lifetime、cut/paste順序、HTML表現、editing hostのcaret/selection/designMode。
 - `tests/editing_commands.rs`: 基本コマンド、query、text control/編集ホスト、再入拒否。
 - 固定 WPT: manifestのClipboard synthetic/ClipboardItem/copy-eventと既存editing/InputEventケース。
   revision は `tests/wpt/revision.txt` に従い、原本と期待値を変更しない。

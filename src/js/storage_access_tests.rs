@@ -474,7 +474,33 @@ fn test_automation_bindings_are_absent_from_ordinary_pages() {
 #[test]
 fn test_automation_child_click_requires_the_host_trusted_input_scope() {
     let (mut runtime, child) = automated_third_party_frame();
-    runtime.eval_in_document_realm(child.identity(), "queueClick(); __wpt_advance_action_tick(); __wpt_advance_action_tick(); __wpt_advance_action_tick();").unwrap();
+    assert!(!runtime.host_state.borrow().trusted_storage_access_input);
+    let realm = runtime
+        .realm_for_document(child.identity())
+        .unwrap()
+        .unwrap();
+    let previous = runtime.context.enter_realm(realm);
+    {
+        // This test intentionally supplies input without the host's Storage
+        // Access scope; ordinary page script cannot obtain the capability.
+        let input =
+            super::automation_input::InputScope::new(&mut runtime, child.identity()).unwrap();
+        runtime.call_function_with_value("input => { queueClick(); __wpt_advance_action_tick(input); __wpt_advance_action_tick(input); __wpt_advance_action_tick(input); }", input.value()).unwrap();
+    }
+    runtime.run_jobs().unwrap();
+    assert_eq!(
+        runtime
+            .eval("navigator.userActivation.hasBeenActive")
+            .unwrap()
+            .as_boolean(),
+        Some(true)
+    );
+    runtime.context.enter_realm(previous);
+    assert!(!runtime.host_state.borrow().trusted_storage_access_input);
+    assert_eq!(
+        child_attribute(&child, "data-input").as_deref(),
+        Some(r#"[["mousemove",true],["mousedown",true],["mouseup",true],["click",true]]"#)
+    );
     assert_eq!(
         child_result(&child).as_deref(),
         Some("NotAllowedError"),
@@ -675,16 +701,51 @@ fn iframe_document_by_id(runtime: &JsRuntime, id: &str) -> NodeHandle {
         .expect("named iframe navigation committed")
 }
 
+// Preserve the old child-Realm setup -> input -> jobs ordering. In particular,
+// do not drain jobs between registering the listener and dispatching input.
+fn storage_access_click(runtime: &mut JsRuntime, document_id: usize, setup: &str) -> JsResult<()> {
+    use super::host_input_types::{HostInputCommand, HostMouseInput, HostMousePhase};
+
+    let document = runtime
+        .host_state
+        .borrow()
+        .get_node(document_id)
+        .expect("live test Document");
+    let target = document.query_selector("body").expect("test body");
+    let realm = runtime
+        .realm_for_document(document_id)?
+        .expect("live test Realm");
+    let old_realm = runtime.context.enter_realm(realm);
+    let result = (|| {
+        runtime.eval(setup)?;
+        runtime.dispatch_host_input(
+            &document,
+            HostInputCommand::Mouse {
+                target,
+                phase: HostMousePhase::Click,
+                input: HostMouseInput {
+                    button: 0,
+                    ..Default::default()
+                },
+                focus_target: false,
+            },
+        )?;
+        runtime.run_jobs()
+    })();
+    runtime.context.enter_realm(old_realm);
+    result
+}
+
 fn activate_storage_access(runtime: &mut JsRuntime, document: &NodeHandle) {
     runtime
         .with_trusted_storage_access_input(|runtime| {
-            runtime.eval_in_document_realm(
+            storage_access_click(
+                runtime,
                 document.identity(),
                 "document.addEventListener('click', () => \
                    document.requestStorageAccess().then(() => \
                      document.documentElement.setAttribute('data-granted', 'yes')), \
-                   {once: true}); \
-                 __omoikane_dispatch_mouse_input(document.body.__id, 'click', {button: 0}, false)",
+                   {once: true});",
             )
         })
         .unwrap();
@@ -935,7 +996,8 @@ fn assert_storage_access_policy_case(
     );
     runtime
         .with_trusted_storage_access_input(|runtime| {
-            runtime.eval_in_document_realm(
+            storage_access_click(
+                runtime,
                 child.identity(),
                 "document.addEventListener('click', () => { \
                    document.requestStorageAccess() \
@@ -949,9 +1011,7 @@ fn assert_storage_access_policy_case(
                          document.documentElement.setAttribute('data-result', \
                            [outcome, visible, sent, cookie === null].join('|'))); \
                      }); \
-                 }, {once: true}); \
-                 __omoikane_dispatch_mouse_input(document.body.__id, 'click', \
-                   {button: 0}, false)",
+                 }, {once: true});",
             )
         })
         .unwrap();
@@ -1024,15 +1084,14 @@ fn storage_access_site_grant_does_not_bypass_new_document_policy() {
     );
     runtime
         .with_trusted_storage_access_input(|runtime| {
-            runtime.eval_in_document_realm(
+            storage_access_click(
+                runtime,
                 blocked.identity(),
                 "document.addEventListener('click', () => \
                    document.requestStorageAccess().then( \
                      () => document.documentElement.setAttribute('data-result', 'granted'), \
                      error => document.documentElement.setAttribute('data-result', error.name)), \
-                   {once: true}); \
-                 __omoikane_dispatch_mouse_input(document.body.__id, 'click', \
-                   {button: 0}, false)",
+                   {once: true});",
             )
         })
         .unwrap();
@@ -1164,22 +1223,24 @@ fn third_party_storage_access_grant_changes_dom_cookie_visibility() {
         Some("true|0|")
     );
 
-    runtime
-        .eval_in_document_realm(
-            id,
-            "document.addEventListener('click', () => { \
+    assert!(!runtime.host_state.borrow().trusted_storage_access_input);
+    storage_access_click(&mut runtime, id, "document.addEventListener('click', e => { document.documentElement.setAttribute('data-input-trust', [e.isTrusted, navigator.userActivation.isActive].join('|')); \
                 document.requestStorageAccess().then( \
                   () => document.documentElement.setAttribute('data-result', 'forged-grant'), \
                   e => document.documentElement.setAttribute('data-result', e.name)); \
-              }, {once: true}); \
-              __omoikane_dispatch_mouse_input(document.body.__id, 'click', {button: 0}, false)",
-        )
+              }, {once: true});")
         .unwrap();
     assert_eq!(child_result(&child).as_deref(), Some("NotAllowedError"));
+    assert_eq!(
+        child_attribute(&child, "data-input-trust").as_deref(),
+        Some("true|true")
+    );
+    assert!(!runtime.host_state.borrow().trusted_storage_access_input);
 
     runtime
         .with_trusted_storage_access_input(|runtime| {
-            runtime.eval_in_document_realm(
+            storage_access_click(
+                runtime,
                 id,
                 "document.addEventListener('click', () => { \
                     Promise.resolve().then(() => document.requestStorageAccess()).then(() => { \
@@ -1188,8 +1249,7 @@ fn third_party_storage_access_grant_changes_dom_cookie_visibility() {
                         document.documentElement.setAttribute('data-result', \
                           [has, document.cookie].join('|'))); \
                     }); \
-                  }, {once: true}); \
-                  __omoikane_dispatch_mouse_input(document.body.__id, 'click', {button: 0}, false)",
+                  }, {once: true});",
             )
         })
         .unwrap();
@@ -1232,13 +1292,13 @@ fn storage_access_permission_is_site_scoped_but_activation_is_document_local() {
 
     runtime
         .with_trusted_storage_access_input(|runtime| {
-            runtime.eval_in_document_realm(
+            storage_access_click(
+                runtime,
                 first.identity(),
                 "document.addEventListener('click', () => \
                    document.requestStorageAccess().then(() => \
                      document.documentElement.setAttribute('data-result', 'granted')), \
-                   {once: true}); \
-                 __omoikane_dispatch_mouse_input(document.body.__id, 'click', {button: 0}, false)",
+                   {once: true});",
             )
         })
         .unwrap();
@@ -1317,14 +1377,14 @@ fn third_party_fetch_uses_cookies_only_after_its_document_activates_access() {
 
     runtime
         .with_trusted_storage_access_input(|runtime| {
-            runtime.eval_in_document_realm(
+            storage_access_click(
+                runtime,
                 child.identity(),
                 "document.addEventListener('click', () => \
                    document.requestStorageAccess().then(() => \
                      fetch('https://third.test/probe').then(r => r.text()).then(body => \
                        document.documentElement.setAttribute('data-result', body))), \
-                   {once: true}); \
-                 __omoikane_dispatch_mouse_input(document.body.__id, 'click', {button: 0}, false)",
+                   {once: true});",
             )
         })
         .unwrap();
@@ -2672,14 +2732,14 @@ fn sandbox_token_controls_storage_access_request() {
         let child = child_document(&runtime);
         runtime
             .with_trusted_storage_access_input(|runtime| {
-                runtime.eval_in_document_realm(
+                storage_access_click(
+                    runtime,
                     child.identity(),
                     "document.addEventListener('click', () => { \
                         document.requestStorageAccess().then( \
                           () => document.documentElement.setAttribute('data-result', 'granted'), \
                           e => document.documentElement.setAttribute('data-result', e.name)); \
-                      }, {once: true}); \
-                      __omoikane_dispatch_mouse_input(document.body.__id, 'click', {button: 0}, false)",
+                      }, {once: true});",
                 )
             })
             .unwrap();

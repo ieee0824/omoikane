@@ -4166,6 +4166,26 @@ mod tests {
         assert_eq!(body["csp-report"]["effective-directive"], "connect-src");
     }
 
+    fn grant_storage_access_for_reporting(runtime: &mut JsRuntime, child: &NodeHandle) {
+        use crate::js::host_input_types::{HostInputCommand, HostMouseInput, HostMousePhase};
+        runtime.with_trusted_storage_access_input(|runtime| {
+            let realm = runtime.realm_for_document(child.identity())?.expect("child Realm");
+            let old = runtime.context.enter_realm(realm);
+            let result = (|| {
+                runtime.eval("document.addEventListener('click', () => document.requestStorageAccess().then( \
+                    () => document.documentElement.setAttribute('data-granted', 'yes'), \
+                    e => document.documentElement.setAttribute('data-granted', e.name)), {once:true});")?;
+                runtime.dispatch_host_input(child, HostInputCommand::Mouse {
+                    target: child.query_selector("body").unwrap(), phase: HostMousePhase::Click,
+                    input: HostMouseInput { button: 0, ..Default::default() }, focus_target: false,
+                })?;
+                runtime.run_jobs()
+            })();
+            runtime.context.enter_realm(old);
+            result
+        }).unwrap();
+    }
+
     #[test]
     fn third_party_reports_use_document_storage_access_for_cookies() {
         type Sent = (String, Option<String>);
@@ -4270,17 +4290,7 @@ mod tests {
             "session=seed"
         );
 
-        runtime
-            .with_trusted_storage_access_input(|runtime| {
-                runtime.eval_in_document_realm(
-                    child_id,
-                    "document.addEventListener('click', () => document.requestStorageAccess().then( \
-                       () => document.documentElement.setAttribute('data-granted', 'yes'), \
-                       e => document.documentElement.setAttribute('data-granted', e.name)), {once:true}); \
-                     __omoikane_dispatch_mouse_input(document.body.__id, 'click', {button:0}, false)",
-                )
-            })
-            .unwrap();
+        grant_storage_access_for_reporting(&mut runtime, &child);
         assert_eq!(
             child
                 .child_nodes()

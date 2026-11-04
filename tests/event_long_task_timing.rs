@@ -2,6 +2,9 @@
 
 use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
+use omoikane::js::host_input_types::{
+    HostInputCommand, HostKeyInput, HostKeyPhase, HostMouseInput, HostMousePhase,
+};
 
 fn runtime() -> JsRuntime {
     JsRuntime::with_document_and_url(
@@ -68,12 +71,38 @@ fn trusted_input_produces_event_timing_entries() {
             const end = performance.now() + 40; while (performance.now() < end);
           });
           button.dispatchEvent(new MouseEvent('mousedown'));
-          __omoikane_dispatch_mouse_input(button.__id, 'mousedown', { button: 0 }, false);
-          __omoikane_dispatch_keyboard_input('keydown', { key: 'a' });
-          __omoikane_dispatch_keyboard_input('keyup', { key: 'a' });
           return true;
         }"#,
     );
+    let document = runtime.document();
+    runtime
+        .dispatch_host_input(
+            &document,
+            HostInputCommand::Mouse {
+                target: document.query_selector("#b").unwrap(),
+                phase: HostMousePhase::Down,
+                input: HostMouseInput {
+                    button: 0,
+                    ..Default::default()
+                },
+                focus_target: false,
+            },
+        )
+        .unwrap();
+    for phase in [HostKeyPhase::Down, HostKeyPhase::Up] {
+        runtime
+            .dispatch_host_input(
+                &document,
+                HostInputCommand::Keyboard {
+                    phase,
+                    input: HostKeyInput {
+                        key: "a".into(),
+                        ..Default::default()
+                    },
+                },
+            )
+            .unwrap();
+    }
     runtime.run_until_idle().unwrap();
     check(
         &mut runtime,

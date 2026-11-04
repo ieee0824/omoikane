@@ -1,6 +1,7 @@
 //! Modern DOM mutation and serialization contracts for Issue #1284.
 use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
+use omoikane::js::host_input_types::{HostInputCommand, HostMouseInput, HostMousePhase};
 
 #[test]
 fn parsed_processing_instruction_observers_preserve_actual_old_data() {
@@ -35,10 +36,74 @@ fn check(script: &str) {
     }
 }
 
+// Success-only fixtures: input errors fail immediately, and no jobs run between steps.
+fn check_mouse_selection(script: &str, steps: &[(HostMousePhase, i16, u16, bool)]) {
+    check_mouse_selection_target(script, steps, |runtime| {
+        runtime.document().query_selector("p").unwrap()
+    });
+}
+
+fn check_mouse_selection_target(
+    script: &str,
+    steps: &[(HostMousePhase, i16, u16, bool)],
+    select_target: fn(&JsRuntime) -> omoikane::dom::NodeHandle,
+) {
+    let document = TreeBuilder::parse("<!doctype html><html><body></body></html>").document();
+    let mut runtime = JsRuntime::with_document(document.clone()).unwrap();
+    runtime
+        .eval(&format!("globalThis.selectionSteps = {script}"))
+        .unwrap();
+    let mut next = "selectionSteps.next()".to_owned();
+    for (index, &(phase, button, buttons, focus_target)) in steps.iter().enumerate() {
+        let json = runtime
+            .eval(&format!("JSON.stringify({next})"))
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        let step: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(step["done"], false, "fixture ended before input {index}");
+        let values = step["value"]
+            .as_array()
+            .expect("input index and coordinates");
+        assert_eq!(values.len(), 3);
+        assert_eq!(values[0], index);
+        let client = [values[1].as_f64().unwrap(), values[2].as_f64().unwrap()];
+        let target = select_target(&runtime);
+        let result = runtime
+            .dispatch_host_input(
+                &document,
+                HostInputCommand::Mouse {
+                    target,
+                    phase,
+                    input: HostMouseInput {
+                        client,
+                        button,
+                        buttons,
+                        ..Default::default()
+                    },
+                    focus_target,
+                },
+            )
+            .unwrap()
+            .as_boolean()
+            .expect("mouse cancellation result");
+        next = format!("selectionSteps.next({result})");
+    }
+    let json = runtime
+        .eval(&format!("JSON.stringify({next})"))
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    let final_step: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(final_step, serde_json::json!({"done":true,"value":true}));
+}
+
 #[test]
 fn mouse_text_selection_uses_original_nodes_across_coalesced_text() {
-    check(
-        r#"(() => {
+    check_mouse_selection(
+        r#"(function*() {
         document.body.style.margin = '0';
         const p = document.createElement('p');
         p.style.cssText = 'margin:0;width:300px;font-size:20px';
@@ -46,9 +111,9 @@ fn mouse_text_selection_uses_original_nodes_across_coalesced_text() {
         p.append(first, document.createComment('retain shaping across nodes'), last);
         document.body.append(p);
         const rect = p.getBoundingClientRect(), y = rect.top + rect.height / 2;
-        __omoikane_dispatch_mouse_input(p.__id, 'mousedown', {button:0,buttons:1,clientX:rect.left + .1,clientY:y}, true);
-        __omoikane_dispatch_mouse_input(p.__id, 'mousemove', {button:0,buttons:1,clientX:rect.right - .1,clientY:y}, false);
-        __omoikane_dispatch_mouse_input(p.__id, 'mouseup', {button:0,buttons:0,clientX:rect.right - .1,clientY:y}, false);
+        (yield [0, rect.left + .1, y]);
+        (yield [1, rect.right - .1, y]);
+        (yield [2, rect.right - .1, y]);
         const selection = getSelection();
         if (selection.anchorNode !== first || selection.anchorOffset !== 0 ||
             selection.focusNode !== last || selection.focusOffset !== 3 || selection.toString() !== 'Alphaβ😀') {
@@ -57,42 +122,54 @@ fn mouse_text_selection_uses_original_nodes_across_coalesced_text() {
         }
         return selection.getRangeAt(0).intersectsNode(first) && selection.getRangeAt(0).intersectsNode(last);
     })()"#,
+        &[
+            (HostMousePhase::Down, 0, 1, true),
+            (HostMousePhase::Move, 0, 1, false),
+            (HostMousePhase::Up, 0, 0, false),
+        ],
     );
 }
 
 #[test]
 fn mouse_text_selection_respects_canceled_input_and_synthetic_dispatch() {
-    check(
-        r#"(() => {
+    check_mouse_selection(
+        r#"(function*() {
         const p = document.createElement('p'); p.textContent = 'selectable'; document.body.append(p);
         const text = p.firstChild, selection = getSelection(); selection.collapse(text, 2);
         const rect = p.getBoundingClientRect(), init = {button:0,buttons:1,clientX:rect.left + .1,clientY:rect.top + rect.height / 2};
         p.dispatchEvent(new MouseEvent('mousedown', init));
         if (selection.anchorNode !== text || selection.anchorOffset !== 2) return false;
         const cancel = event => event.preventDefault(); p.addEventListener('mousedown', cancel);
-        if (__omoikane_dispatch_mouse_input(p.__id, 'mousedown', init, true) !== false) return false;
-        __omoikane_dispatch_mouse_input(p.__id, 'mousemove', {...init,clientX:rect.right - .1}, false);
-        __omoikane_dispatch_mouse_input(p.__id, 'mouseup', {...init,buttons:0}, false);
+        if ((yield [0, init.clientX, init.clientY]) !== false) return false;
+        (yield [1, rect.right - .1, init.clientY]);
+        (yield [2, init.clientX, init.clientY]);
         p.removeEventListener('mousedown', cancel);
         if (selection.anchorNode !== text || selection.anchorOffset !== 2 || !selection.isCollapsed) return false;
-        __omoikane_dispatch_mouse_input(p.__id, 'mousedown', {...init,button:2,buttons:2}, true);
-        __omoikane_dispatch_mouse_input(p.__id, 'mouseup', {...init,button:2,buttons:0}, false);
+        (yield [3, init.clientX, init.clientY]);
+        (yield [4, init.clientX, init.clientY]);
         return selection.anchorNode === text && selection.anchorOffset === 2 && selection.isCollapsed;
     })()"#,
+        &[
+            (HostMousePhase::Down, 0, 1, true),
+            (HostMousePhase::Move, 0, 1, false),
+            (HostMousePhase::Up, 0, 0, false),
+            (HostMousePhase::Down, 2, 2, true),
+            (HostMousePhase::Up, 2, 0, false),
+        ],
     );
 }
 
 #[test]
 fn mouse_text_selection_handles_backward_drags_and_preserves_unmoved_text() {
-    check(
-        r#"(() => {
+    check_mouse_selection(
+        r#"(function*() {
         const p = document.createElement('p'); p.style.cssText = 'width:300px;margin:0'; p.textContent = 'backward';
         const moved = document.createElement('span'); moved.textContent = 'other';
         const destination = document.createElement('div'); document.body.append(p, moved, destination);
         const rect = p.getBoundingClientRect(), y = rect.top + rect.height / 2;
-        __omoikane_dispatch_mouse_input(p.__id, 'mousedown', {button:0,buttons:1,clientX:rect.right - .1,clientY:y}, true);
-        __omoikane_dispatch_mouse_input(p.__id, 'mousemove', {button:0,buttons:1,clientX:rect.left + .1,clientY:y}, false);
-        __omoikane_dispatch_mouse_input(p.__id, 'mouseup', {button:0,buttons:0,clientX:rect.left + .1,clientY:y}, false);
+        (yield [0, rect.right - .1, y]);
+        (yield [1, rect.left + .1, y]);
+        (yield [2, rect.left + .1, y]);
         const selection = getSelection();
         if (selection.anchorNode !== p.firstChild || selection.anchorOffset !== 8 || selection.focusOffset !== 0) {
             throw new Error(JSON.stringify({anchor:selection.anchorNode?.data,anchorOffset:selection.anchorOffset,
@@ -102,6 +179,11 @@ fn mouse_text_selection_handles_backward_drags_and_preserves_unmoved_text() {
         return selection.anchorNode === p.firstChild && selection.focusNode === p.firstChild &&
             selection.anchorOffset === 8 && selection.focusOffset === 0 && selection.toString() === 'backward';
     })()"#,
+        &[
+            (HostMousePhase::Down, 0, 1, true),
+            (HostMousePhase::Move, 0, 1, false),
+            (HostMousePhase::Up, 0, 0, false),
+        ],
     );
 }
 
@@ -1357,16 +1439,16 @@ fn sanitized_markup_does_not_treat_unicode_case_folds_as_event_handler_names() {
 
 #[test]
 fn mouse_selection_keeps_associated_live_range_when_selected_node_moves() {
-    check(
-        r#"(() => {
+    check_mouse_selection_target(
+        r#"(function*() {
         const parent = document.createElement('div'), target = document.createElement('div');
         const span = document.createElement('span'); span.textContent = 'selected';
         parent.append(document.createTextNode('prefix'), span);
         document.body.append(parent, target);
         const rect = span.getBoundingClientRect(), y = rect.top + rect.height / 2;
-        __omoikane_dispatch_mouse_input(span.__id, 'mousedown', {button:0,buttons:1,clientX:rect.left + .1,clientY:y}, true);
-        __omoikane_dispatch_mouse_input(span.__id, 'mousemove', {button:0,buttons:1,clientX:rect.right - .1,clientY:y}, false);
-        __omoikane_dispatch_mouse_input(span.__id, 'mouseup', {button:0,buttons:0,clientX:rect.right - .1,clientY:y}, false);
+        (yield [0, rect.left + .1, y]);
+        (yield [1, rect.right - .1, y]);
+        (yield [2, rect.right - .1, y]);
         const selection = getSelection(), range = selection.getRangeAt(0);
         if (selection.toString() !== 'selected') throw new Error('actual pointer selection missing');
         target.moveBefore(span, null);
@@ -1374,13 +1456,19 @@ fn mouse_selection_keeps_associated_live_range_when_selected_node_moves() {
             range.endContainer === parent && range.startOffset === 1 && range.endOffset === 1 &&
             selection.anchorNode === parent && selection.focusNode === parent && selection.isCollapsed;
     })()"#,
+        &[
+            (HostMousePhase::Down, 0, 1, true),
+            (HostMousePhase::Move, 0, 1, false),
+            (HostMousePhase::Up, 0, 0, false),
+        ],
+        |runtime| runtime.document().query_selector("span").unwrap(),
     );
 }
 
 #[test]
 fn mouse_selection_selectstart_uses_text_boundary_and_honors_cancellation() {
-    check(
-        r#"(() => {
+    check_mouse_selection_target(
+        r#"(function*() {
         const p = document.createElement('p'); p.textContent = 'selection'; document.body.append(p);
         const text = p.firstChild, selection = getSelection(); selection.collapse(text, 2);
         const before = selection.getRangeAt(0), rect = p.getBoundingClientRect();
@@ -1389,16 +1477,18 @@ fn mouse_selection_selectstart_uses_text_boundary_and_honors_cancellation() {
             if (event.target !== text || !event.bubbles || !event.cancelable || !event.isTrusted) throw new Error('wrong selectstart');
             calls++; event.preventDefault();
         });
-        __omoikane_dispatch_mouse_input(p.__id, 'mousedown', {button:0,buttons:1,clientX:rect.left + .1,clientY:rect.top + rect.height / 2}, true);
+        (yield [0, rect.left + .1, rect.top + rect.height / 2]);
         return calls === 1 && selection.getRangeAt(0) === before && selection.anchorNode === text && selection.anchorOffset === 2;
     })()"#,
+        &[(HostMousePhase::Down, 0, 1, true)],
+        |runtime| runtime.document().query_selector("p").unwrap(),
     );
 }
 
 #[test]
 fn user_select_none_suppresses_pointer_selection() {
-    check(
-        r#"(() => {
+    check_mouse_selection_target(
+        r#"(function*() {
         const p = document.createElement('p');
         p.style.userSelect = 'none';
         p.textContent = 'not selectable';
@@ -1408,43 +1498,62 @@ fn user_select_none_suppresses_pointer_selection() {
         const rect = p.getBoundingClientRect(), y = rect.top + rect.height / 2;
         let selectstart = 0;
         p.addEventListener('selectstart', () => selectstart++);
-        __omoikane_dispatch_mouse_input(p.__id, 'mousedown', {button:0,buttons:1,clientX:rect.left + .1,clientY:y}, true);
-        __omoikane_dispatch_mouse_input(p.__id, 'mousemove', {button:0,buttons:1,clientX:rect.right - .1,clientY:y}, false);
-        __omoikane_dispatch_mouse_input(p.__id, 'mouseup', {button:0,buttons:0,clientX:rect.right - .1,clientY:y}, false);
+        (yield [0, rect.left + .1, y]);
+        (yield [1, rect.right - .1, y]);
+        (yield [2, rect.right - .1, y]);
         return selectstart === 0 && selection.isCollapsed && selection.anchorNode === text && selection.anchorOffset === 3;
     })()"#,
+        &[
+            (HostMousePhase::Down, 0, 1, true),
+            (HostMousePhase::Move, 0, 1, false),
+            (HostMousePhase::Up, 0, 0, false),
+        ],
+        |runtime| runtime.document().query_selector("p").unwrap(),
     );
 }
 
 #[test]
 fn resize_hit_target_updates_the_enabled_axes() {
-    check(
-        r#"(() => {
-        const resize = value => {
+    check_mouse_selection_target(
+        r#"(function*() {
+        let inputIndex = 0;
+        const resize = function*(value) {
             const box = document.createElement('div');
             box.style.cssText = `width:100px;height:80px;box-sizing:border-box;overflow:auto;resize:${value}`;
             document.body.append(box);
             const rect = box.getBoundingClientRect();
             const start = {button:0,buttons:1,clientX:rect.right-1,clientY:rect.bottom-1};
-            __omoikane_dispatch_mouse_input(box.__id, 'mousedown', start, true);
-            __omoikane_dispatch_mouse_input(box.__id, 'mousemove', {...start,clientX:start.clientX+30,clientY:start.clientY+20}, false);
-            __omoikane_dispatch_mouse_input(box.__id, 'mouseup', {...start,buttons:0}, false);
+            (yield [inputIndex++, start.clientX, start.clientY]);
+            (yield [inputIndex++, start.clientX+30, start.clientY+20]);
+            (yield [inputIndex++, start.clientX, start.clientY]);
             const result = [box.getBoundingClientRect().width, box.getBoundingClientRect().height];
             box.remove();
             return result;
         };
-        const horizontal = resize('horizontal'), vertical = resize('vertical'), both = resize('both');
+        const horizontal = (yield* resize('horizontal')), vertical = (yield* resize('vertical')), both = (yield* resize('both'));
         return horizontal[0] === 130 && horizontal[1] === 80 &&
             vertical[0] === 100 && vertical[1] === 100 &&
             both[0] === 130 && both[1] === 100;
     })()"#,
+        &[
+            (HostMousePhase::Down, 0, 1, true),
+            (HostMousePhase::Move, 0, 1, false),
+            (HostMousePhase::Up, 0, 0, false),
+            (HostMousePhase::Down, 0, 1, true),
+            (HostMousePhase::Move, 0, 1, false),
+            (HostMousePhase::Up, 0, 0, false),
+            (HostMousePhase::Down, 0, 1, true),
+            (HostMousePhase::Move, 0, 1, false),
+            (HostMousePhase::Up, 0, 0, false),
+        ],
+        |runtime| runtime.document().query_selector("div").unwrap(),
     );
 }
 
 #[test]
 fn mouse_selection_ignores_author_range_and_selection_setter_overrides() {
-    check(
-        r#"(() => {
+    check_mouse_selection_target(
+        r#"(function*() {
         const p = document.createElement('p'); p.textContent = 'native selection'; document.body.append(p);
         const text = p.firstChild, selection = getSelection();
         for (const name of ['setStart', 'setEnd', '__validate']) {
@@ -1453,12 +1562,18 @@ fn mouse_selection_ignores_author_range_and_selection_setter_overrides() {
         Selection.prototype.setBaseAndExtent = () => {throw new Error('author Selection');};
         text.dispatchEvent = () => {throw new Error('author dispatchEvent');};
         const rect = p.getBoundingClientRect(), y = rect.top + rect.height / 2;
-        __omoikane_dispatch_mouse_input(p.__id, 'mousedown', {button:0,buttons:1,clientX:rect.left + .1,clientY:y}, true);
-        __omoikane_dispatch_mouse_input(p.__id, 'mousemove', {button:0,buttons:1,clientX:rect.right - .1,clientY:y}, false);
-        __omoikane_dispatch_mouse_input(p.__id, 'mouseup', {button:0,buttons:0,clientX:rect.right - .1,clientY:y}, false);
+        (yield [0, rect.left + .1, y]);
+        (yield [1, rect.right - .1, y]);
+        (yield [2, rect.right - .1, y]);
         return selection.anchorNode === text && selection.anchorOffset === 0 &&
             selection.focusNode === text && selection.focusOffset === text.length && selection.toString() === 'native selection';
     })()"#,
+        &[
+            (HostMousePhase::Down, 0, 1, true),
+            (HostMousePhase::Move, 0, 1, false),
+            (HostMousePhase::Up, 0, 0, false),
+        ],
+        |runtime| runtime.document().query_selector("p").unwrap(),
     );
 }
 
@@ -1489,15 +1604,15 @@ fn range_boundaries_use_native_character_data_and_tree_lengths() {
 
 #[test]
 fn mouse_selection_drags_inside_shadow_root_using_composed_boundaries() {
-    check(
-        r#"(() => {
+    check_mouse_selection_target(
+        r#"(function*() {
         const host = document.createElement('div'); document.body.append(host);
         const root = host.attachShadow({mode:'closed'}), p = document.createElement('p');
         p.textContent = 'shadow selection'; root.append(p);
         const text = p.firstChild, rect = p.getBoundingClientRect(), y = rect.top + rect.height / 2;
-        __omoikane_dispatch_mouse_input(p.__id, 'mousedown', {button:0,buttons:1,clientX:rect.left + .1,clientY:y}, true);
-        __omoikane_dispatch_mouse_input(p.__id, 'mousemove', {button:0,buttons:1,clientX:rect.right - .1,clientY:y}, false);
-        __omoikane_dispatch_mouse_input(p.__id, 'mouseup', {button:0,buttons:0,clientX:rect.right - .1,clientY:y}, false);
+        (yield [0, rect.left + .1, y]);
+        (yield [1, rect.right - .1, y]);
+        (yield [2, rect.right - .1, y]);
         const selection = getSelection(), exposed = selection.getComposedRanges({shadowRoots:[root]});
         if (exposed.length !== 1 || exposed[0].startContainer !== text || exposed[0].startOffset !== 0 ||
             exposed[0].endContainer !== text || exposed[0].endOffset !== text.length) return false;
@@ -1506,13 +1621,28 @@ fn mouse_selection_drags_inside_shadow_root_using_composed_boundaries() {
             rescaled.length === 1 && rescaled[0].startContainer === document.body &&
             rescaled[0].endContainer === document.body && rescaled[0].endOffset === rescaled[0].startOffset + 1;
     })()"#,
+        &[
+            (HostMousePhase::Down, 0, 1, true),
+            (HostMousePhase::Move, 0, 1, false),
+            (HostMousePhase::Up, 0, 0, false),
+        ],
+        |runtime| {
+            runtime
+                .document()
+                .query_selector("div")
+                .unwrap()
+                .shadow_root()
+                .unwrap()
+                .query_selector("p")
+                .unwrap()
+        },
     );
 }
 
 #[test]
 fn mouse_selection_routes_to_child_document_without_changing_parent_selection() {
-    check(
-        r#"(() => {
+    check_mouse_selection_target(
+        r#"(function*() {
         const parentText = document.createTextNode('parent'); document.body.append(parentText);
         const selection = getSelection(); selection.collapse(parentText, 2);
         const parentRange = selection.getRangeAt(0);
@@ -1520,14 +1650,27 @@ fn mouse_selection_routes_to_child_document_without_changing_parent_selection() 
         const doc = frame.contentDocument, p = doc.createElement('p');
         p.textContent = 'child selection'; doc.body.append(p);
         const text = p.firstChild, rect = p.getBoundingClientRect(), y = rect.top + rect.height / 2;
-        __omoikane_dispatch_mouse_input(p.__id, 'mousedown', {button:0,buttons:1,clientX:rect.left + .1,clientY:y}, true);
-        __omoikane_dispatch_mouse_input(p.__id, 'mousemove', {button:0,buttons:1,clientX:rect.right - .1,clientY:y}, false);
-        __omoikane_dispatch_mouse_input(p.__id, 'mouseup', {button:0,buttons:0,clientX:rect.right - .1,clientY:y}, false);
+        (yield [0, rect.left + .1, y]);
+        (yield [1, rect.right - .1, y]);
+        (yield [2, rect.right - .1, y]);
         const child = frame.contentWindow.getSelection();
         return child !== selection && child.anchorNode === text && child.anchorOffset === 0 &&
             child.focusNode === text && child.focusOffset === text.length && child.toString() === 'child selection' &&
             selection.getRangeAt(0) === parentRange && selection.anchorNode === parentText && selection.anchorOffset === 2;
     })()"#,
+        &[
+            (HostMousePhase::Down, 0, 1, true),
+            (HostMousePhase::Move, 0, 1, false),
+            (HostMousePhase::Up, 0, 0, false),
+        ],
+        |runtime| {
+            let frame = runtime.document().query_selector("iframe").unwrap();
+            runtime
+                .frame_content_document(&frame)
+                .unwrap()
+                .query_selector("p")
+                .unwrap()
+        },
     );
 }
 

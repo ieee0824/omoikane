@@ -111,26 +111,26 @@ function wptMousePosition(action, source) {
   return {x, y};
 }
 
-function wptDispatchMouse(source, type, button = 0, previous = source) {
+function wptDispatchMouse(input, source, type, button = 0, previous = source) {
   const target = document.elementFromPoint(source.x, source.y) || document;
-  __omoikane_dispatch_mouse_input(target.__id, type, {
+  input('mouse', [target.__id, type, {
     clientX: source.x, clientY: source.y,
     pageX: source.x + scrollX, pageY: source.y + scrollY,
     screenX: source.x, screenY: source.y,
     movementX: source.x - previous.x, movementY: source.y - previous.y,
     buttons: source.buttons, button, pointerId: source.pointerId,
-  }, type === 'mousedown');
+  }, type === 'mousedown']);
   return target;
 }
 
-function wptPerformMouseAction(action, source) {
+function wptPerformMouseAction(input, action, source) {
   if (action.type === 'pointerMove') {
     // Interpolated timed moves require an implementation in the input pump.
     // Reject them explicitly instead of silently replacing them with a jump.
     if (wptActionDuration(action) !== 0) throw new Error('Timed pointer moves are unsupported');
     const previous = {x: source.x, y: source.y};
     Object.assign(source, wptMousePosition(action, source));
-    wptDispatchMouse(source, 'mousemove', 0, previous);
+    wptDispatchMouse(input, source, 'mousemove', 0, previous);
     return;
   }
   if (action.type !== 'pointerDown' && action.type !== 'pointerUp') {
@@ -142,13 +142,13 @@ function wptPerformMouseAction(action, source) {
   if (action.type === 'pointerDown') {
     if (source.buttons & mask) return;
     source.buttons |= mask;
-    source.pressedTargets.set(button, wptDispatchMouse(source, 'mousedown', button));
+    source.pressedTargets.set(button, wptDispatchMouse(input, source, 'mousedown', button));
   } else {
     if (!(source.buttons & mask)) return;
     source.buttons &= ~mask;
-    const target = wptDispatchMouse(source, 'mouseup', button);
+    const target = wptDispatchMouse(input, source, 'mouseup', button);
     if (button === 0 && source.pressedTargets.get(button) === target) {
-      wptDispatchMouse(source, 'click', button);
+      wptDispatchMouse(input, source, 'click', button);
     }
     source.pressedTargets.delete(button);
   }
@@ -178,7 +178,7 @@ function wptPrepareActions(command) {
   command.prepared = true;
 }
 
-function wptPerformKeyAction(action, pressed) {
+function wptPerformKeyAction(input, action, pressed) {
   if (!['keyDown', 'keyUp'].includes(action.type) ||
       typeof action.value !== 'string' || Array.from(action.value).length !== 1) {
     throw new Error('Invalid keyboard action');
@@ -190,14 +190,14 @@ function wptPerformKeyAction(action, pressed) {
   const down = action.type === 'keyDown';
   const repeat = down && pressed.has(key);
   if (down) pressed.add(key); else pressed.delete(key);
-  __omoikane_dispatch_keyboard_input(down ? 'keydown' : 'keyup', {
+  input('keyboard', [down ? 'keydown' : 'keyup', {
     key, text: Array.from(key).length === 1 ? key : '', repeat,
     shiftKey: pressed.has('Shift'), ctrlKey: pressed.has('Control'),
     altKey: pressed.has('Alt'), metaKey: pressed.has('Meta'),
-  });
+  }]);
 }
 
-globalThis.__wpt_advance_action_tick = function() {
+globalThis.__wpt_advance_action_tick = function(inputCapability) {
   const command = __wpt_action_commands[0];
   if (!command) return 0;
   try {
@@ -209,8 +209,8 @@ globalThis.__wpt_advance_action_tick = function() {
       duration = Math.max(duration, wptActionDuration(action));
       if (action.type === 'pause') continue;
       if (input.type === 'none') throw new Error('A none source only accepts pause');
-      if (input.type === 'key') wptPerformKeyAction(action, wptKeySources.get(input.id));
-      else wptPerformMouseAction(action, wptMouseSources.get(input.id));
+      if (input.type === 'key') wptPerformKeyAction(inputCapability, action, wptKeySources.get(input.id));
+      else wptPerformMouseAction(inputCapability, action, wptMouseSources.get(input.id));
     }
     command.tick++;
     if (command.sources.every(input => command.tick >= input.actions.length)) {
@@ -225,10 +225,10 @@ globalThis.__wpt_advance_action_tick = function() {
   }
 };
 if (typeof __omoikane_automation_register_driver === 'function') {
-  __omoikane_automation_register_driver(execute => {
+  __omoikane_automation_register_driver((execute, inputCapability) => {
     const command = __wpt_action_commands[0];
     if (!command) return null;
-    if (execute) return __wpt_advance_action_tick();
+    if (execute) return __wpt_advance_action_tick(inputCapability);
     return Array.isArray(command.sources) && command.sources.some(input => {
       const action = input.actions?.[command.tick];
       return (input.type === 'pointer' &&

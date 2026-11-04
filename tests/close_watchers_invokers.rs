@@ -3,27 +3,17 @@
 
 use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
-
-const HELPERS: &str = r#"
-  globalThis.activate = () =>
-    __omoikane_dispatch_keyboard_input('keydown', { key: 'Control', code: 'ControlLeft' });
-  globalThis.pressEscape = () =>
-    __omoikane_dispatch_keyboard_input('keydown', { key: 'Escape', code: 'Escape' });
-  globalThis.press = (element, init = {}) => {
-    __omoikane_dispatch_mouse_input(element.__id, 'mousedown', init, false);
-    __omoikane_dispatch_mouse_input(element.__id, 'mouseup', init, false);
-  };
-"#;
+use omoikane::js::host_input_types::{
+    HostInputCommand, HostKeyInput, HostKeyPhase, HostMouseInput, HostMousePhase,
+};
 
 fn runtime(body: &str) -> JsRuntime {
     let markup = format!("<!doctype html><html><body>{body}</body></html>");
-    let mut runtime = JsRuntime::with_document_and_url(
+    JsRuntime::with_document_and_url(
         TreeBuilder::parse(&markup).document(),
         "https://example.com/",
     )
-    .unwrap();
-    runtime.eval(HELPERS).unwrap();
-    runtime
+    .unwrap()
 }
 
 /// Evaluates `script`, which returns `true` or a failure description.
@@ -36,6 +26,112 @@ fn check(runtime: &mut JsRuntime, script: &str) {
     if result.as_boolean() != Some(true) {
         panic!("{}", result.display());
     }
+}
+
+// Input exceptions are failures, as in check; no jobs are drained at a suspension.
+fn check_keyboard(runtime: &mut JsRuntime, script: &str, keys: &[&str]) {
+    runtime
+        .eval(&format!("globalThis.closeSteps = ({script})()"))
+        .unwrap();
+    let document = runtime.document();
+    let mut next = "closeSteps.next()".to_owned();
+    for (index, &key) in keys.iter().enumerate() {
+        let json = runtime
+            .eval(&format!("JSON.stringify({next})"))
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            serde_json::json!({"done":false,"value":index}),
+            "input {index}: {key}"
+        );
+        let code = match key {
+            "Control" => "ControlLeft",
+            "Escape" => "Escape",
+            _ => panic!("unexpected key"),
+        };
+        let result = runtime
+            .dispatch_host_input(
+                &document,
+                HostInputCommand::Keyboard {
+                    phase: HostKeyPhase::Down,
+                    input: HostKeyInput {
+                        key: key.into(),
+                        code: code.into(),
+                        ..Default::default()
+                    },
+                },
+            )
+            .unwrap()
+            .as_boolean()
+            .expect("keyboard cancellation result");
+        next = format!("closeSteps.next({result})");
+    }
+    let json = runtime
+        .eval(&format!("JSON.stringify({next})"))
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+        serde_json::json!({"done":true,"value":true})
+    );
+}
+
+fn check_mouse(
+    runtime: &mut JsRuntime,
+    script: &str,
+    steps: &[(&str, HostMousePhase, [f64; 2], bool)],
+) {
+    runtime
+        .eval(&format!("globalThis.closeMouseSteps = ({script})()"))
+        .unwrap();
+    let document = runtime.document();
+    let mut next = "closeMouseSteps.next()".to_owned();
+    for (index, &(selector, phase, client, focus_target)) in steps.iter().enumerate() {
+        let json = runtime
+            .eval(&format!("JSON.stringify({next})"))
+            .unwrap()
+            .as_string()
+            .unwrap()
+            .to_std_string_escaped();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            serde_json::json!({"done":false,"value":index}),
+            "input {index}: {selector}"
+        );
+        let target = document.query_selector(selector).unwrap();
+        let result = runtime
+            .dispatch_host_input(
+                &document,
+                HostInputCommand::Mouse {
+                    target,
+                    phase,
+                    input: HostMouseInput {
+                        client,
+                        ..Default::default()
+                    },
+                    focus_target,
+                },
+            )
+            .unwrap()
+            .as_boolean()
+            .expect("mouse cancellation result");
+        next = format!("closeMouseSteps.next({result})");
+    }
+    let json = runtime
+        .eval(&format!("JSON.stringify({next})"))
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .to_std_string_escaped();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+        serde_json::json!({"done":true,"value":true})
+    );
 }
 
 #[test]
@@ -77,9 +173,9 @@ fn close_watcher_request_close_close_and_destroy() {
 
 #[test]
 fn escape_closes_one_group_and_cancel_needs_history_action_activation() {
-    check(
+    check_keyboard(
         &mut runtime(""),
-        r#"() => {
+        r#"function*() {
           const log = [];
           const watch = name => {
             const watcher = new CloseWatcher();
@@ -91,61 +187,63 @@ fn escape_closes_one_group_and_cancel_needs_history_action_activation() {
           // and the cancel event cannot prevent the close.
           watch('a');
           watch('b');
-          pressEscape();
+          (yield 0);
           if (log.join() !== 'b-cancel:false,b-close,a-cancel:false,a-close') return 'grouped ' + log.join();
           log.length = 0;
 
           watch('c');
-          activate();
+          (yield 1);
           watch('d');
-          activate();
-          pressEscape();
+          (yield 2);
+          (yield 3);
           if (log.join() !== 'd-cancel:true') return 'prevented ' + log.join();
           // The prevented request consumed the history-action activation, and
           // each close request only reaches the newest group.
-          pressEscape();
+          (yield 4);
           if (log.join() !== 'd-cancel:true,d-cancel:false,d-close') return 'consumed ' + log.join();
-          pressEscape();
+          (yield 5);
           return log.join() === 'd-cancel:true,d-cancel:false,d-close,c-cancel:false,c-close' ||
             'separate ' + log.join();
         }"#,
+        &["Escape", "Control", "Control", "Escape", "Escape", "Escape"],
     );
 }
 
 #[test]
 fn dialog_closed_by_reflects_computed_state_and_controls_escape() {
-    check(
+    check_keyboard(
         &mut runtime(
             r#"<dialog id="plain"></dialog><dialog id="request" closedby="CloseRequest"></dialog>
                <dialog id="none" closedby="none"></dialog><dialog id="bogus" closedby="bogus"></dialog>"#,
         ),
-        r#"() => {
+        r#"function*() {
           const [plain, request, none, bogus] = ['plain', 'request', 'none', 'bogus'].map(id => document.getElementById(id));
           if (plain.closedBy !== 'none' || request.closedBy !== 'closerequest' || bogus.closedBy !== 'none') {
             return 'closed state ' + [plain.closedBy, request.closedBy, bogus.closedBy];
           }
           plain.showModal();
           if (plain.closedBy !== 'closerequest' || bogus.closedBy !== 'none') return 'modal ' + plain.closedBy;
-          pressEscape();
+          (yield 0);
           if (plain.open) return 'modal dialog stayed open';
 
           plain.show();
-          pressEscape();
+          (yield 1);
           if (!plain.open) return 'non-modal dialog closed by Escape';
           plain.close();
 
           request.show();
-          activate();
-          pressEscape();
+          (yield 2);
+          (yield 3);
           if (request.open) return 'closedby=closerequest stayed open';
 
           none.showModal();
-          activate();
-          pressEscape();
+          (yield 4);
+          (yield 5);
           if (!none.open) return 'closedby=none closed';
           none.closedBy = 'any';
           return (none.getAttribute('closedby') === 'any' && none.closedBy === 'any') || 'setter';
         }"#,
+        &["Escape", "Escape", "Control", "Escape", "Control", "Escape"],
     );
 }
 
@@ -174,26 +272,27 @@ fn dialog_request_close_uses_the_close_watcher_and_return_value() {
         }"#,
     );
     runtime.run_until_idle().unwrap();
-    check(
+    check_keyboard(
         &mut runtime,
-        r#"() => {
+        r#"function*() {
           if (log.join() !== 'cancel:true,cancel:true,close:done') return 'close event ' + log.join();
           // A later Escape-driven close leaves the previous return value.
           const dialog = document.getElementById('dialog');
           dialog.closedBy = 'closerequest';
           dialog.show();
-          pressEscape();
+          (yield 0);
           return (!dialog.open && dialog.returnValue === 'done') || 'escape ' + dialog.returnValue;
         }"#,
+        &["Escape"],
     );
 }
 
 #[test]
 fn request_close_ignores_disconnected_dialogs_and_handles_open_attribute_dialogs() {
     let mut runtime = runtime(r#"<dialog id="markup" open closedby="closerequest"></dialog>"#);
-    check(
+    check_keyboard(
         &mut runtime,
-        r#"() => {
+        r#"function*() {
           const dialog = document.createElement('dialog');
           document.body.append(dialog);
           dialog.showModal();
@@ -201,30 +300,42 @@ fn request_close_ignores_disconnected_dialogs_and_handles_open_attribute_dialogs
           dialog.requestClose();
           if (!dialog.open) return 'disconnected dialog closed';
           const markup = document.getElementById('markup');
-          pressEscape();
+          (yield 0);
           return !markup.open || 'open-attribute dialog ignored Escape';
         }"#,
+        &["Escape"],
     );
 }
 
 #[test]
 fn closedby_any_light_dismisses_on_a_press_outside_the_topmost_dialog() {
-    check(
+    check_mouse(
         &mut runtime(
             r#"<p id="outside">outside</p><dialog id="dialog" closedby="any"><span id="inside">inside</span></dialog>"#,
         ),
-        r#"() => {
+        r#"function*() {
           const dialog = document.getElementById('dialog');
           dialog.show();
-          press(document.getElementById('inside'));
+          (yield 0);
+          (yield 1);
           if (!dialog.open) return 'inside press closed';
-          press(document.getElementById('outside'));
+          (yield 2);
+          (yield 3);
           if (dialog.open) return 'outside press kept it open';
           dialog.closedBy = 'closerequest';
           dialog.show();
-          press(document.getElementById('outside'));
+          (yield 4);
+          (yield 5);
           return dialog.open || 'closedby=closerequest light dismissed';
         }"#,
+        &[
+            ("#inside", HostMousePhase::Down, [0.0, 0.0], false),
+            ("#inside", HostMousePhase::Up, [0.0, 0.0], false),
+            ("#outside", HostMousePhase::Down, [0.0, 0.0], false),
+            ("#outside", HostMousePhase::Up, [0.0, 0.0], false),
+            ("#outside", HostMousePhase::Down, [0.0, 0.0], false),
+            ("#outside", HostMousePhase::Up, [0.0, 0.0], false),
+        ],
     );
 }
 
@@ -307,24 +418,25 @@ fn command_event_constructor_validates_source() {
 
 #[test]
 fn input_show_picker_checks_mutability_and_consumes_activation() {
-    check(
+    check_keyboard(
         &mut runtime(
             r#"<input id="date" type="date"><input id="disabled" type="date" disabled>
                <input id="readonly" type="text" readonly><input id="color" type="color" readonly>"#,
         ),
-        r#"() => {
+        r#"function*() {
           const $ = id => document.getElementById(id);
           const error = call => { try { call(); return 'none'; } catch (e) { return e.name; } };
           if (error(() => $('date').showPicker()) !== 'NotAllowedError') return 'activation required';
-          activate();
+          (yield 0);
           if (error(() => $('disabled').showPicker()) !== 'InvalidStateError') return 'disabled';
           if (error(() => $('readonly').showPicker()) !== 'InvalidStateError') return 'readonly';
           if (error(() => $('date').showPicker()) !== 'none') return 'date';
           if (error(() => $('date').showPicker()) !== 'NotAllowedError') return 'activation not consumed';
-          activate();
+          (yield 1);
           // readonly does not apply to color inputs.
           return error(() => $('color').showPicker()) === 'none' || 'color';
         }"#,
+        &["Control", "Control"],
     );
 }
 
@@ -365,9 +477,9 @@ fn focusing_an_iframe_routes_escape_to_its_document_close_watchers() {
         r#"<iframe id="frame" srcdoc="<dialog id=d></dialog><script>d.showModal();d.addEventListener('cancel',e=>{parent.log.push('cancel:'+e.cancelable);e.preventDefault()});d.addEventListener('close',()=>parent.log.push('close'))</script>"></iframe>"#,
     );
     runtime.run_until_idle().unwrap();
-    check(
+    check_keyboard(
         &mut runtime,
-        r#"() => {
+        r#"function*() {
           globalThis.log = [];
           const frame = document.getElementById('frame');
           const childDocument = frame.contentDocument;
@@ -375,9 +487,10 @@ fn focusing_an_iframe_routes_escape_to_its_document_close_watchers() {
           frame.focus();
           if (document.activeElement !== frame || !childDocument.hasFocus()) return 'iframe viewport not focused';
           // Without user activation the cancel event cannot block the close request.
-          pressEscape();
+          (yield 0);
           return log.join() === 'cancel:false' || 'escape ' + log.join();
         }"#,
+        &["Escape"],
     );
     runtime.run_until_idle().unwrap();
     check(
@@ -450,22 +563,23 @@ fn user_activation_reaches_same_origin_iframe_close_watchers() {
         r#"<iframe id="frame" srcdoc="<dialog id=d></dialog><script>d.showModal();d.addEventListener('cancel',e=>{parent.log.push('cancel:'+e.cancelable);e.preventDefault()})</script>"></iframe>"#,
     );
     runtime.run_until_idle().unwrap();
-    check(
+    check_keyboard(
         &mut runtime,
-        r#"() => {
+        r#"function*() {
           globalThis.log = [];
           const frame = document.getElementById('frame');
           const dialog = frame.contentDocument.getElementById('d');
           // Activation in the parent also activates the same-origin child.
-          activate();
+          (yield 0);
           if (!frame.contentWindow.navigator.userActivation.hasBeenActive) return 'child not activated';
           frame.focus();
-          pressEscape();
+          (yield 1);
           if (!dialog.open || log.join() !== 'cancel:true') return 'first escape ' + log.join();
           // The consumed activation no longer lets cancel block the request.
-          pressEscape();
+          (yield 2);
           return log.join() === 'cancel:true,cancel:false' || 'second escape ' + log.join();
         }"#,
+        &["Control", "Escape", "Escape"],
     );
     runtime.run_until_idle().unwrap();
     check(
@@ -482,23 +596,24 @@ fn preventing_a_close_consumes_history_action_activation_across_frames() {
         r#"<button id="top">top</button><iframe id="one" srcdoc="{frame}"></iframe><iframe id="two" srcdoc="{frame}"></iframe>"#
     ));
     runtime.run_until_idle().unwrap();
-    check(
+    check_keyboard(
         &mut runtime,
-        r#"() => {
+        r#"function*() {
           globalThis.log = [];
           // The child dialogs took focus; activate from the top document so
           // the notification reaches both same-origin descendants.
           document.getElementById('top').focus();
-          activate();
+          (yield 0);
           const ua = id => document.getElementById(id).contentWindow.navigator.userActivation.hasBeenActive;
           if (!ua('one') || !ua('two')) return 'activation ' + ua('one') + ua('two');
           document.getElementById('one').focus();
-          pressEscape();
+          (yield 1);
           // The prevented close in one frame consumed the activation in both.
           document.getElementById('two').focus();
-          pressEscape();
+          (yield 2);
           return log.join() === 'one:true,two:false' || log.join();
         }"#,
+        &["Control", "Escape", "Escape"],
     );
 }
 
@@ -507,9 +622,9 @@ fn modal_dialog_backdrop_targets_the_dialog_for_light_dismiss() {
     let mut runtime = runtime(
         r#"<div id="outer" popover>outer<dialog id="dialog" closedby="any">dialog</dialog></div>"#,
     );
-    check(
+    check_mouse(
         &mut runtime,
-        r#"() => {
+        r#"function*() {
           const outer = document.getElementById('outer');
           const dialog = document.getElementById('dialog');
           outer.showPopover();
@@ -517,12 +632,17 @@ fn modal_dialog_backdrop_targets_the_dialog_for_light_dismiss() {
           // A viewport corner, away from the centered dialog, is beneath its backdrop.
           const x = 5, y = 5;
           if (document.elementFromPoint(x, y) !== dialog) return 'backdrop hit ' + document.elementFromPoint(x, y);
-          for (const type of ['mousedown', 'mouseup', 'click']) {
-            __omoikane_dispatch_mouse_input(dialog.__id, type, { clientX: x, clientY: y, button: 0 }, type === 'mousedown');
-          }
+          (yield 0);
+          (yield 1);
+          (yield 2);
           // Clicking the backdrop light dismisses the dialog but not its popover ancestor.
           return (!dialog.open && outer.matches(':popover-open')) ||
             'after click ' + dialog.open + ' ' + outer.matches(':popover-open');
         }"#,
+        &[
+            ("#dialog", HostMousePhase::Down, [5.0, 5.0], true),
+            ("#dialog", HostMousePhase::Up, [5.0, 5.0], false),
+            ("#dialog", HostMousePhase::Click, [5.0, 5.0], false),
+        ],
     );
 }

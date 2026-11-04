@@ -1,6 +1,9 @@
 use omoikane::{
     html::TreeBuilder,
-    js::{JsRuntime, PointerLockTransition},
+    js::{
+        JsRuntime, PointerLockTransition,
+        host_input_types::{HostInputCommand, HostKeyInput, HostKeyPhase},
+    },
 };
 use std::io::Write;
 
@@ -29,7 +32,25 @@ fn check(runtime: &mut JsRuntime, expression: &str) {
 }
 
 fn gesture(runtime: &mut JsRuntime, body: &str) {
-    runtime.eval(&format!("document.addEventListener('keydown',()=>{{{body}}},{{once:true}}); __omoikane_dispatch_keyboard_input('keydown',{{key:'Enter',code:'Enter'}});")).unwrap();
+    runtime
+        .eval(&format!(
+            "document.addEventListener('keydown',()=>{{{body}}},{{once:true}});"
+        ))
+        .unwrap();
+    let document = runtime.document().clone();
+    runtime
+        .dispatch_host_input(
+            &document,
+            HostInputCommand::Keyboard {
+                phase: HostKeyPhase::Down,
+                input: HostKeyInput {
+                    key: "Enter".into(),
+                    code: "Enter".into(),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
     runtime.run_jobs().unwrap();
 }
 
@@ -108,7 +129,10 @@ fn explicit_exit_allows_reacquisition_but_escape_requires_new_input() {
     runtime.eval("other.requestPointerLock()").unwrap();
     runtime.run_until_idle().unwrap();
     check(&mut runtime, "document.pointerLockElement===other");
-    runtime.eval("document.addEventListener('keydown', e=>e.preventDefault()); __omoikane_dispatch_keyboard_input('keydown',{key:'Escape'});").unwrap();
+    runtime
+        .eval("document.addEventListener('keydown', e=>e.preventDefault());")
+        .unwrap();
+    host_key(&mut runtime, "Escape");
     runtime.run_until_idle().unwrap();
     check(&mut runtime, "document.pointerLockElement===null");
     runtime
@@ -337,6 +361,35 @@ fn serialized_requests_retarget_with_no_second_native_grab() {
     check(&mut runtime, "document.pointerLockElement===other");
 }
 
+fn host_key(runtime: &mut JsRuntime, key: &str) {
+    let document = runtime.document();
+    runtime
+        .dispatch_host_input(
+            &document,
+            HostInputCommand::Keyboard {
+                phase: HostKeyPhase::Down,
+                input: HostKeyInput {
+                    key: key.into(),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+}
+
+fn cdp_gesture(session: &mut omoikane::cdp::CdpSession, setup: &str) {
+    cdp_eval(session, setup);
+    session
+        .dispatch(
+            "Input.dispatchKeyEvent",
+            serde_json::json!({"type":"keyDown","key":"Enter"}),
+        )
+        .unwrap();
+    // The original Runtime.evaluate gesture also completed pending host tasks.
+    // Keep that checkpoint here: Input.dispatchKeyEvent only drains jobs.
+    cdp_eval(session, "void 0");
+}
+
 fn cdp_eval(session: &mut omoikane::cdp::CdpSession, expression: &str) -> serde_json::Value {
     let result = session
         .dispatch(
@@ -399,9 +452,9 @@ fn platform_relative_input_freezes_coordinates_and_routes_outside_hit_test() {
 fn navigation_releases_native_grab_and_rejects_stale_acknowledgement() {
     let mut session = omoikane::cdp::CdpSession::new().unwrap();
     session.set_pointer_lock_deferred(true);
-    cdp_eval(
+    cdp_gesture(
         &mut session,
-        "document.addEventListener('keydown',()=>document.body.requestPointerLock().catch(()=>{}),{once:true}); __omoikane_dispatch_keyboard_input('keydown',{key:'Enter'});",
+        "document.addEventListener('keydown',()=>document.body.requestPointerLock().catch(()=>{}),{once:true});",
     );
     let Some(PointerLockTransition::Acquire { request_id, .. }) =
         session.take_pointer_lock_transition()
@@ -425,9 +478,9 @@ fn navigation_releases_native_grab_and_rejects_stale_acknowledgement() {
     );
     assert!(!session.is_pointer_locked());
     // The replacement runtime must retain the external-host configuration.
-    cdp_eval(
+    cdp_gesture(
         &mut session,
-        "document.addEventListener('keydown',()=>document.body.requestPointerLock(),{once:true}); __omoikane_dispatch_keyboard_input('keydown',{key:'Enter'});",
+        "document.addEventListener('keydown',()=>document.body.requestPointerLock(),{once:true});",
     );
     assert!(!session.is_pointer_locked());
     let Some(PointerLockTransition::Acquire {
@@ -465,9 +518,9 @@ fn unlocked_movement_resets_at_surface_and_lock_boundaries() {
     input.cursor_moved(&mut session, 12.5, 17.0).unwrap();
     input.cursor_left(&mut session);
     input.cursor_moved(&mut session, 100.0, 200.0).unwrap();
-    cdp_eval(
+    cdp_gesture(
         &mut session,
-        "document.addEventListener('keydown',()=>document.body.requestPointerLock(),{once:true}); __omoikane_dispatch_keyboard_input('keydown',{key:'Enter'});",
+        "document.addEventListener('keydown',()=>document.body.requestPointerLock(),{once:true});",
     );
     input
         .relative_motion(&mut session, 3000.0, -4000.0)
@@ -490,9 +543,9 @@ fn background_navigation_preserves_focus_and_requires_fresh_input() {
             serde_json::json!({"url":"data:text/html,<body>background"}),
         )
         .unwrap();
-    cdp_eval(
+    cdp_gesture(
         &mut session,
-        "globalThis.denied=''; document.addEventListener('keydown',()=>document.body.requestPointerLock().catch(e=>denied=e.name),{once:true}); __omoikane_dispatch_keyboard_input('keydown',{key:'Enter'});",
+        "globalThis.denied=''; document.addEventListener('keydown',()=>document.body.requestPointerLock().catch(e=>denied=e.name),{once:true});",
     );
     assert_eq!(
         cdp_eval(&mut session, "denied"),
@@ -522,7 +575,21 @@ fn child_realm_completion_and_other_document_exclusion() {
         frame.contentDocument.body.appendChild(childScript);"#).unwrap();
     runtime.run_until_idle().unwrap();
     check(&mut runtime, "Array.isArray(frame.contentWindow.childLog)");
-    runtime.eval("frame.contentDocument.body.focus(); frame.contentWindow.__omoikane_dispatch_keyboard_input('keydown',{key:'Enter'});").unwrap();
+    runtime.eval("frame.contentDocument.body.focus()").unwrap();
+    let frame_node = runtime.document().query_selector("iframe").unwrap();
+    let child_document = runtime.frame_content_document(&frame_node).unwrap();
+    runtime
+        .dispatch_host_input(
+            &child_document,
+            HostInputCommand::Keyboard {
+                phase: HostKeyPhase::Down,
+                input: HostKeyInput {
+                    key: "Enter".into(),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
     runtime.run_until_idle().unwrap();
     let observed = runtime.eval("JSON.stringify([frame.contentDocument.pointerLockElement===frame.contentDocument.body,frame.contentWindow.childLog,document.pointerLockElement===null])").unwrap().as_string().unwrap().to_std_string_escaped();
     assert_eq!(
@@ -565,7 +632,8 @@ fn host_keyboard_input_reaches_child_realm_listener() {
     runtime.eval("const script=frame.contentDocument.createElement('script'); script.textContent=\"globalThis.keys=0; document.body.onkeydown=()=>keys++;\"; frame.contentDocument.body.appendChild(script)").unwrap();
     runtime.run_until_idle().unwrap();
     check(&mut runtime, "frame.contentWindow.keys===0");
-    runtime.eval("frame.contentDocument.body.focus(); __omoikane_dispatch_keyboard_input('keydown',{key:'Enter'})").unwrap();
+    runtime.eval("frame.contentDocument.body.focus()").unwrap();
+    host_key(&mut runtime, "Enter");
     runtime.run_until_idle().unwrap();
     check(&mut runtime, "frame.contentWindow.keys===1");
 }
@@ -747,7 +815,7 @@ fn cdp_child_lock_receives_relative_input_and_escape_releases_it() {
 }
 
 #[test]
-fn nested_input_navigation_drops_old_dispatcher_and_keeps_parent_focus() {
+fn nested_input_navigation_keeps_dispatcher_private_and_parent_focus() {
     let mut session = child_input_session("globalThis.ready=true");
     cdp_eval(
         &mut session,
@@ -784,7 +852,22 @@ fn nested_input_navigation_drops_old_dispatcher_and_keeps_parent_focus() {
             serde_json::json!({"type":"keyDown","key":"z","code":"KeyZ"}),
         )
         .unwrap();
-    cdp_eval(&mut session, "oldInput('keydown',{key:'stale'})");
+    // Actual saved private callback retirement is covered by input_bridge's
+    // saved_private_dispatcher_is_inert_after_nested_document_retirement unit test.
+    assert_eq!(
+        cdp_eval(
+            &mut session,
+            "typeof oldInput==='undefined' && typeof nested.contentWindow.__omoikane_dispatch_keyboard_input==='undefined'"
+        ),
+        serde_json::json!(true),
+    );
+    assert_eq!(
+        cdp_eval(
+            &mut session,
+            "(()=>{try{oldInput('keydown',{key:'stale'});return 'allowed'}catch(error){return error.name}})()"
+        ),
+        serde_json::json!("TypeError"),
+    );
     assert_eq!(
         cdp_eval(&mut session, "order.join('|')"),
         serde_json::json!("deep:k|top:z")

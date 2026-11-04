@@ -69,7 +69,10 @@ impl JsRuntime {
     }
 
     /// Discards modal metadata after a synchronous callback cancels suspension.
-    fn finish_sync_js_boundary(&mut self, result: JsResult<JsValue>) -> JsResult<JsValue> {
+    pub(super) fn finish_sync_js_boundary(
+        &mut self,
+        result: JsResult<JsValue>,
+    ) -> JsResult<JsValue> {
         self.host_state.borrow_mut().pending_javascript_dialog = None;
         result
     }

@@ -1,3 +1,4 @@
+use omoikane::js::host_input_types::{HostInputCommand, HostMouseInput};
 use omoikane::{html::TreeBuilder, js::JsRuntime};
 
 fn runtime(html: &str) -> JsRuntime {
@@ -155,14 +156,22 @@ fn wheel_input_uses_the_same_snap_selection_as_scripted_scroll() {
         <div id="scroller"><div class="item"></div><div class="item"></div>
           <div class="item"></div></div>"#,
     );
+    let document = runtime.document();
+    let target = document.query_selector("#scroller").unwrap();
+    let accepted = runtime
+        .dispatch_host_input(
+            &document,
+            HostInputCommand::Wheel {
+                target,
+                input: HostMouseInput::default(),
+                delta: [0.0, 65.0, 0.0],
+            },
+        )
+        .unwrap();
+    assert_ne!(accepted.as_number().expect("wheel result flags"), 0.0);
     check(
         &mut runtime,
-        r#"(() => {
-          const scroller = document.getElementById("scroller");
-          const accepted = __omoikane_dispatch_wheel_input(scroller.__id,
-            {deltaX: 0, deltaY: 65});
-          return accepted !== 0 && scroller.scrollTop === 100;
-        })()"#,
+        "document.getElementById('scroller').scrollTop === 100",
     );
 }
 

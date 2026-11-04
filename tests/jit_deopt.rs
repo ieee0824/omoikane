@@ -15,10 +15,6 @@ mod stress;
 #[path = "acid3_harness.rs"]
 mod acid3;
 
-#[cfg(feature = "jit-stress")]
-#[path = "web_api_surface.rs"]
-mod web_api_surface;
-
 use boa_engine::{Context, JsValue, Source};
 
 fn evaluate(

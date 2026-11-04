@@ -26,7 +26,7 @@ SHARDS = [f"unit-{i}" for i in range(UNIT_SHARDS)] + [
 FEATURES = "jit-stress,jit-differential"
 # print_page_wpt needs the pinned checkout supplied by the separate WPT CI job.
 DEDICATED_TARGETS = {
-    "acid3_harness", "jit_deopt", "web_api_surface", "wpt_smoke", "print_page_wpt",
+    "acid3_harness", "jit_deopt", "wpt_smoke", "print_page_wpt",
 }
 TEST_ARGS = ["--include-ignored", "--nocapture", "--test-threads=1"]
 STRESS_MATRIX_TEST = "stress::reproducible_stress_matrix"
@@ -159,7 +159,7 @@ def integration_command(targets):
 
 def stress_command():
     return test_command(["--test", "jit_deopt"],
-                        ["--skip", "acid3::", "--skip", "web_api_surface::"])
+                        ["--skip", "acid3::"])
 
 
 def integration_log_covers_targets(log, targets):
@@ -307,8 +307,11 @@ def run_shard(shard, root):
         elif shard == "compatibility":
             run("fetch-wpt", ["scripts/fetch-wpt.sh"])
             test("wpt", ["--test", "wpt_smoke"])
-            test("web-api", ["--test", "web_api_surface"])
-            test("embedded-web-api", ["--test", "jit_deopt"], ["web_api_surface::"])
+            # Preserve both compatibility executions after moving the entire
+            # harness behind cfg(test); each process owns its report and log.
+            for label in ("web-api", "embedded-web-api"):
+                env["OMOIKANE_WEB_API_REPORT"] = str(folder / f"{label}.json")
+                test(label, ["--lib"], ["js::web_api_surface_tests::"])
         elif shard == "stress":
             status, log = run("stress", stress_command())
             paths = re.findall(r"JIT stress: \d+ seeds passed in [\d.]+s; (.+)", log)
@@ -339,6 +342,80 @@ def complete_unit_coverage(root):
     return sorted(seen) == sorted(all_names) and len(set(seen)) == len(seen)
 
 
+def surface_log_covers_tests(log, expected):
+    """Match serial libtest outcomes, including nocapture output before `ok`."""
+    passed = []
+    pending = None
+    summaries = []
+    for line in ANSI_ESCAPE.sub("", log).splitlines():
+        match = re.fullmatch(r"test (\S+) \.\.\. (.*)", line)
+        if match:
+            if pending is not None:
+                return False
+            name, outcome = match.groups()
+            if name not in expected:
+                return False
+            if outcome == "ok":
+                passed.append(name)
+            elif outcome == "FAILED" or outcome.startswith("ignored"):
+                return False
+            else:
+                pending = name
+        elif line in ("ok", "FAILED", "ignored"):
+            if pending is None or line != "ok":
+                return False
+            passed.append(pending)
+            pending = None
+        elif line.startswith("test result:"):
+            summaries.append(line)
+    if pending is not None or sorted(passed) != sorted(expected) or len(summaries) != 1:
+        return False
+    summary = re.fullmatch(
+        r"test result: ok\. (\d+) passed; 0 failed; 0 ignored; 0 measured; "
+        r"\d+ filtered out; finished in [\d.]+s", summaries[0])
+    return summary is not None and int(summary.group(1)) == len(expected)
+
+
+def complete_surface_coverage(root):
+    names = read_json(root / "unit-0/all-tests.json")
+    if not isinstance(names, list):
+        return False
+    expected = [name for name in names if name.startswith("js::web_api_surface_tests::")]
+    if not expected or len(expected) != len(set(expected)):
+        return False
+    manifest = read_json(Path("tests/web_api_surface/manifest.json"))
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("features"), list):
+        return False
+    features = manifest["features"]
+    ids = [feature.get("id") for feature in features]
+    if not ids or len(ids) != len(set(ids)):
+        return False
+    for label in ("web-api", "embedded-web-api"):
+        folder = root / "compatibility"
+        report = read_json(folder / f"{label}.json")
+        log_path = folder / f"{label}.log"
+        if not isinstance(report, dict) or not log_path.is_file():
+            return False
+        if not surface_log_covers_tests(log_path.read_text(errors="replace"), expected):
+            return False
+        results = report.get("results")
+        if not isinstance(results, list) or len(results) != len(features):
+            return False
+        if [row.get("id") for row in results] != ids:
+            return False
+        if report.get("total") != len(ids) or report.get("regressions") != []:
+            return False
+        for feature, row in zip(features, results):
+            if any(row.get(key) != feature.get(key) for key in
+                   ("id", "area", "description", "baseline_supported")):
+                return False
+            if row.get("status") not in ("supported", "unsupported", "error"):
+                return False
+            if feature.get("baseline_supported") and row.get("status") != "supported":
+                return False
+    return True
+
+
 def aggregate(root, jobs_succeeded=True):
     expected = read_json(root / "inputs/identity.json")
     shards = {name: read_json(root / name / "shard.json") for name in SHARDS}
@@ -365,7 +442,7 @@ def aggregate(root, jobs_succeeded=True):
         "acid3_expected_result": report_matches_expectation(acid3, load_expectation()),
         "acid3_test26_reported": has_acid3_test26_timing(shards.get("acid3")),
         "wpt_regression_zero": isinstance(wpt, dict) and wpt.get("summary", {}).get("regression") == 0,
-        "web_api_regression_zero": isinstance(web_api, dict) and web_api.get("regressions") == [],
+        "web_api_regression_zero": complete_surface_coverage(root),
         "stress_64_seeds": isinstance(stress, dict) and stress.get("gc_profile") is True
             and len(stress.get("seeds", [])) >= 64 and all(s.get("success") is True for s in stress["seeds"]),
         "stress_10_minutes": isinstance(stress, dict) and stress.get("elapsed_seconds", 0) >= 600,

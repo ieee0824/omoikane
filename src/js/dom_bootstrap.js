@@ -24006,7 +24006,7 @@ let omoikaneUserActivationState;
     const doc = target && target.nodeType === 9 ? target : target && target.ownerDocument;
     return pointerCaptureTarget(doc || document, normalizePointerId(pointerId)) || target;
   }
-  globalThis.__omoikane_release_pointer_capture = function(pointerId = 1) {
+  const privateHostReleasePointerCapture = function(pointerId = 1) {
     const normalized = normalizePointerId(pointerId);
     const suffix = ":" + normalized;
     for (const key of pointerCaptureTargets.keys()) {
@@ -24089,14 +24089,14 @@ let omoikaneUserActivationState;
     }
     return changed;
   }
-  globalThis.__omoikane_prepare_drag_input = function(id, init = {}) {
+  const privateHostPrepareDragInput = function(id, init = {}) {
     const target = dragInputTarget(id, init);
     const source = draggableAncestor(target);
     resetDragInputState();
     dragInputState.candidate = source;
     return !!source;
   };
-  globalThis.__omoikane_dispatch_drag_input = function(id, phase, init = {}) {
+  const privateHostDragInput = function(id, phase, init = {}) {
     if (phase === "cancel") {
       if (dragInputState.active && dragInputState.source) {
         dragInputState.source.dispatchEvent(dragEvent(
@@ -24201,7 +24201,7 @@ let omoikaneUserActivationState;
     event.isTrusted = true;
     return event;
   }
-  globalThis.__omoikane_dispatch_mouse_input = function(id, type, init, focusTarget) {
+  const privateHostMouseInput = function(id, type, init, focusTarget) {
     if (type === "mousedown" || type === "click") stopLargestContentfulPaint();
     const locked = nativePointerLockTarget() !== null;
     if (locked && ["mouseover", "mouseout", "mouseenter", "mouseleave"].includes(type)) return true;
@@ -24397,7 +24397,7 @@ let omoikaneUserActivationState;
     })));
     return true;
   }
-  globalThis.__omoikane_dispatch_wheel_input = function(id, init) {
+  const privateHostWheelInput = function(id, init) {
     stopLargestContentfulPaint();
     const locked = wrapNode(nativePointerLockTarget());
     const target = locked || wrapNode(id) || document;
@@ -24427,7 +24427,7 @@ let omoikaneUserActivationState;
     const horizontal = Math.abs(Number(deltaX) || 0) > Math.abs(Number(deltaY) || 0);
     return horizontal ? allowX : allowY;
   }
-  globalThis.__omoikane_dispatch_touch_input = function(id, type, init) {
+  const privateHostTouchInput = function(id, type, init) {
     if (type === "touchstart") stopLargestContentfulPaint();
     const target = wrapNode(id) || document;
     const inputDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
@@ -24469,7 +24469,7 @@ let omoikaneUserActivationState;
         !touchActionAllowsDefault(target, init.deltaX, init.deltaY)) return 1;
     return 1 | performScrollBoundaryDefault(target, init.deltaX, init.deltaY);
   };
-  globalThis.__omoikane_dispatch_keyboard_input = function(type, init) {
+  const privateHostKeyboardInput = function(type, init) {
     if (type === "keydown") stopLargestContentfulPaint();
     const focusedId = focusedDocumentId() ?? __omoikane_document_id;
     const forwarded = nativeForwardInput(focusedId, "keyboard", [type, init]);
@@ -24509,7 +24509,7 @@ let omoikaneUserActivationState;
     }
     return notCanceled;
   };
-  globalThis.__omoikane_dispatch_composition_input = function dispatchCompositionInput(
+  const privateHostCompositionInput = function dispatchCompositionInput(
     action, text, selectionStart = 0, selectionEnd = selectionStart,
   ) {
     const focusedId = focusedDocumentId() ?? __omoikane_document_id;
@@ -42209,13 +42209,16 @@ globalThis.localStorage = storageForDocument("local", workerStorageDocument, glo
   /* @omoikane-bootstrap end */globalThis.IntersectionObserverEntry = IntersectionObserverEntry;
   /* @omoikane-bootstrap window-only inputDispatchers-3438 */const inputDispatchers = {
     focus: (kind, ...args) => safeApply(focusDocumentCommands[kind], undefined, args),
-    mouse: globalThis.__omoikane_dispatch_mouse_input,
-    wheel: globalThis.__omoikane_dispatch_wheel_input,
+    mouse: privateHostMouseInput,
+    wheel: privateHostWheelInput,
     "native-scroll-eligible": nativeScrollRootTarget,
     "native-scroll-notification": dispatchNativeScrollNotification,
-    touch: globalThis.__omoikane_dispatch_touch_input,
-    keyboard: globalThis.__omoikane_dispatch_keyboard_input,
-    composition: globalThis.__omoikane_dispatch_composition_input,
+    touch: privateHostTouchInput,
+    keyboard: privateHostKeyboardInput,
+    composition: privateHostCompositionInput,
+    "prepare-drag": privateHostPrepareDragInput,
+    drag: privateHostDragInput,
+    "release-pointer-capture": privateHostReleasePointerCapture,
     capture: dispatchLostPointerCapture,
     autofill: (id, value) => {
       const control = wrapNode(id);
@@ -42226,7 +42229,14 @@ globalThis.localStorage = storageForDocument("local", workerStorageDocument, glo
       return true;
     },
   };
-  nativeRegisterInputDispatcher((kind, args) => safeApply(inputDispatchers[kind], undefined, args));
+  nativeRegisterInputDispatcher((kind, args, relatedIndex, relatedId) => {
+    // Only the typed host boundary supplies these validated node identities.
+    // Resolve here so the wrapper stays on the VM stack through forwarding.
+    if (relatedIndex !== undefined && relatedIndex !== null) {
+      args[relatedIndex].relatedTarget = wrapNode(relatedId);
+    }
+    return safeApply(inputDispatchers[kind], undefined, args);
+  });
   const windowNameDocument = internalNodeId(globalThis.document);
   /* @omoikane-bootstrap end */Object.defineProperty(globalThis, "name", {
     configurable: true, enumerable: true,

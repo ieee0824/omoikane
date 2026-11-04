@@ -2,6 +2,7 @@
 
 use omoikane::html::TreeBuilder;
 use omoikane::js::JsRuntime;
+use omoikane::js::host_input_types::{HostInputCommand, HostKeyInput, HostKeyPhase};
 
 fn runtime(body: &str) -> JsRuntime {
     let markup = format!(
@@ -100,11 +101,21 @@ fn fixed_transparent_and_recent_input_shifts() {
         &mut runtime,
         "() => shifts.length === 0 || 'untracked boxes shifted'",
     );
+    let document = runtime.document();
     runtime
-        .eval(
-            "__omoikane_dispatch_keyboard_input('keydown', { key: 'a' }); \
-             document.getElementById('moved').style.top = '50px';",
+        .dispatch_host_input(
+            &document,
+            HostInputCommand::Keyboard {
+                phase: HostKeyPhase::Down,
+                input: HostKeyInput {
+                    key: "a".into(),
+                    ..Default::default()
+                },
+            },
         )
+        .unwrap();
+    runtime
+        .eval("document.getElementById('moved').style.top = '50px';")
         .unwrap();
     frame(&mut runtime);
     check(
