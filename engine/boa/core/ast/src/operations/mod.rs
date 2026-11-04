@@ -222,16 +222,17 @@ where
         fn visit_class_element(&mut self, node: &'ast ClassElement) -> ControlFlow<Self::BreakTy> {
             match node {
                 ClassElement::MethodDefinition(m) => {
-                    if self.0 == ContainsSymbol::DirectEval {
-                        return ControlFlow::Continue(());
-                    }
-
+                    // Nested eval can access bindings in enclosing scopes. Reuse
+                    // the cached body/parameter result instead of rescanning them.
+                    self.visit_contains_eval(m.contains_direct_eval())?;
                     if let ClassElementName::PropertyName(name) = m.name() {
                         name.visit_with(self)
                     } else {
                         ControlFlow::Continue(())
                     }
                 }
+                // Include initializers and static blocks for binding escape analysis.
+                _ if self.0 == ContainsSymbol::DirectEval => node.visit_with(self),
                 ClassElement::FieldDefinition(field)
                 | ClassElement::StaticFieldDefinition(field) => field.name.visit_with(self),
                 _ => ControlFlow::Continue(()),
@@ -243,9 +244,7 @@ where
             node: &'ast PropertyDefinition,
         ) -> ControlFlow<Self::BreakTy> {
             if let PropertyDefinition::MethodDefinition(m) = node {
-                if self.0 == ContainsSymbol::DirectEval {
-                    return ControlFlow::Continue(());
-                }
+                self.visit_contains_eval(m.contains_direct_eval())?;
 
                 if self.0 == ContainsSymbol::MethodDefinition {
                     return ControlFlow::Break(());
