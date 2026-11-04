@@ -779,13 +779,14 @@ fn assert_strong_allocation_presence(pointer: crate::GcErasedPointer, present: b
     });
 }
 
-fn check_minor_finalizer_retarget(resurrect: bool) {
+fn check_minor_finalizer_retarget(resurrect: bool, external_root: bool) {
     let original = Rooted::new(MinorRetargetKey {
         value: GcEdge::new(7_u32),
     });
     let parent: Rooted<MinorRetargetParent> = Rooted::new(GcRefCell::new(None));
     let weak = Rooted::new(GcRefCell::new(WeakGcEdge::new_rooted(&original)));
     let ephemeron_pointer = weak.borrow().inner().erased_inner_ptr();
+    let _external_root = external_root.then(|| weak.borrow().root());
     force_minor_collect();
     force_minor_collect();
     assert!(is_old(&original));
@@ -806,6 +807,15 @@ fn check_minor_finalizer_retarget(resurrect: bool) {
         target,
         resurrect,
     });
+
+    if external_root {
+        crate::EPHEMERON_ROOT_REGISTRY.with(|roots| {
+            assert!(roots.borrow().contains(&ephemeron_pointer));
+        });
+        crate::REMEMBERED_EPHEMERONS.with(|remembered| {
+            remembered.borrow_mut().insert(ephemeron_pointer);
+        });
+    }
 
     // The first mark sees an old unit ephemeron with its original old key.
     // Only finalization retargets it; the second mark must use the new key.
@@ -843,8 +853,8 @@ fn check_minor_finalizer_retarget(resurrect: bool) {
 
 #[test]
 fn minor_second_mark_observes_finalizer_retarget_without_rooting_a_dead_key() {
-    run_test(|| check_minor_finalizer_retarget(true));
-    run_test(|| check_minor_finalizer_retarget(false));
+    run_test(|| check_minor_finalizer_retarget(true, false));
+    run_test(|| check_minor_finalizer_retarget(false, false));
 }
 
 #[test]
@@ -910,4 +920,10 @@ fn promoted_weak_map_tracker_keeps_new_entries_until_their_keys_die() {
         force_collect();
         Harness::assert_empty_gc();
     });
+}
+
+#[test]
+fn minor_second_mark_observes_finalizer_retarget_with_root_seed_overlap() {
+    run_test(|| check_minor_finalizer_retarget(true, true));
+    run_test(|| check_minor_finalizer_retarget(false, true));
 }
