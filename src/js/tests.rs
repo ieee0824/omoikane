@@ -20103,32 +20103,32 @@ fn web_serial_retires_open_provider_sessions_with_the_document() {
     });
     let origin = "https://retire.serial.test";
     provider.request_port(origin, &[], &[]).unwrap();
-    provider
-        .open(
-            origin,
-            "retired-port",
-            &SerialOptions {
-                baud_rate: 9600,
-                data_bits: 8,
-                stop_bits: 1,
-                parity: "none".into(),
-                buffer_size: 255,
-                flow_control: "none".into(),
-            },
-        )
-        .unwrap();
     let mut runtime =
         JsRuntime::with_document_and_url(default_document(), "https://retire.serial.test/page")
             .unwrap();
     runtime.set_serial_provider(provider.clone());
     let document_id = runtime.document().identity();
+    let options = SerialOptions {
+        baud_rate: 9600,
+        data_bits: 8,
+        stop_bits: 1,
+        parity: "none".into(),
+        buffer_size: 255,
+        flow_control: "none".into(),
+    };
+    runtime
+        .host_state
+        .borrow()
+        .web_serial
+        .open(document_id, origin, "retired-port", &options)
+        .unwrap();
     runtime
         .host_state
         .borrow()
         .retire_web_serial_document(document_id);
-    assert_eq!(
-        provider.read(origin, "retired-port").unwrap_err().name,
-        "InvalidStateError"
+    assert!(
+        provider.open(origin, "retired-port", &options).is_ok(),
+        "retiring the owning document must release its backend session"
     );
 }
 
