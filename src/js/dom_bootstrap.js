@@ -173,6 +173,9 @@ let omoikaneUserActivationState;
   const nativeCrossOriginIsolated = globalThis.__omoikane_cross_origin_isolated;
   const nativeStorageManager = globalThis.__omoikane_storage_manager;
   const nativeOpfs = globalThis.__omoikane_opfs;
+  const nativeWebShare = globalThis.__omoikane_web_share;
+  const nativeSerial = globalThis.__omoikane_serial;
+  const nativePaymentRequest = globalThis.__omoikane_payment_request;
   const nativeCookieStoreAvailable = globalThis.__omoikane_cookie_store_available;
   const nativeCookieStoreQuery = globalThis.__omoikane_cookie_store_query;
   const nativeCookieStoreSubscriptions = globalThis.__omoikane_cookie_store_subscriptions;
@@ -25302,6 +25305,7 @@ let omoikaneUserActivationState;
       const container = registration._container;
       if (container._records.get(registration.scope) !== registration._record) return false;
       container._records.delete(registration.scope);
+      try { pushResult("retire", registration.scope); } catch (_) {}
       clearServiceWorkerCookieSubscriptions(registration);
       for (const worker of new Set([registration.installing, registration.waiting, registration.active])) {
         // The calling worker must remain live long enough to settle its own
@@ -25315,6 +25319,133 @@ let omoikaneUserActivationState;
       return true;
     });
   }
+
+  const pushManagerToken = {};
+  const pushSubscriptionToken = {};
+  const pushManagerState = new WeakMap();
+  const pushSubscriptionState = new WeakMap();
+  const pushRegistrationManagers = new WeakMap();
+  let windowPushManager = null;
+  const pushBytes = value => Uint8Array.from(value || []).buffer;
+  function pushOptions(value = undefined) {
+    const source = value === undefined ? {} : Object(value);
+    const userVisibleOnly = Boolean(source.userVisibleOnly);
+    const raw = source.applicationServerKey;
+    let applicationServerKey = null;
+    if (raw !== undefined && raw !== null) {
+      let bytes;
+      if (typeof raw === "string") {
+        try { bytes = Uint8Array.from(cryptoBase64UrlToBytes(raw)); }
+        catch (_) { throw new DOMException("The applicationServerKey is not valid base64url", "InvalidCharacterError"); }
+      } else if (raw instanceof ArrayBuffer) {
+        bytes = new Uint8Array(raw.slice(0));
+      } else if (ArrayBuffer.isView(raw)) {
+        bytes = new Uint8Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength));
+      } else {
+        throw new TypeError("applicationServerKey must be a BufferSource or DOMString");
+      }
+      if (bytes.byteLength !== 65 || bytes[0] !== 4) {
+        throw new DOMException("The applicationServerKey is not a valid P-256 public key", "InvalidAccessError");
+      }
+      applicationServerKey = Array.from(bytes);
+    }
+    return { userVisibleOnly, applicationServerKey };
+  }
+  function pushResult(operation, scope, data = {}) {
+    return JSON.parse(String(__omoikane_push(
+      operation, __omoikane_document_id, scope, JSON.stringify(data))));
+  }
+  function pushFailure(result) {
+    if (result.error) throw new DOMException(result.message || "The push operation failed", result.error);
+    return result;
+  }
+  class PushSubscriptionOptions {
+    constructor(token, data) {
+      if (token !== pushSubscriptionToken) throw new TypeError("Illegal constructor");
+      this._userVisibleOnly = Boolean(data.userVisibleOnly);
+      this._applicationServerKey = data.applicationServerKey === null ? null : pushBytes(data.applicationServerKey);
+    }
+    get userVisibleOnly() { return this._userVisibleOnly; }
+    get applicationServerKey() { return this._applicationServerKey; }
+    get [Symbol.toStringTag]() { return "PushSubscriptionOptions"; }
+  }
+  class PushSubscription {
+    constructor(token, data, scope) {
+      if (token !== pushSubscriptionToken) throw new TypeError("Illegal constructor");
+      const options = new PushSubscriptionOptions(token, data.options);
+      pushSubscriptionState.set(this, {
+        endpoint: String(data.endpoint),
+        expirationTime: data.expirationTime === null ? null : Number(data.expirationTime),
+        options,
+        p256dh: pushBytes(data.p256dh),
+        auth: pushBytes(data.auth),
+        scope: String(scope),
+      });
+    }
+    get endpoint() { return pushSubscriptionState.get(this)?.endpoint; }
+    get expirationTime() { return pushSubscriptionState.get(this)?.expirationTime; }
+    get options() { return pushSubscriptionState.get(this)?.options; }
+    getKey(name) {
+      const state = pushSubscriptionState.get(this);
+      if (!state) throw new TypeError("Illegal PushSubscription receiver");
+      const key = String(name);
+      if (key !== "p256dh" && key !== "auth") throw new TypeError("Invalid PushEncryptionKeyName");
+      const value = state[key];
+      return value === null ? null : value.slice(0);
+    }
+    unsubscribe() {
+      const state = pushSubscriptionState.get(this);
+      if (!state) return Promise.reject(new TypeError("Illegal PushSubscription receiver"));
+      return Promise.resolve().then(() => pushFailure(pushResult(
+        "unsubscribe", state.scope, {endpoint: state.endpoint})).removed);
+    }
+    toJSON() {
+      const state = pushSubscriptionState.get(this);
+      if (!state) throw new TypeError("Illegal PushSubscription receiver");
+      return {
+        endpoint: state.endpoint,
+        expirationTime: state.expirationTime,
+        keys: {
+          p256dh: cryptoBytesToBase64Url(Array.from(new Uint8Array(state.p256dh))),
+          auth: cryptoBytesToBase64Url(Array.from(new Uint8Array(state.auth))),
+        },
+      };
+    }
+    get [Symbol.toStringTag]() { return "PushSubscription"; }
+  }
+  const makePushSubscription = (data, scope) => data === null ? null : new PushSubscription(pushSubscriptionToken, data, scope);
+  class PushManager {
+    constructor(token, scope) {
+      if (token !== pushManagerToken) throw new TypeError("Illegal constructor");
+      pushManagerState.set(this, String(scope));
+    }
+    subscribe(options = undefined) {
+      const scope = pushManagerState.get(this);
+      if (scope === undefined) return Promise.reject(new TypeError("Illegal PushManager receiver"));
+      let normalized;
+      try { normalized = pushOptions(options); }
+      catch (error) { return Promise.reject(error); }
+      return Promise.resolve().then(() => makePushSubscription(
+        pushFailure(pushResult("subscribe", scope, normalized)), scope));
+    }
+    getSubscription() {
+      const scope = pushManagerState.get(this);
+      if (scope === undefined) return Promise.reject(new TypeError("Illegal PushManager receiver"));
+      return Promise.resolve().then(() => makePushSubscription(
+        pushFailure(pushResult("get", scope)).subscription ?? null, scope));
+    }
+    permissionState(options = undefined) {
+      const scope = pushManagerState.get(this);
+      if (scope === undefined) return Promise.reject(new TypeError("Illegal PushManager receiver"));
+      let normalized;
+      try { normalized = pushOptions(options); }
+      catch (error) { return Promise.reject(error); }
+      return Promise.resolve().then(() => pushFailure(pushResult("permission", scope, normalized)).permission);
+    }
+    static get supportedContentEncodings() { return pushSupportedContentEncodings; }
+    get [Symbol.toStringTag]() { return "PushManager"; }
+  }
+  const pushSupportedContentEncodings = Object.freeze(["aes128gcm"]);
 
   class ServiceWorkerRegistration extends ServiceWorkerEventTarget {
     constructor(record, container, token) {
@@ -25526,6 +25657,31 @@ let omoikaneUserActivationState;
   globalThis.ServiceWorker = ServiceWorker;
   globalThis.ServiceWorkerRegistration = ServiceWorkerRegistration;
   globalThis.ServiceWorkerContainer = ServiceWorkerContainer;
+  if (nativeIsSecureContext()) {
+    globalThis.PushManager = PushManager;
+    globalThis.PushSubscription = PushSubscription;
+    globalThis.PushSubscriptionOptions = PushSubscriptionOptions;
+    Object.defineProperty(ServiceWorkerRegistration.prototype, "pushManager", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        let manager = pushRegistrationManagers.get(this);
+        if (!manager) {
+          manager = new PushManager(pushManagerToken, this.scope);
+          pushRegistrationManagers.set(this, manager);
+        }
+        return manager;
+      },
+    });
+    Object.defineProperty(Window.prototype, "pushManager", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        if (!windowPushManager) windowPushManager = new PushManager(pushManagerToken, "");
+        return windowPushManager;
+      },
+    });
+  }
 
   // -------------------------------------------------------------------------
   // WebGPU deterministic adapter/device/queue core.
@@ -26989,6 +27145,413 @@ let omoikaneUserActivationState;
       return pollGamepads(false);
     }
     get [Symbol.toStringTag]() { return "Navigator"; }
+  }
+  let navigatorBadgeContext = "document";
+  function badgeNative(badge) {
+    const result = JSON.parse(String(__omoikane_badging(
+      __omoikane_document_id, navigatorBadgeContext, JSON.stringify(badge))));
+    if (result.error) {
+      throw new DOMException(result.message || "The badge operation failed", result.error);
+    }
+  }
+  function setAppBadge(contents = undefined) {
+    if (!(this instanceof Navigator)) return Promise.reject(new TypeError("Illegal invocation"));
+    try {
+      let badge = "flag";
+      if (contents !== undefined) {
+        if (typeof contents === "object" && contents !== null) {
+          return Promise.reject(new TypeError("Badge contents must be a number"));
+        }
+        const number = Number(contents);
+        if (!Number.isFinite(number) || number < 0 || number > Number.MAX_SAFE_INTEGER) {
+          return Promise.reject(new TypeError("Badge contents are outside the supported range"));
+        }
+        const integer = Math.trunc(number);
+        badge = integer === 0 ? "clear" : integer;
+      }
+      badgeNative(badge);
+      return Promise.resolve(undefined);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+  function clearAppBadge() {
+    if (!(this instanceof Navigator)) return Promise.reject(new TypeError("Illegal invocation"));
+    try {
+      badgeNative("clear");
+      return Promise.resolve(undefined);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+  if (nativeIsSecureContext()) {
+    Object.defineProperties(Navigator.prototype, {
+      setAppBadge: { configurable: true, enumerable: true, writable: true, value: setAppBadge },
+      clearAppBadge: { configurable: true, enumerable: true, writable: true, value: clearAppBadge },
+    });
+  }
+  function protocolHandlerOperation(operation, scheme, url) {
+    if (!(this instanceof Navigator)) throw new TypeError("Illegal invocation");
+    const normalizedScheme = String(scheme);
+    const normalizedUrl = String(url);
+    const result = JSON.parse(String(__omoikane_protocol_handler(
+      operation, __omoikane_document_id, normalizedScheme, normalizedUrl)));
+    if (result.error) {
+      throw new DOMException(result.message || "The protocol handler operation failed", result.error);
+    }
+  }
+  function registerProtocolHandler(scheme, url) {
+    if (arguments.length < 2) throw new TypeError("2 arguments required");
+    protocolHandlerOperation.call(this, "register", scheme, url);
+  }
+  function unregisterProtocolHandler(scheme, url) {
+    if (arguments.length < 2) throw new TypeError("2 arguments required");
+    protocolHandlerOperation.call(this, "unregister", scheme, url);
+  }
+  if (nativeIsSecureContext()) {
+    Object.defineProperties(Navigator.prototype, {
+      registerProtocolHandler: { configurable: true, enumerable: true, writable: true, value: registerProtocolHandler },
+      unregisterProtocolHandler: { configurable: true, enumerable: true, writable: true, value: unregisterProtocolHandler },
+    });
+  }
+  function shareNative(operation, data = {}) {
+    const result = JSON.parse(String(nativeWebShare(operation, __omoikane_document_id, JSON.stringify(data))));
+    if (result.error) {
+      if (result.error === "TypeError") throw new TypeError(result.message || "Invalid share data");
+      throw new DOMException(result.message || "The share operation failed", result.error);
+    }
+    return result;
+  }
+  function shareData(value) {
+    const source = value == null ? {} : Object(value);
+    const data = {};
+    if (source.title !== undefined) data.title = String(source.title);
+    if (source.text !== undefined) data.text = String(source.text);
+    let validUrl = true;
+    if (source.url !== undefined) {
+      try {
+        const url = new URL(String(source.url), String(document.baseURI || location.href));
+        validUrl = url.protocol === "http:" || url.protocol === "https:";
+        if (validUrl) data.url = url.href;
+      } catch (_) { validUrl = false; }
+    }
+    if (source.files !== undefined) {
+      const sequence = source.files;
+      if (sequence == null || typeof sequence[Symbol.iterator] !== "function") {
+        throw new TypeError("files must be a sequence of File objects");
+      }
+      data.files = [];
+      for (const file of sequence) {
+        if (!isFile(file)) throw new TypeError("files must contain only File objects");
+        data.files.push({
+          name: file.name,
+          mediaType: file.type,
+          lastModified: file.lastModified,
+          bytes: Array.from(file.__bytes),
+        });
+      }
+    }
+    const hasFiles = data.files !== undefined && data.files.length > 0;
+    const hasData = data.title !== undefined || data.text !== undefined || data.url !== undefined || hasFiles;
+    return { data, valid: validUrl && hasData && (data.files === undefined || hasFiles) };
+  }
+  function canShare(value = undefined) {
+    if (!(this instanceof Navigator)) throw new TypeError("Illegal invocation");
+    let normalized;
+    try { normalized = shareData(value); }
+    catch (error) { throw error; }
+    if (!normalized.valid) return false;
+    try { return shareNative("canShare", normalized.data).supported === true; }
+    catch (_) { return false; }
+  }
+  function share(value = undefined) {
+    if (!(this instanceof Navigator)) return Promise.reject(new TypeError("Illegal invocation"));
+    try { shareNative("preflight"); }
+    catch (error) { return Promise.reject(error); }
+    if (!fullscreenTransientActivation) {
+      return Promise.reject(new DOMException("A user activation is required", "NotAllowedError"));
+    }
+    fullscreenTransientActivation = false;
+    nativePointerLockActivation(false, 0);
+    let normalized;
+    try { normalized = shareData(value); }
+    catch (error) { return Promise.reject(error); }
+    if (!normalized.valid) return Promise.reject(new TypeError("The share data is not valid"));
+    let pending;
+    try { pending = shareNative("begin", normalized.data); }
+    catch (error) { return Promise.reject(error); }
+    return Promise.resolve().then(() => { shareNative("complete", { id: pending.id }); });
+  }
+  if (nativeIsSecureContext()) {
+    Object.defineProperties(Navigator.prototype, {
+      canShare: { configurable: true, enumerable: true, writable: true, value: canShare },
+      share: { configurable: true, enumerable: true, writable: true, value: share },
+    });
+  }
+  function installWebSerial() {
+  const serialToken = {};
+  const serialPortToken = {};
+  const serialState = new WeakSet();
+  const serialPortState = new WeakMap();
+  const serialPorts = new Map();
+  let serialInstance = null;
+  function serialNative(operation, port = "", data = {}) {
+    const result = JSON.parse(String(nativeSerial(
+      operation, __omoikane_document_id, String(port), JSON.stringify(data))));
+    if (result.error) throw new DOMException(result.message || "The serial operation failed", result.error);
+    return result;
+  }
+  function normalizeSerialInfo(info) {
+    return {
+      usbVendorId: info.usbVendorId == null ? undefined : Number(info.usbVendorId),
+      usbProductId: info.usbProductId == null ? undefined : Number(info.usbProductId),
+      bluetoothServiceClassId: info.bluetoothServiceClassId == null ? undefined : String(info.bluetoothServiceClassId),
+    };
+  }
+  function portFor(info) {
+    let port = serialPorts.get(info.id);
+    if (!port) {
+      port = new SerialPort(serialPortToken, info);
+      serialPorts.set(info.id, port);
+    } else {
+      const state = serialPortState.get(port);
+      const connected = Boolean(info.connected);
+      if (state.connected !== connected) {
+        state.connected = connected;
+        const event = new Event(connected ? "connect" : "disconnect");
+        port.dispatchEvent(event);
+        serialInstance?.dispatchEvent(new Event(event.type));
+      }
+      state.info = normalizeSerialInfo(info);
+    }
+    return port;
+  }
+  function serialOptions(value) {
+    const source = Object(value);
+    if (value == null || source.baudRate === undefined) throw new TypeError("baudRate is required");
+    const integer = (raw, name, maximum) => {
+      const number = Number(raw);
+      if (!Number.isFinite(number) || number < 0 || number > maximum || Math.trunc(number) !== number) {
+        throw new TypeError(name + " is outside its allowed range");
+      }
+      return number;
+    };
+    const baudRate = integer(source.baudRate, "baudRate", 0xffffffff);
+    const dataBits = integer(source.dataBits ?? 8, "dataBits", 255);
+    const stopBits = integer(source.stopBits ?? 1, "stopBits", 255);
+    const bufferSize = integer(source.bufferSize ?? 255, "bufferSize", 0xffffffff);
+    const parity = source.parity === undefined ? "none" : String(source.parity);
+    const flowControl = source.flowControl === undefined ? "none" : String(source.flowControl);
+    if (baudRate === 0 || ![7, 8].includes(dataBits) || ![1, 2].includes(stopBits) || bufferSize === 0 || bufferSize > 16777216) {
+      throw new TypeError("Invalid serial connection options");
+    }
+    if (!["none", "even", "odd"].includes(parity) || !["none", "hardware"].includes(flowControl)) {
+      throw new TypeError("Invalid serial connection enum value");
+    }
+    return { baudRate, dataBits, stopBits, parity, bufferSize, flowControl };
+  }
+  function serialRequestOptions(value = {}) {
+    const source = value == null ? {} : Object(value);
+    const filters = source.filters === undefined ? [] : Array.from(source.filters, raw => {
+      const filter = Object(raw);
+      const normalized = {};
+      if (filter.usbVendorId !== undefined) normalized.usbVendorId = Number(filter.usbVendorId);
+      if (filter.usbProductId !== undefined) normalized.usbProductId = Number(filter.usbProductId);
+      if (filter.bluetoothServiceClassId !== undefined) normalized.bluetoothServiceClassId = String(filter.bluetoothServiceClassId);
+      if (!Object.keys(normalized).length || (normalized.usbProductId !== undefined && normalized.usbVendorId === undefined)) {
+        throw new TypeError("Invalid serial port filter");
+      }
+      for (const key of ["usbVendorId", "usbProductId"]) {
+        if (normalized[key] !== undefined && (!Number.isInteger(normalized[key]) || normalized[key] < 0 || normalized[key] > 65535)) {
+          throw new TypeError("Invalid serial USB identifier");
+        }
+      }
+      return normalized;
+    });
+    const allowedBluetoothServiceClassIds = source.allowedBluetoothServiceClassIds === undefined
+      ? [] : Array.from(source.allowedBluetoothServiceClassIds, String);
+    return { filters, allowedBluetoothServiceClassIds };
+  }
+  class SerialPort extends EventTarget {
+    constructor(token, info) {
+      if (token !== serialPortToken) throw new TypeError("Illegal constructor");
+      super();
+      serialPortState.set(this, {
+        id: String(info.id), info: normalizeSerialInfo(info), connected: Boolean(info.connected),
+        open: false, readable: null, writable: null,
+      });
+    }
+    get connected() {
+      const state = serialPortState.get(this);
+      if (!state) throw new TypeError("Illegal SerialPort receiver");
+      return state.connected;
+    }
+    get readable() {
+      const state = serialPortState.get(this);
+      if (!state) throw new TypeError("Illegal SerialPort receiver");
+      return state.readable;
+    }
+    get writable() {
+      const state = serialPortState.get(this);
+      if (!state) throw new TypeError("Illegal SerialPort receiver");
+      return state.writable;
+    }
+    getInfo() {
+      const state = serialPortState.get(this);
+      if (!state) throw new TypeError("Illegal SerialPort receiver");
+      return {...state.info};
+    }
+    open(options) {
+      const state = serialPortState.get(this);
+      if (!state) return Promise.reject(new TypeError("Illegal SerialPort receiver"));
+      if (state.open) return Promise.reject(new DOMException("The serial port is already open", "InvalidStateError"));
+      let normalized;
+      try { normalized = serialOptions(options); serialNative("open", state.id, normalized); }
+      catch (error) { return Promise.reject(error); }
+      state.open = true;
+      state.readable = new ReadableStream({
+        type: "bytes",
+        pull(controller) {
+          const result = serialNative("read", state.id);
+          if (result.bytes !== null) controller.enqueue(Uint8Array.from(result.bytes));
+        },
+      }, {highWaterMark: 0});
+      state.writable = new WritableStream({
+        write(chunk) {
+          if (!(chunk instanceof ArrayBuffer) && !ArrayBuffer.isView(chunk)) throw new TypeError("Serial writes require a BufferSource");
+          const bytes = chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+          serialNative("write", state.id, Array.from(bytes));
+        },
+      });
+      return Promise.resolve(undefined);
+    }
+    close() {
+      const state = serialPortState.get(this);
+      if (!state) return Promise.reject(new TypeError("Illegal SerialPort receiver"));
+      if (!state.open || state.readable?.locked || state.writable?.locked) {
+        return Promise.reject(new DOMException("The serial streams must be unlocked", "InvalidStateError"));
+      }
+      try { serialNative("close", state.id); }
+      catch (error) { return Promise.reject(error); }
+      state.open = false; state.readable = null; state.writable = null;
+      return Promise.resolve(undefined);
+    }
+    getSignals() {
+      const state = serialPortState.get(this);
+      if (!state) return Promise.reject(new TypeError("Illegal SerialPort receiver"));
+      try { return Promise.resolve({...serialNative("getSignals", state.id).signals}); }
+      catch (error) { return Promise.reject(error); }
+    }
+    setSignals(value = {}) {
+      const state = serialPortState.get(this);
+      if (!state) return Promise.reject(new TypeError("Illegal SerialPort receiver"));
+      try {
+        const source = value == null ? {} : Object(value);
+        serialNative("setSignals", state.id, {
+          dataTerminalReady: Boolean(source.dataTerminalReady), requestToSend: Boolean(source.requestToSend),
+          break: Boolean(source.break),
+        });
+        return Promise.resolve(undefined);
+      } catch (error) { return Promise.reject(error); }
+    }
+    forget() {
+      const state = serialPortState.get(this);
+      if (!state) return Promise.reject(new TypeError("Illegal SerialPort receiver"));
+      try { serialNative("forget", state.id); serialPorts.delete(state.id); return Promise.resolve(undefined); }
+      catch (error) { return Promise.reject(error); }
+    }
+    get [Symbol.toStringTag]() { return "SerialPort"; }
+  }
+  for (const type of ["connect", "disconnect"]) {
+    Object.defineProperty(SerialPort.prototype, "on" + type, {
+      configurable: true, enumerable: true,
+      get() {
+        if (!serialPortState.has(this)) throw new TypeError("Illegal SerialPort receiver");
+        return this["__on" + type] || null;
+      },
+      set(value) {
+        if (!serialPortState.has(this)) throw new TypeError("Illegal SerialPort receiver");
+        const old = this["__on" + type];
+        if (old) this.removeEventListener(type, old);
+        const next = typeof value === "function" ? value : null;
+        this["__on" + type] = next;
+        if (next) this.addEventListener(type, next);
+      },
+    });
+    const descriptor = Object.getOwnPropertyDescriptor(SerialPort.prototype, "on" + type);
+    Object.defineProperty(descriptor.get, "name", {value: "get on" + type});
+    Object.defineProperty(descriptor.set, "name", {value: "set on" + type});
+  }
+  class Serial extends EventTarget {
+    constructor(token) {
+      if (token !== serialToken) throw new TypeError("Illegal constructor");
+      super();
+      serialState.add(this);
+    }
+    getPorts() {
+      if (!serialState.has(this)) return Promise.reject(new TypeError("Illegal invocation"));
+      try { return Promise.resolve(serialNative("get").ports.map(portFor)); }
+      catch (error) { return Promise.reject(error); }
+    }
+    requestPort(options) {
+      if (!serialState.has(this)) return Promise.reject(new TypeError("Illegal invocation"));
+      if (!arguments.length) return Promise.reject(new TypeError("SerialPortRequestOptions is required"));
+      if (!fullscreenTransientActivation) return Promise.reject(new DOMException("A user activation is required", "SecurityError"));
+      fullscreenTransientActivation = false; nativePointerLockActivation(false, 0);
+      try { return Promise.resolve(portFor(serialNative("request", "", serialRequestOptions(options)).port)); }
+      catch (error) { return Promise.reject(error); }
+    }
+    get [Symbol.toStringTag]() { return "Serial"; }
+  }
+  for (const type of ["connect", "disconnect"]) {
+    Object.defineProperty(Serial.prototype, "on" + type, {
+      configurable: true, enumerable: true,
+      get() {
+        if (!serialState.has(this)) throw new TypeError("Illegal Serial receiver");
+        return this["__on" + type] || null;
+      },
+      set(value) {
+        if (!serialState.has(this)) throw new TypeError("Illegal Serial receiver");
+        const old = this["__on" + type];
+        if (old) this.removeEventListener(type, old);
+        const next = typeof value === "function" ? value : null;
+        this["__on" + type] = next;
+        if (next) this.addEventListener(type, next);
+      },
+    });
+    const descriptor = Object.getOwnPropertyDescriptor(Serial.prototype, "on" + type);
+    Object.defineProperty(descriptor.get, "name", {value: "get on" + type});
+    Object.defineProperty(descriptor.set, "name", {value: "set on" + type});
+  }
+  if (nativeIsSecureContext()) {
+    const serial = new Serial(serialToken);
+    serialInstance = serial;
+    Object.defineProperty(Navigator.prototype, "serial", {
+      configurable: true, enumerable: true,
+      get() {
+        if (this !== navigator) throw new TypeError("Illegal Navigator receiver");
+        return serial;
+      },
+    });
+    const serialDescriptor = Object.getOwnPropertyDescriptor(Navigator.prototype, "serial");
+    Object.defineProperty(serialDescriptor.get, "name", {value: "get serial"});
+    Object.defineProperties(globalThis, {
+      Serial: {configurable:true, writable:true, value:Serial},
+      SerialPort: {configurable:true, writable:true, value:SerialPort},
+    });
+  }
+  Object.defineProperty(Serial, "length", {value: 0});
+  Object.defineProperty(SerialPort, "length", {value: 0});
+  Object.defineProperty(Serial.prototype.requestPort, "length", {value: 0});
+  for (const [prototype, members] of [
+    [Serial.prototype, ["getPorts", "requestPort"]],
+    [SerialPort.prototype, ["connected", "readable", "writable", "getInfo", "open", "setSignals", "getSignals", "close", "forget"]],
+  ]) {
+    for (const member of members) {
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, member);
+      Object.defineProperty(prototype, member, {...descriptor, enumerable: true});
+    }
+  }
   }
   Object.defineProperty(Navigator.prototype, "getGamepads", {
     ...Object.getOwnPropertyDescriptor(Navigator.prototype, "getGamepads"),
@@ -30568,6 +31131,259 @@ let omoikaneUserActivationState;
     }
   }
 
+  const paymentRequestState = new WeakMap();
+  const paymentResponseState = new WeakMap();
+  let nextPaymentRequestId = 1;
+  function paymentNative(operation, data) {
+    const result = JSON.parse(String(nativePaymentRequest(
+      operation, __omoikane_document_id, JSON.stringify(data || {}),
+    )));
+    if (result.error) throw new DOMException(result.message || result.error, result.error);
+    return result;
+  }
+  function paymentAmount(value) {
+    const source = Object(value);
+    const currency = String(source.currency);
+    const amount = String(source.value);
+    if (!/^[A-Za-z]{3}$/.test(currency) || !/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(amount)) {
+      throw new TypeError("Invalid payment amount");
+    }
+    return { currency: currency.toUpperCase(), value: amount };
+  }
+  function paymentItem(value) {
+    const source = Object(value);
+    if (source.label === undefined || source.amount === undefined) throw new TypeError("Invalid payment item");
+    return { label: String(source.label), amount: paymentAmount(source.amount), pending: Boolean(source.pending) };
+  }
+  function paymentDetails(value) {
+    const source = Object(value);
+    if (source.total === undefined) throw new TypeError("PaymentDetailsInit.total is required");
+    const details = { total: paymentItem(source.total) };
+    if (details.total.amount.value.startsWith("-")) throw new TypeError("The total cannot be negative");
+    if (source.id !== undefined) details.id = String(source.id);
+    if (source.displayItems !== undefined) details.displayItems = Array.from(source.displayItems, paymentItem);
+    if (source.shippingOptions !== undefined) details.shippingOptions = Array.from(source.shippingOptions, option => {
+      const item = Object(option);
+      if (item.id === undefined || item.label === undefined || item.amount === undefined) throw new TypeError("Invalid shipping option");
+      return { id: String(item.id), label: String(item.label), amount: paymentAmount(item.amount), selected: Boolean(item.selected) };
+    });
+    if (source.modifiers !== undefined) details.modifiers = Array.from(source.modifiers, modifier => {
+      const item = Object(modifier);
+      if (item.supportedMethods === undefined) throw new TypeError("supportedMethods is required");
+      const normalized = { supportedMethods: String(item.supportedMethods) };
+      if (item.total !== undefined) normalized.total = paymentItem(item.total);
+      if (item.additionalDisplayItems !== undefined) normalized.additionalDisplayItems = Array.from(item.additionalDisplayItems, paymentItem);
+      if (item.data !== undefined) normalized.data = JSON.parse(JSON.stringify(item.data));
+      return normalized;
+    });
+    return details;
+  }
+  function paymentMethods(value) {
+    const sequence = Array.from(value);
+    if (!sequence.length) throw new TypeError("At least one payment method is required");
+    return sequence.map(entry => {
+      const source = Object(entry);
+      if (source.supportedMethods === undefined) throw new TypeError("supportedMethods is required");
+      const supportedMethods = String(source.supportedMethods);
+      if (!supportedMethods || (/^https?:/.test(supportedMethods) && !/^https:\/\//.test(supportedMethods))) {
+        throw new RangeError("Invalid payment method identifier");
+      }
+      const method = { supportedMethods };
+      if (source.data !== undefined) {
+        if ((typeof source.data !== "object" && typeof source.data !== "function") || source.data === null) {
+          throw new TypeError("PaymentMethodData.data must be an object");
+        }
+        if ((supportedMethods === "basic-card" || supportedMethods === "https://apple.com/apple-pay") &&
+            source.data.supportedNetworks !== undefined && !Array.isArray(source.data.supportedNetworks)) {
+          throw new TypeError("supportedNetworks must be a sequence");
+        }
+        method.data = JSON.parse(JSON.stringify(source.data));
+      }
+      return method;
+    });
+  }
+  function paymentOptions(value) {
+    const source = value === undefined ? {} : Object(value);
+    const shippingType = source.shippingType === undefined ? "shipping" : String(source.shippingType);
+    if (!["shipping", "delivery", "pickup"].includes(shippingType)) throw new TypeError("Invalid shipping type");
+    return {
+      requestPayerName: Boolean(source.requestPayerName),
+      requestBillingAddress: Boolean(source.requestBillingAddress),
+      requestPayerEmail: Boolean(source.requestPayerEmail),
+      requestPayerPhone: Boolean(source.requestPayerPhone),
+      requestShipping: Boolean(source.requestShipping),
+      shippingType,
+    };
+  }
+  function paymentEventHandler(prototype, name, stateMap) {
+    Object.defineProperty(prototype, name, {
+      configurable: true, enumerable: true,
+      get() { return (stateMap.get(this) || illegalInvocation())[name]; },
+      set(value) {
+        const state = stateMap.get(this) || illegalInvocation();
+        const type = name.slice(2);
+        if (state[name]) this.removeEventListener(type, state[name]);
+        state[name] = typeof value === "function" ? value : null;
+        if (state[name]) this.addEventListener(type, state[name]);
+      },
+    });
+  }
+  class PaymentResponse extends EventTarget {
+    constructor(token, request, selection) {
+      if (token !== paymentResponseState) throw new TypeError("Illegal constructor");
+      super();
+      paymentResponseState.set(this, { request, selection, complete: false, onpayerdetailchange: null });
+    }
+    __state() { return paymentResponseState.get(this) || illegalInvocation(); }
+    get requestId() { return this.__state().request.id; }
+    get methodName() { return String(this.__state().selection.methodName); }
+    get details() { return this.__state().selection.details; }
+    get shippingAddress() { this.__state(); return null; }
+    get shippingOption() { this.__state(); return null; }
+    get payerName() { return this.__state().selection.payerName ?? null; }
+    get payerEmail() { return this.__state().selection.payerEmail ?? null; }
+    get payerPhone() { return this.__state().selection.payerPhone ?? null; }
+    toJSON() {
+      return { requestId: this.requestId, methodName: this.methodName, details: this.details,
+        shippingAddress: null, shippingOption: null, payerName: this.payerName,
+        payerEmail: this.payerEmail, payerPhone: this.payerPhone };
+    }
+    complete(result = "unknown", details = {}) {
+      const state = this.__state();
+      if (state.complete) return Promise.reject(new DOMException("The response is already complete", "InvalidStateError"));
+      const status = String(result);
+      if (!["fail", "success", "unknown"].includes(status)) return Promise.reject(new TypeError("Invalid payment complete result"));
+      Object(details);
+      state.complete = true;
+      return Promise.resolve().then(() => { paymentNative("complete", { id: state.request.id, result: status }); });
+    }
+    retry(errorFields = {}) {
+      const state = this.__state();
+      if (state.complete) return Promise.reject(new DOMException("The response is already complete", "InvalidStateError"));
+      Object(errorFields);
+      return Promise.reject(new DOMException("The payment provider cannot retry this response", "NotSupportedError"));
+    }
+    get [Symbol.toStringTag]() { return "PaymentResponse"; }
+  }
+  class PaymentRequest extends EventTarget {
+    constructor(methodData, details, options = {}) {
+      if (arguments.length < 2) throw new TypeError("PaymentRequest requires methodData and details");
+      super();
+      const normalizedDetails = paymentDetails(details);
+      const request = {
+        id: normalizedDetails.id || `omoikane-payment-${nextPaymentRequestId++}`,
+        methods: paymentMethods(methodData), details: normalizedDetails, options: paymentOptions(options),
+      };
+      paymentRequestState.set(this, { request, state: "created", response: null, showReject: null,
+        onmerchantvalidation: null, onpaymentmethodchange: null, onshippingaddresschange: null,
+        onshippingoptionchange: null });
+    }
+    __state() { return paymentRequestState.get(this) || illegalInvocation(); }
+    get id() { return this.__state().request.id; }
+    get shippingAddress() { this.__state(); return null; }
+    get shippingOption() { this.__state(); return null; }
+    get shippingType() { const state = this.__state(); return state.request.options.requestShipping ? state.request.options.shippingType : null; }
+    canMakePayment() {
+      const state = this.__state();
+      if (state.state !== "created") return Promise.reject(new DOMException("The request is not in the created state", "InvalidStateError"));
+      return Promise.resolve().then(() => paymentNative("canMakePayment", state.request).supported === true);
+    }
+    show(detailsPromise = undefined) {
+      const state = this.__state();
+      if (state.state !== "created") return Promise.reject(new DOMException("The request cannot be shown", "InvalidStateError"));
+      if (!fullscreenTransientActivation) return Promise.reject(new DOMException("A user activation is required", "NotAllowedError"));
+      fullscreenTransientActivation = false;
+      state.state = "interactive";
+      const begin = update => {
+        if (update !== undefined) state.request.details = paymentDetails(update);
+        paymentNative("show", state.request);
+        return Promise.resolve().then(() => {
+          const selection = paymentNative("result");
+          if (selection.pending) {
+            return new Promise((resolve, reject) => { state.showReject = reject; });
+          }
+          state.state = "closed";
+          state.response = new PaymentResponse(paymentResponseState, state.request, selection);
+          return state.response;
+        });
+      };
+      let result;
+      try {
+        result = detailsPromise === undefined ? begin(undefined) : Promise.resolve(detailsPromise).then(begin);
+      } catch (error) {
+        state.state = "closed";
+        return Promise.reject(error);
+      }
+      return result.catch(error => {
+        state.state = "closed";
+        throw error;
+      });
+    }
+    abort() {
+      const state = this.__state();
+      if (state.state !== "interactive") return Promise.reject(new DOMException("The request is not interactive", "InvalidStateError"));
+      try {
+        paymentNative("abort");
+        state.state = "closed";
+        if (state.showReject) {
+          const reject = state.showReject;
+          state.showReject = null;
+          reject(new DOMException("The payment request was aborted", "AbortError"));
+        }
+        return Promise.resolve();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
+    get [Symbol.toStringTag]() { return "PaymentRequest"; }
+  }
+  class PaymentRequestUpdateEvent extends Event {
+    constructor(type, init = {}) { super(String(type), init); this.__updated = false; this.__detailsPromise = null; }
+    updateWith(detailsPromise) {
+      if (this.__updated) throw new DOMException("updateWith was already called", "InvalidStateError");
+      this.__updated = true;
+      this.__detailsPromise = Promise.resolve(detailsPromise).then(paymentDetails);
+    }
+    get [Symbol.toStringTag]() { return "PaymentRequestUpdateEvent"; }
+  }
+  class PaymentMethodChangeEvent extends PaymentRequestUpdateEvent {
+    constructor(type, init = {}) {
+      const source = Object(init);
+      super(type, source);
+      this.__methodName = source.methodName === undefined ? "" : String(source.methodName);
+      const details = source.methodDetails;
+      if (details !== undefined && details !== null && typeof details !== "object" && typeof details !== "function") {
+        throw new TypeError("methodDetails must be an object or null");
+      }
+      this.__methodDetails = details === undefined ? null : details;
+    }
+    get methodName() { return this.__methodName; }
+    get methodDetails() { return this.__methodDetails; }
+    get [Symbol.toStringTag]() { return "PaymentMethodChangeEvent"; }
+  }
+  for (const name of ["onshippingaddresschange", "onshippingoptionchange", "onpaymentmethodchange"]) {
+    paymentEventHandler(PaymentRequest.prototype, name, paymentRequestState);
+  }
+  paymentEventHandler(PaymentResponse.prototype, "onpayerdetailchange", paymentResponseState);
+  if (globalThis.isSecureContext) {
+    for (const constructor of [PaymentRequest, PaymentResponse, PaymentRequestUpdateEvent, PaymentMethodChangeEvent]) {
+      Object.defineProperty(constructor, "length", { value: constructor === PaymentRequest ? 2 : constructor === PaymentRequestUpdateEvent ? 1 : 0 });
+    }
+    Object.defineProperty(PaymentMethodChangeEvent, "length", { value: 1 });
+    for (const [name, constructor] of Object.entries({ PaymentRequest, PaymentResponse, PaymentRequestUpdateEvent, PaymentMethodChangeEvent })) {
+      Object.defineProperty(globalThis, name, { configurable: true, writable: true, value: constructor });
+    }
+    for (const [constructor, members] of [
+      [PaymentRequest, ["id", "shippingAddress", "shippingOption", "shippingType", "canMakePayment", "show", "abort", "onshippingaddresschange", "onshippingoptionchange", "onpaymentmethodchange"]],
+      [PaymentResponse, ["requestId", "methodName", "details", "shippingAddress", "shippingOption", "payerName", "payerEmail", "payerPhone", "toJSON", "complete", "retry", "onpayerdetailchange"]],
+      [PaymentRequestUpdateEvent, ["updateWith"]],
+      [PaymentMethodChangeEvent, ["methodName", "methodDetails"]],
+    ]) for (const member of members) {
+      const descriptor = Object.getOwnPropertyDescriptor(constructor.prototype, member);
+      Object.defineProperty(constructor.prototype, member, { ...descriptor, enumerable: true });
+    }
+  }
+
   const screenToken = {};
   const screenBrands = new WeakSet();
   const screenOrientationState = new WeakMap();
@@ -32775,7 +33591,7 @@ let omoikaneUserActivationState;
   const observedPermissionStatuses = new Set();
   let permissionLifecycleActive = true;
   const supportedPermissionNames = Object.freeze([
-    "notifications", "geolocation", "clipboard-read", "clipboard-write", "persistent-storage",
+    "notifications", "push", "geolocation", "clipboard-read", "clipboard-write", "persistent-storage",
     "accelerometer", "gyroscope", "magnetometer", "storage-access", "camera", "microphone",
     "screen-wake-lock",
   ]);
@@ -32810,7 +33626,7 @@ let omoikaneUserActivationState;
         return "denied";
       }
     }
-    if (name === "notifications") {
+    if (name === "notifications" || name === "push") {
       const permission = currentNotificationPermission();
       return permission === "default" ? "prompt" : permission;
     }
@@ -34316,6 +35132,7 @@ let omoikaneUserActivationState;
     if (visualScroll) visualViewport.dispatchEvent(new Event("scroll"));
   };
   globalThis.EventTarget = EventTarget;
+  installWebSerial();
   Object.setPrototypeOf(MediaEventTarget.prototype, EventTarget.prototype);
   Object.setPrototypeOf(MediaEventTarget, EventTarget);
   Object.setPrototypeOf(MediaStreamTrackEvent.prototype, Event.prototype);
@@ -37399,6 +38216,16 @@ let omoikaneUserActivationState;
   globalThis.Worker = Worker;
 
   globalThis.__omoikane_install_worker_global = function(url, workerId) {
+    navigatorBadgeContext = "worker";
+    function WorkerNavigator() { throw new TypeError("Illegal constructor"); }
+    WorkerNavigator.prototype = Object.create(Navigator.prototype, {
+      constructor: { configurable: true, writable: true, value: WorkerNavigator },
+      [Symbol.toStringTag]: { configurable: true, get() { return "WorkerNavigator"; } },
+    });
+    Object.setPrototypeOf(globalThis.navigator, WorkerNavigator.prototype);
+    Object.defineProperty(globalThis, "WorkerNavigator", {
+      configurable: true, enumerable: false, writable: true, value: WorkerNavigator,
+    });
     // A worker inherits EventTarget without the Window interface.
     Object.setPrototypeOf(globalThis, EventTarget.prototype);
     // A worker global is not a Window and cannot reach the page DOM. The
@@ -37453,6 +38280,9 @@ let omoikaneUserActivationState;
     try { if (globalThis.navigator) delete globalThis.navigator.clipboard; } catch (_) {}
     try { delete Navigator.prototype.clipboard; } catch (_) {}
     try { if (globalThis.navigator) delete globalThis.navigator.geolocation; } catch (_) {}
+    try { delete Navigator.prototype.share; } catch (_) {}
+    try { delete Navigator.prototype.canShare; } catch (_) {}
+    try { if (globalThis.Serial) delete globalThis.Serial.prototype.requestPort; } catch (_) {}
     try { if (globalThis.StorageManager) delete globalThis.StorageManager.prototype.persist; } catch (_) {}
     try { delete globalThis.Clipboard; } catch (_) { globalThis.Clipboard = undefined; }
     try { delete globalThis.__omoikane_dispatch_notification_click; } catch (_) {}
@@ -37618,8 +38448,85 @@ let omoikaneUserActivationState;
       get [Symbol.toStringTag]() { return "ExtendableCookieChangeEvent"; }
     }
     globalThis.ExtendableCookieChangeEvent = ExtendableCookieChangeEvent;
+    const pushMessageDataState = new WeakMap();
+    const pushEventState = new WeakMap();
+    const pushChangeState = new WeakMap();
+    const pushMessageBytes = value => {
+      if (typeof value === "string") return new TextEncoder().encode(value);
+      if (value instanceof ArrayBuffer) return new Uint8Array(value.slice(0));
+      if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+      throw new TypeError("Push message data must be a BufferSource or USVString");
+    };
+    class PushMessageData {
+      constructor(token, value) {
+        if (token !== pushSubscriptionToken) throw new TypeError("Illegal constructor");
+        pushMessageDataState.set(this, pushMessageBytes(value));
+      }
+      arrayBuffer() { return pushMessageDataState.get(this).slice().buffer; }
+      blob() { return new Blob([this.arrayBuffer()]); }
+      bytes() { return pushMessageDataState.get(this).slice(); }
+      json() { return JSON.parse(this.text()); }
+      text() { return new TextDecoder().decode(pushMessageDataState.get(this)); }
+      get [Symbol.toStringTag]() { return "PushMessageData"; }
+    }
+    class PushEvent extends ExtendableEvent {
+      constructor(type, init = {}) {
+        if (arguments.length === 0) throw new TypeError("PushEvent requires a type");
+        super(type, init);
+        const source = Object(init);
+        pushEventState.set(this, {
+          data: source.data === undefined || source.data === null ? null : new PushMessageData(pushSubscriptionToken, source.data),
+          notification: source.notification ?? null,
+        });
+      }
+      get data() { return pushEventState.get(this)?.data; }
+      get notification() { return pushEventState.get(this)?.notification; }
+      get [Symbol.toStringTag]() { return "PushEvent"; }
+    }
+    class PushSubscriptionChangeEvent extends ExtendableEvent {
+      constructor(type, init = {}) {
+        if (arguments.length === 0) throw new TypeError("PushSubscriptionChangeEvent requires a type");
+        super(type, init);
+        const source = Object(init);
+        pushChangeState.set(this, {
+          newSubscription: source.newSubscription ?? null,
+          oldSubscription: source.oldSubscription ?? null,
+        });
+      }
+      get newSubscription() { return pushChangeState.get(this)?.newSubscription; }
+      get oldSubscription() { return pushChangeState.get(this)?.oldSubscription; }
+      get [Symbol.toStringTag]() { return "PushSubscriptionChangeEvent"; }
+    }
+    globalThis.PushMessageData = PushMessageData;
+    globalThis.PushEvent = PushEvent;
+    globalThis.PushSubscriptionChangeEvent = PushSubscriptionChangeEvent;
     __omoikane_service_worker_lifecycle.cookiechange = function(data) {
       const event = new ExtendableCookieChangeEvent("cookiechange", data);
+      const state = states.get(event);
+      state.trusted = state.dispatching = true;
+      event.isTrusted = true;
+      try { globalThis.dispatchEvent(event); }
+      finally {
+        state.dispatching = false;
+        complete(event);
+      }
+    };
+    __omoikane_service_worker_lifecycle.push = function(data) {
+      const event = new PushEvent("push", {data: data === null ? null : Uint8Array.from(data)});
+      const state = states.get(event);
+      state.trusted = state.dispatching = true;
+      event.isTrusted = true;
+      try { globalThis.dispatchEvent(event); }
+      finally {
+        state.dispatching = false;
+        complete(event);
+      }
+    };
+    __omoikane_service_worker_lifecycle.pushsubscriptionchange = function(data) {
+      const event = new PushSubscriptionChangeEvent("pushsubscriptionchange", {
+        newSubscription: makePushSubscription(data.newSubscription ?? null, registration.scope),
+        oldSubscription: makePushSubscription(data.oldSubscription ?? null, registration.scope),
+      });
       const state = states.get(event);
       state.trusted = state.dispatching = true;
       event.isTrusted = true;
@@ -37650,7 +38557,7 @@ let omoikaneUserActivationState;
       states.get(event).dispatching = false;
       complete(event);
     };
-    for (const type of ["install", "activate", "cookiechange"]) {
+    for (const type of ["install", "activate", "cookiechange", "push", "pushsubscriptionchange"]) {
       let handler = null;
       Object.defineProperty(globalThis, "on" + type, {
         configurable: true,

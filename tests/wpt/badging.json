@@ -1,0 +1,26 @@
+{
+  "tests": [
+    { "path": "badging/badge-success.https.any.js", "server": "wptserve" },
+    { "path": "badging/badge-error.https.any.js", "server": "wptserve" },
+    { "path": "badging/idlharness.https.any.js", "server": "wptserve" },
+    { "path": "badging/non-fully-active.https.html", "server": "wptserve" },
+    {
+      "path": "badging/setAppBadge_cross_origin.sub.https.html",
+      "server": "wptserve",
+      "known_failure": {
+        "status": "FAIL",
+        "reason": "The pinned upstream test calls non-standard iframe.postMessage instead of iframe.contentWindow.postMessage",
+        "issue": "#1676",
+        "expires": "2027-02-01",
+        "failed_subtests": [
+          "Test that calling setAppBadge in a cross-origin iframe throws a SecurityError",
+          "Test that calling clearAppBadge in a cross-origin iframe throws a SecurityError",
+          "Test that calling setAppBadge in a same-origin iframe succeeds",
+          "Test that calling clearAppBadge in a same-origin iframe succeeds",
+          "Test calling setAppBadge and clearAppBadge in a same-origin iframe after setting badge on the top level frame",
+          "Test badge behavior in multiple same-origin iframes"
+        ]
+      }
+    }
+  ]
+}
