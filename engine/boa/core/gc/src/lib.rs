@@ -1062,6 +1062,33 @@ impl Collector {
         }
     }
 
+    /// Seeds one minor mark pass, omitting only repeated root/remembered seeds.
+    fn seed_minor_ephemerons(tracer: &mut Tracer) {
+        EPHEMERON_ROOT_REGISTRY.with(|roots| {
+            for pointer in roots.borrow().iter().copied() {
+                tracer.enqueue_ephemeron_root(pointer);
+            }
+        });
+        TEMPORARY_EPHEMERON_ROOTS.with(|roots| {
+            for pointer in roots.borrow().iter().copied() {
+                tracer.enqueue_ephemeron_root(pointer);
+            }
+        });
+        REMEMBERED_EPHEMERONS.with(|remembered| {
+            EPHEMERON_ROOT_REGISTRY.with(|roots| {
+                let roots = roots.borrow();
+                for pointer in remembered.borrow().iter().copied() {
+                    // The initial root loop already queued this allocation.
+                    // Keep its original dispatch pointer; no Trace or user
+                    // callback can run between these seed loops.
+                    if !roots.contains(&pointer) {
+                        tracer.enqueue_ephemeron(pointer);
+                    }
+                }
+            });
+        });
+    }
+
     /// Seeds and solves the minor strong/ephemeron fixed point.
     fn mark_minor(weak_maps: &[ErasedWeakMapBoxPointer]) -> Vec<EphemeronPointer> {
         let mut tracer = Tracer::new_minor();
@@ -1124,23 +1151,7 @@ impl Collector {
                 }
             }
         });
-        EPHEMERON_ROOT_REGISTRY.with(|roots| {
-            for pointer in roots.borrow().iter().copied() {
-                tracer.enqueue_ephemeron_root(pointer);
-            }
-        });
-        TEMPORARY_EPHEMERON_ROOTS.with(|roots| {
-            for pointer in roots.borrow().iter().copied() {
-                tracer.enqueue_ephemeron_root(pointer);
-            }
-        });
-        REMEMBERED_EPHEMERONS.with(|remembered| {
-            for pointer in remembered.borrow().iter().copied() {
-                // SAFETY: remembered pointers are retained while their
-                // allocations are valid; old entries are discarded below.
-                tracer.enqueue_ephemeron(pointer);
-            }
-        });
+        Self::seed_minor_ephemerons(&mut tracer);
 
         // Weak maps are host-side registries rather than strong heap edges, so
         // their backing ephemerons must seed a minor collection explicitly.

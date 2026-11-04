@@ -6,6 +6,7 @@ mod ephemeron_identity;
 mod erased;
 mod generational;
 mod rooted;
+mod seed_overlap;
 mod weak;
 mod weak_map;
 
