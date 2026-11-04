@@ -597,3 +597,170 @@ fn web_serial_old_object_callbacks_cannot_use_a_replacement_connection() {
         .unwrap();
     assert_eq!(serial_status(&mut runtime), "11");
 }
+
+#[test]
+fn web_serial_signal_updates_preserve_omitted_outputs() {
+    let (mut runtime, provider) = opened_owned_runtime();
+    for (script, expected) in [
+        ("{dataTerminalReady:true,break:true}", (true, false, true)),
+        ("{requestToSend:true}", (true, true, true)),
+        ("{requestToSend:false}", (true, false, true)),
+        ("{dataTerminalReady:null}", (false, false, true)),
+        (
+            "{break:false,requestToSend:undefined}",
+            (false, false, false),
+        ),
+    ] {
+        runtime.eval(&format!(
+            "serialStatus='pending';serialPort.setSignals({script}).then(()=>serialStatus='ok',e=>serialStatus=e.name);"
+        )).unwrap();
+        assert_eq!(serial_status(&mut runtime), "ok");
+        assert_eq!(provider.output_signals_for_test("owned"), expected);
+    }
+}
+
+#[test]
+fn web_serial_empty_signal_updates_never_reach_provider() {
+    let (mut runtime, provider) = opened_owned_runtime();
+    provider.fail_next(SerialError {
+        name: "NetworkError".into(),
+        message: "pending".into(),
+    });
+    for input in [
+        "{}",
+        "{break:undefined,dataTerminalReady:undefined,requestToSend:undefined}",
+        "null",
+    ] {
+        runtime.eval(&format!(
+            "serialStatus='pending';serialPort.setSignals({input}).then(()=>serialStatus='accepted',e=>serialStatus=e.name);"
+        )).unwrap();
+        assert_eq!(serial_status(&mut runtime), "TypeError");
+        assert_eq!(
+            provider.output_signals_for_test("owned"),
+            (false, false, false)
+        );
+    }
+    runtime.eval("serialStatus='pending';serialPort.setSignals({requestToSend:true}).then(()=>serialStatus='accepted',e=>serialStatus=e.name);").unwrap();
+    assert_eq!(serial_status(&mut runtime), "NetworkError");
+}
+
+#[test]
+fn web_serial_signal_wire_preserves_presence_and_rejects_null() {
+    let absent: SerialOutputSignals = serde_json::from_str("{}").unwrap();
+    assert_eq!(absent, SerialOutputSignals::default());
+    assert_eq!(
+        serde_json::to_value(&absent).unwrap(),
+        serde_json::json!({})
+    );
+    for value in [false, true] {
+        let signals: SerialOutputSignals =
+            serde_json::from_value(serde_json::json!({"requestToSend": value})).unwrap();
+        assert_eq!(signals.request_to_send, Some(value));
+        assert_eq!(signals.data_terminal_ready, None);
+        assert_eq!(
+            serde_json::to_value(&signals).unwrap(),
+            serde_json::json!({"requestToSend": value})
+        );
+    }
+    for invalid in [
+        r#"{"break":null}"#,
+        r#"{"dataTerminalReady":null}"#,
+        r#"{"requestToSend":null}"#,
+        r#"{"other":true}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<SerialOutputSignals>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn web_serial_signal_dictionary_reads_inherited_members_once_in_order() {
+    let (mut runtime, provider) = opened_owned_runtime();
+    runtime
+        .eval(
+            r#"
+        serialStatus='pending';
+        const order=[];
+        const inherited={
+            get break(){order.push('break');return true;},
+            get dataTerminalReady(){order.push('dtr');return true;},
+            get requestToSend(){order.push('rts');return undefined;},
+        };
+        serialPort.setSignals(Object.create(inherited)).then(
+            ()=>serialStatus=order.join(':'),e=>serialStatus=e.name);
+    "#,
+        )
+        .unwrap();
+    assert_eq!(serial_status(&mut runtime), "break:dtr:rts");
+    assert_eq!(
+        provider.output_signals_for_test("owned"),
+        (true, false, true)
+    );
+}
+
+#[test]
+fn web_serial_signal_getter_cannot_modify_reopened_connection() {
+    let (mut runtime, provider) = opened_owned_runtime();
+    runtime
+        .eval(
+            r#"
+        serialStatus='pending';
+        (async()=>{
+            let reopened;
+            const result=await serialPort.setSignals({
+                get break(){
+                    reopened=serialPort.close().then(()=>serialPort.open({baudRate:9600}));
+                    return true;
+                },
+                requestToSend:true,
+            }).then(()=>'accepted',e=>e.name);
+            await reopened;
+            serialStatus=result;
+        })().catch(e=>serialStatus='outer:'+e.name);
+    "#,
+        )
+        .unwrap();
+    assert_eq!(serial_status(&mut runtime), "InvalidStateError");
+    assert_eq!(
+        provider.output_signals_for_test("owned"),
+        (false, false, false)
+    );
+    runtime.eval("serialStatus='pending';serialPort.setSignals({dataTerminalReady:true}).then(()=>serialStatus='ok',e=>serialStatus=e.name);").unwrap();
+    assert_eq!(serial_status(&mut runtime), "ok");
+    assert_eq!(
+        provider.output_signals_for_test("owned"),
+        (true, false, false)
+    );
+}
+
+#[test]
+fn web_serial_signal_normalization_does_not_invoke_prototype_setters() {
+    let (mut runtime, provider) = opened_owned_runtime();
+    runtime.eval(r#"
+        serialStatus='pending';
+        (async()=>{
+            let called=0;
+            const names=['break','dataTerminalReady','requestToSend'];
+            const descriptors=names.map(name=>Object.getOwnPropertyDescriptor(Object.prototype,name));
+            try {
+                for(const name of names) Object.defineProperty(Object.prototype,name,{
+                    configurable:true,set(){called++;throw new Error('prototype setter');}
+                });
+                await serialPort.setSignals({requestToSend:true});
+                serialStatus=String(called);
+            } finally {
+                names.forEach((name,index)=>{
+                    if(descriptors[index]) Object.defineProperty(Object.prototype,name,descriptors[index]);
+                    else delete Object.prototype[name];
+                });
+            }
+        })().catch(e=>serialStatus='outer:'+e.name);
+    "#).unwrap();
+    assert_eq!(serial_status(&mut runtime), "0");
+    assert_eq!(
+        provider.output_signals_for_test("owned"),
+        (false, true, false)
+    );
+}
