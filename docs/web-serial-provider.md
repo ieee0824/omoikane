@@ -45,3 +45,25 @@ There is no compatibility default that silently forwards token-bearing calls to
 the old origin/port-only interface: it cannot provide the required reconnect
 isolation. The deterministic provider validates under its port mutex and clears
 current sessions on disconnect while keeping its identity allocator monotonic.
+
+## Output signal updates (#1711)
+
+`SerialOutputSignals` is a public, re-exported Rust type. Changing its three
+members from `bool` to `Option<bool>` is a breaking source and serialization
+change even though the provider method name and argument type name stay the same.
+External struct literals must use `Some(true)` or `Some(false)` for requested
+changes and `None` for untouched outputs. A default value is an empty update,
+not a request to lower every line. The JavaScript/native bridge rejects an empty
+update before calling a provider.
+
+Providers must preserve omitted outputs, applying specified values in the Web
+Serial order: dataTerminalReady, requestToSend, break. Keep current device state
+as concrete booleans; optional values belong only at the request boundary. This
+does not imply atomic hardware changes; existing session checks remain required.
+
+Serialization omits `None`; deserialization maps missing members to `None`,
+accepts only boolean values for present members, and rejects explicit JSON null
+and unknown fields. This differs from JavaScript dictionary conversion:
+`setSignals({requestToSend:null})` converts null to false and sends
+`Some(false)`, while undefined is omitted. Getter conversion occurs before
+method state checks; the original session is revalidated afterward.

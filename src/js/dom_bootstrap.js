@@ -27472,12 +27472,22 @@ let omoikaneUserActivationState;
       const session = state.session;
       try {
         const source = value == null ? {} : Object(value);
+        // Read each dictionary member once, in Web IDL lexicographic order.
+        const breakValue = source.break;
+        const dtrValue = source.dataTerminalReady;
+        const rtsValue = source.requestToSend;
+        // Own data properties avoid author-defined prototype setters. Undefined
+        // members are omitted when the private bridge serializes this object.
         const signals = {
-          dataTerminalReady: Boolean(source.dataTerminalReady), requestToSend: Boolean(source.requestToSend),
-          break: Boolean(source.break),
+          break: breakValue === undefined ? undefined : Boolean(breakValue),
+          dataTerminalReady: dtrValue === undefined ? undefined : Boolean(dtrValue),
+          requestToSend: rtsValue === undefined ? undefined : Boolean(rtsValue),
         };
         if (!state.open || state.closing || state.session !== session) {
           throw new DOMException("The serial port is not open", "InvalidStateError");
+        }
+        if (breakValue === undefined && dtrValue === undefined && rtsValue === undefined) {
+          throw new TypeError("At least one serial output signal is required");
         }
         serialNative("setSignals", state.id, signals, session);
         return Promise.resolve(undefined);

@@ -51,17 +51,65 @@ pub struct SerialOptions {
     pub flow_control: String,
 }
 
-/// Host control-line output values.
+/// Requested control-line changes. `None` preserves the current output.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SerialOutputSignals {
-    /// Data Terminal Ready output.
-    pub data_terminal_ready: bool,
-    /// Request To Send output.
-    pub request_to_send: bool,
-    /// Break output.
-    #[serde(rename = "break")]
-    pub break_signal: bool,
+    /// Data Terminal Ready change; `None` preserves the current output.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_signal_change"
+    )]
+    pub data_terminal_ready: Option<bool>,
+    /// Request To Send change; `None` preserves the current output.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_signal_change"
+    )]
+    pub request_to_send: Option<bool>,
+    /// Break change; `None` preserves the current output.
+    #[serde(
+        rename = "break",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_signal_change"
+    )]
+    pub break_signal: Option<bool>,
+}
+
+fn deserialize_signal_change<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
+    bool::deserialize(deserializer).map(Some)
+}
+
+impl SerialOutputSignals {
+    fn is_empty(&self) -> bool {
+        self.data_terminal_ready.is_none()
+            && self.request_to_send.is_none()
+            && self.break_signal.is_none()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SerialOutputState {
+    data_terminal_ready: bool,
+    request_to_send: bool,
+    break_signal: bool,
+}
+
+impl SerialOutputState {
+    fn updated(self, changes: &SerialOutputSignals) -> Self {
+        Self {
+            data_terminal_ready: changes
+                .data_terminal_ready
+                .unwrap_or(self.data_terminal_ready),
+            request_to_send: changes.request_to_send.unwrap_or(self.request_to_send),
+            break_signal: changes.break_signal.unwrap_or(self.break_signal),
+        }
+    }
 }
 
 /// Device control-line input values.
@@ -178,7 +226,7 @@ struct DeterministicPort {
     reads: VecDeque<Vec<u8>>,
     writes: Vec<Vec<u8>>,
     input_signals: SerialInputSignals,
-    output_signals: SerialOutputSignals,
+    output_signals: SerialOutputState,
 }
 
 /// Deterministic in-memory serial backend for headless embedders and tests.
@@ -201,7 +249,7 @@ impl DeterministicSerialProvider {
                 reads: VecDeque::new(),
                 writes: Vec::new(),
                 input_signals: SerialInputSignals::default(),
-                output_signals: SerialOutputSignals::default(),
+                output_signals: SerialOutputState::default(),
             },
         );
     }
@@ -231,6 +279,17 @@ impl DeterministicSerialProvider {
             .get(id)
             .map(|port| port.writes.clone())
             .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(super) fn output_signals_for_test(&self, id: &str) -> (bool, bool, bool) {
+        let ports = self.ports.lock().unwrap();
+        let value = &ports.get(id).unwrap().output_signals;
+        (
+            value.data_terminal_ready,
+            value.request_to_send,
+            value.break_signal,
+        )
     }
 
     /// Makes the next fallible provider operation return `error`.
@@ -400,7 +459,7 @@ impl SerialProvider for DeterministicSerialProvider {
             return Err(invalid_state("The serial port is not open"));
         }
         self.take_error()?;
-        port.output_signals = signals.clone();
+        port.output_signals = port.output_signals.updated(signals);
         Ok(())
     }
 
@@ -601,6 +660,17 @@ fn validate_info(info: SerialPortInfo) -> Result<SerialPortInfo, SerialError> {
     }
 }
 
+fn parse_output_signals(json: &str) -> JsResult<SerialOutputSignals> {
+    let signals: SerialOutputSignals = serde_json::from_str(json)
+        .map_err(|_| JsNativeError::typ().with_message("Invalid serial signals"))?;
+    if signals.is_empty() {
+        return Err(JsNativeError::typ()
+            .with_message("At least one serial output signal is required")
+            .into());
+    }
+    Ok(signals)
+}
+
 fn operation_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let operation = string_argument(args.first(), "", context)?;
     let document_id = parse_node_id(args.get(1), context)?;
@@ -720,8 +790,7 @@ fn operation_native(_: &JsValue, args: &[JsValue], context: &mut Context) -> JsR
                 )
                 .map(|signals| serde_json::json!({"signals":signals})),
             "setSignals" => {
-                let signals: SerialOutputSignals = serde_json::from_str(&json)
-                    .map_err(|_| JsNativeError::typ().with_message("Invalid serial signals"))?;
+                let signals = parse_output_signals(&json)?;
                 provider
                     .set_signals(
                         &origin,
