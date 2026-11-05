@@ -144,7 +144,12 @@ pub(crate) fn fold_code_point(cu: u32, unicode: bool) -> u32 {
     if unicode {
         return fold(cu);
     }
-    uppercase(cu)
+    let mapped = uppercase(cu);
+    if cu >= 128 && mapped < 128 {
+        cu
+    } else {
+        mapped
+    }
 }
 
 pub fn fold(cu: u32) -> u32 {
@@ -193,8 +198,8 @@ fn uppercase(cu: u32) -> u32 {
 
 // Add all folded characters in the given interval to the given code point set.
 // This skips characters which fold to themselves.
-fn fold_interval(iv: Interval, recv: &mut CodePointSet) {
-    let overlaps = FOLDS.equal_range_by(|tr| {
+fn fold_interval(iv: Interval, recv: &mut CodePointSet, mappings: &[FoldRange], unicode: bool) {
+    let overlaps = mappings.equal_range_by(|tr| {
         if tr.first() > iv.last {
             Ordering::Greater
         } else if tr.last() < iv.first {
@@ -203,7 +208,7 @@ fn fold_interval(iv: Interval, recv: &mut CodePointSet) {
             Ordering::Equal
         }
     });
-    for fr in &FOLDS[overlaps] {
+    for fr in &mappings[overlaps] {
         debug_assert!(
             fr.transformed_from().overlaps(iv),
             "Interval does not overlap transform"
@@ -217,7 +222,7 @@ fn fold_interval(iv: Interval, recv: &mut CodePointSet) {
             // Optimization: when modulo is 1, every character in range gets transformed
             for cu in first_trans..(last_trans + 1) {
                 let cs = fr.add_delta(cu);
-                if cs != cu {
+                if cs != cu && (unicode || cu < 128 || cs >= 128) {
                     recv.add_one(cs);
                 }
             }
@@ -229,7 +234,9 @@ fn fold_interval(iv: Interval, recv: &mut CodePointSet) {
             let mut cu = start_aligned;
             while cu <= last_trans {
                 let cs = fr.add_delta(cu);
-                recv.add_one(cs);
+                if unicode || cu < 128 || cs >= 128 {
+                    recv.add_one(cs);
+                }
                 cu += modulo;
             }
         }
@@ -238,10 +245,10 @@ fn fold_interval(iv: Interval, recv: &mut CodePointSet) {
 
 /// Find all characters that fold into the given interval and add them to the given code point set.
 /// This skips characters which fold to themselves.
-fn unfold_interval(iv: Interval, recv: &mut CodePointSet) {
+fn unfold_interval(iv: Interval, recv: &mut CodePointSet, mappings: &[FoldRange], unicode: bool) {
     // Note: We still need to check all ranges because the relationship between
     // transformed_from and transformed_to intervals can be complex
-    for tr in FOLDS.iter() {
+    for tr in mappings.iter() {
         if !iv.overlaps(tr.transformed_to()) {
             continue;
         }
@@ -252,7 +259,7 @@ fn unfold_interval(iv: Interval, recv: &mut CodePointSet) {
 
         let mut process_cp = |cp| {
             let tcp = tr.apply(cp);
-            if tcp != cp && iv.contains(tcp) {
+            if tcp != cp && iv.contains(tcp) && (unicode || cp < 128 || tcp >= 128) {
                 recv.add_one(cp);
             }
         };
@@ -302,7 +309,7 @@ pub fn unfold_char(c: u32) -> Vec<u32> {
 
 pub(crate) fn unfold_uppercase_char(c: u32) -> Vec<u32> {
     let mut res = vec![c];
-    let fcp = uppercase(c);
+    let fcp = fold_code_point(c, false);
     if fcp != c {
         res.push(fcp);
     }
@@ -312,7 +319,7 @@ pub(crate) fn unfold_uppercase_char(c: u32) -> Vec<u32> {
         }
         for cp in tr.transformed_from().codepoints() {
             let tcp = tr.apply(cp);
-            if tcp == fcp {
+            if tcp == fcp && (cp < 128 || tcp >= 128) {
                 res.push(cp);
             }
         }
@@ -323,16 +330,29 @@ pub(crate) fn unfold_uppercase_char(c: u32) -> Vec<u32> {
 }
 
 // Fold every character in \p input, then find all the prefolds.
-pub fn add_icase_code_points(mut input: CodePointSet) -> CodePointSet {
+pub fn add_icase_code_points(input: CodePointSet) -> CodePointSet {
+    add_case_insensitive_code_points(input, true)
+}
+
+/// Expands a class using the same canonicalization as literal and backreference matching.
+pub(crate) fn add_case_insensitive_code_points(
+    mut input: CodePointSet,
+    unicode: bool,
+) -> CodePointSet {
+    let mappings = if unicode {
+        &FOLDS[..]
+    } else {
+        &TO_UPPERCASE[..]
+    };
     let mut folded = input.clone();
     for iv in input.intervals() {
-        fold_interval(*iv, &mut folded)
+        fold_interval(*iv, &mut folded, mappings, unicode)
     }
 
     // Reuse input storage.
     input.clone_from(&folded);
     for iv in folded.intervals() {
-        unfold_interval(*iv, &mut input);
+        unfold_interval(*iv, &mut input, mappings, unicode);
     }
     input
 }
@@ -657,7 +677,7 @@ mod tests {
                     }
                 }
                 let mut cps = CodePointSet::default();
-                fold_interval(Interval { first, last }, &mut cps);
+                fold_interval(Interval { first, last }, &mut cps, &FOLDS[..], true);
                 assert_eq!(cps.intervals(), expected.intervals());
 
                 from = last;
