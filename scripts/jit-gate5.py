@@ -144,6 +144,25 @@ def ffi_smoke(library, destination):
     write(destination, {"status": "passed", "library_sha256": digest(library), "cases": cases})
 
 
+def retain_previous_native_report(folder):
+    """Preserve earlier bytes before requiring fresh native evidence from this run."""
+    source = Path(".artifacts/jit-native/native-report.json")
+    if source.exists():
+        previous = folder / "native-before-run.json"
+        shutil.copyfile(source, previous)
+        assert digest(source) == digest(previous), "previous native report copy changed"
+        source.unlink()
+
+
+def preserve_native_report(folder, report):
+    """Save full-suite evidence before later steps; retain copy errors separately."""
+    try:
+        shutil.copyfile(".artifacts/jit-native/native-report.json", folder / "native.json")
+    except OSError as error:
+        report["native_report_error"] = f"{type(error).__name__}: {error}"
+    write(folder / "result.json", report)
+
+
 def run_target(kind, target, root):
     folder = (root / target / kind).resolve()
     folder.mkdir(parents=True, exist_ok=False)
@@ -177,9 +196,14 @@ def run_target(kind, target, root):
                     ("WPT_ROOT", "WPT_REQUIRED", "WPT_MANIFEST", "WPT_REPORT", "WPT_JUNIT",
                      "OMOIKANE_JIT_GATE_REPORT_DIR", "OMOIKANE_WEB_API_REPORT", "RUST_TEST_THREADS", "CI")})
             run("fetch-wpt", ["bash", "scripts/fetch-wpt.sh"])
+            retain_previous_native_report(folder)
             suite_steps = [("full-suite", SUITE_COMMAND), *SERIAL_SUITE_COMMANDS]
-            failed_steps = [label for label, command in suite_steps
-                            if run(label, command, required=False)]
+            failed_steps = []
+            for label, command in suite_steps:
+                if run(label, command, required=False):
+                    failed_steps.append(label)
+                if label == "full-suite":
+                    preserve_native_report(folder, report)
             report["test_results"] = re.findall(
                 r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored",
                 "\n".join((folder / f"{label}.log").read_text(errors="replace")
@@ -188,7 +212,8 @@ def run_target(kind, target, root):
                 raise RuntimeError(f"suite steps failed: {', '.join(failed_steps)}")
             assert report["test_results"] and sum(int(row[0]) for row in report["test_results"]) > 0
             assert all(f == i == "0" for _, f, i in report["test_results"])
-            shutil.copyfile(".artifacts/jit-native/native-report.json", folder / "native.json")
+            if "native_report_error" in report:
+                raise RuntimeError("native report could not be preserved")
         else:
             library, archive_name = TARGETS[target]
             target_dir = Path(os.environ.get("CARGO_TARGET_DIR", "target")).resolve()

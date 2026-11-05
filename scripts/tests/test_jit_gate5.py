@@ -181,7 +181,8 @@ class GateTests(unittest.TestCase):
             failed = command == gate.SUITE_COMMAND or command == gate.SERIAL_SUITE_COMMANDS[-1][1]
             return SimpleNamespace(returncode=int(failed))
 
-        with patch.object(gate, "identity", return_value=suite_identity), \
+        with contextlib.chdir(self.root), \
+                patch.object(gate, "identity", return_value=suite_identity), \
                 patch.object(gate.subprocess, "run", side_effect=execute), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertFalse(gate.run_target("suite", target, folder))
@@ -231,6 +232,11 @@ class GateTests(unittest.TestCase):
         duplicate["cases"][-1] = duplicate["cases"][0]
         self.assertFalse(gate.valid_probe(duplicate, target))
 
+    def test_malformed_native_report_never_passes(self):
+        native = self.root / next(iter(gate.TARGETS)) / "suite/native.json"
+        native.write_bytes(b'{"status":')
+        self.assertFalse(self.decision())
+
     def test_regressions_or_different_library_never_pass(self):
         target = next(iter(gate.TARGETS))
         for name, altered in (("suite/acid3.json", {"faithful": {"score": 99, "total": 100}}),
@@ -242,6 +248,141 @@ class GateTests(unittest.TestCase):
             gate.write(path, altered)
             self.assertFalse(self.decision())
             path.write_bytes(original)
+
+
+
+
+class SuiteNativeEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+        self.target = next(iter(gate.TARGETS))
+        self.root = self.directory / 'gate'
+        self.folder = self.root / self.target / 'suite'
+        self.work = self.directory / 'work'
+        self.work.mkdir()
+        self.native = self.work / '.artifacts/jit-native/native-report.json'
+        self.identity = dict(revision='a' * 40, lock_sha256='b' * 64, target=self.target)
+        (self.root / 'inputs').mkdir(parents=True)
+        gate.write(self.root / 'inputs/identity.json', self.identity)
+
+    def execute_suite(self, *, payload=b'{"status":"passed"}\n', failed=False,
+                      interrupted=False, copy_error=False):
+        saved_before_sensitive = []
+
+        def execute(command, **kwargs):
+            if command == gate.SUITE_COMMAND and payload is not None:
+                self.native.parent.mkdir(parents=True, exist_ok=True)
+                self.native.write_bytes(payload)
+            if command == gate.SERIAL_SUITE_COMMANDS[0][1]:
+                saved_before_sensitive.append((self.folder / 'native.json').exists())
+            if interrupted and command == gate.SERIAL_SUITE_COMMANDS[-1][1]:
+                raise TimeoutError('later WPT interrupted')
+            if command != ['bash', 'scripts/fetch-wpt.sh']:
+                kwargs['stdout'].write('test result: ok. 1 passed; 0 failed; 0 ignored\n')
+            return SimpleNamespace(returncode=int(failed and command == gate.SUITE_COMMAND))
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(contextlib.chdir(self.work))
+            stack.enter_context(patch.object(gate, 'identity', return_value=self.identity))
+            stack.enter_context(patch.object(gate.subprocess, 'run', side_effect=execute))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            if copy_error:
+                stack.enter_context(patch.object(gate.shutil, 'copyfile', side_effect=OSError('copy denied')))
+            passed = gate.run_target('suite', self.target, self.root)
+        return passed, gate.read(self.folder / 'result.json'), saved_before_sensitive
+
+    def test_legacy_suite_fixture_preserves_callers_existing_report(self):
+        caller = self.directory / 'caller'
+        sentinel = caller / '.artifacts/jit-native/native-report.json'
+        sentinel.parent.mkdir(parents=True)
+        original = b'caller native evidence must survive unchanged\n'
+        sentinel.write_bytes(original)
+        legacy = GateTests('test_parallel_failure_still_runs_every_sensitive_test')
+        legacy.setUp()
+        try:
+            with contextlib.chdir(caller):
+                legacy.test_parallel_failure_still_runs_every_sensitive_test()
+        finally:
+            legacy.doCleanups()
+        self.assertEqual(sentinel.read_bytes(), original)
+
+    def test_success_saves_original_bytes_before_sensitive_steps(self):
+        payload = b'{ "status": "passed" }\n'
+        passed, result, saved = self.execute_suite(payload=payload)
+        self.assertTrue(passed)
+        self.assertEqual(result['status'], 'passed')
+        self.assertEqual((self.folder / 'native.json').read_bytes(), payload)
+        self.assertEqual(saved, [True])
+
+    def test_failed_full_suite_preserves_native_and_original_failure(self):
+        passed, result, saved = self.execute_suite(failed=True)
+        self.assertFalse(passed)
+        self.assertIn('full-suite', result['error'])
+        self.assertEqual(result['steps'][1]['exit'], 1)
+        self.assertTrue((self.folder / 'native.json').is_file())
+        self.assertEqual(saved, [True])
+
+    def test_failed_suite_without_report_remains_failed(self):
+        passed, result, _ = self.execute_suite(payload=None, failed=True)
+        self.assertFalse(passed)
+        self.assertIn('full-suite', result['error'])
+        self.assertFalse((self.folder / 'native.json').exists())
+
+    def test_missing_report_cannot_make_successful_steps_pass(self):
+        passed, result, _ = self.execute_suite(payload=None)
+        self.assertFalse(passed)
+        self.assertEqual(result['status'], 'failed')
+        self.assertFalse((self.folder / 'native.json').exists())
+
+    def test_copy_error_keeps_step_failure_and_storage_failure(self):
+        passed, result, _ = self.execute_suite(failed=True, copy_error=True)
+        self.assertFalse(passed)
+        self.assertIn('full-suite', result['error'])
+        self.assertIn('copy denied', result['native_report_error'])
+        self.assertEqual(result['steps'][1]['exit'], 1)
+
+    def test_copy_error_cannot_make_successful_steps_pass(self):
+        passed, result, _ = self.execute_suite(copy_error=True)
+        self.assertFalse(passed)
+        self.assertIn('copy denied', result['native_report_error'])
+        self.assertTrue(all(step['exit'] == 0 for step in result['steps']))
+
+    def test_partial_native_bytes_are_preserved_for_failed_suite(self):
+        payload = b'{"status":'
+        passed, result, _ = self.execute_suite(payload=payload, failed=True)
+        self.assertFalse(passed)
+        self.assertIn('full-suite', result['error'])
+        self.assertEqual((self.folder / 'native.json').read_bytes(), payload)
+
+    def test_later_interruption_keeps_already_saved_report(self):
+        passed, result, saved = self.execute_suite(interrupted=True)
+        self.assertFalse(passed)
+        self.assertIn('later WPT interrupted', result['error'])
+        self.assertTrue((self.folder / 'native.json').is_file())
+        self.assertEqual(saved, [True])
+
+    def test_previous_report_copy_failure_does_not_remove_original(self):
+        self.native.parent.mkdir(parents=True)
+        previous = b'previous native evidence\n'
+        self.native.write_bytes(previous)
+        passed, result, _ = self.execute_suite(copy_error=True)
+        self.assertFalse(passed)
+        self.assertIn('copy denied', result['error'])
+        self.assertEqual(self.native.read_bytes(), previous)
+        self.assertEqual([step['name'] for step in result['steps']], ['fetch-wpt'])
+
+    def test_preexisting_report_is_retained_but_not_current_evidence(self):
+        self.native.parent.mkdir(parents=True)
+        previous = b'previous run report\n'
+        self.native.write_bytes(previous)
+        passed, result, _ = self.execute_suite(payload=None, failed=True)
+        self.assertFalse(passed)
+        self.assertIn('full-suite', result['error'])
+        self.assertEqual((self.folder / 'native-before-run.json').read_bytes(), previous)
+        self.assertFalse((self.folder / 'native.json').exists())
 
 
 if __name__ == "__main__":
