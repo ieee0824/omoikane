@@ -1115,16 +1115,27 @@ impl<'a> InputIndexer for Utf16Input<'a> {
     }
 }
 
+// Both encodings use one code unit per element. Keep Unicode character
+// properties even for Latin1: case folding can relate a byte to non-Latin1 text.
+#[cfg(feature = "utf16")]
+/// A borrowed sequence of UCS-2 code units.
+pub type Ucs2Input<'a> = CodeUnitInput<'a, u16>;
+#[cfg(feature = "utf16")]
+/// A borrowed sequence of Latin1 code units using full Unicode character properties.
+pub type Latin1Input<'a> = CodeUnitInput<'a, u8>;
+
 #[cfg(feature = "utf16")]
 #[derive(Debug, Copy, Clone)]
-pub struct Ucs2Input<'a> {
-    input: &'a [u16],
+/// A short-lived matching view over fixed-width code units.
+pub struct CodeUnitInput<'a, T> {
+    input: &'a [T],
     unicode: bool,
 }
 
 #[cfg(feature = "utf16")]
-impl<'a> Ucs2Input<'a> {
-    pub fn new(s: &'a [u16], unicode: bool) -> Self {
+impl<'a, T: Copy + Into<u32> + PartialEq + core::fmt::Debug> CodeUnitInput<'a, T> {
+    /// Borrows the complete input for the duration of matching.
+    pub fn new(s: &'a [T], unicode: bool) -> Self {
         Self { input: s, unicode }
     }
 
@@ -1136,7 +1147,7 @@ impl<'a> Ucs2Input<'a> {
 }
 
 #[cfg(feature = "utf16")]
-impl<'a> InputIndexer for Ucs2Input<'a> {
+impl<'a, T: Copy + Into<u32> + PartialEq + core::fmt::Debug> InputIndexer for CodeUnitInput<'a, T> {
     type Position = IndexPosition<'a>;
     type Element = u32;
     type CharProps = matchers::Utf16CharProperties;
@@ -1148,11 +1159,11 @@ impl<'a> InputIndexer for Ucs2Input<'a> {
     }
 
     #[inline(always)]
-    fn subinput(&self, range: ops::Range<Self::Position>) -> Ucs2Input<'a> {
+    fn subinput(&self, range: ops::Range<Self::Position>) -> Self {
         self.debug_assert_valid_pos(range.start);
         self.debug_assert_valid_pos(range.end);
         debug_assert!(range.end >= range.start);
-        Ucs2Input {
+        Self {
             input: &self.input[core::ops::Range {
                 start: self.pos_to_offset(range.start),
                 end: self.pos_to_offset(range.end),
