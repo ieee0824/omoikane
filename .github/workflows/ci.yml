@@ -180,15 +180,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           # Every partition builds with the same features and dependencies.
-          # The integration partition builds all of them (tests, examples,
-          # bins and docs), so only it writes the shared entry, on main and
+          # The build partition covers test and dev profiles (examples, bins,
+          # docs and build), so only it writes the shared entry, on main and
           # after a successful run (#1451). Omoikane itself is rebuilt for
           # each revision in every partition either way.
           shared-key: gate4-parallel-v2
-          save-if: ${{ matrix.shard == 'integration' && github.ref == 'refs/heads/main' }}
+          save-if: ${{ matrix.shard == 'build' && github.ref == 'refs/heads/main' }}
           cache-workspace-crates: true
       - uses: actions/cache@v4
-        if: matrix.shard == 'compatibility' || matrix.shard == 'integration'
+        if: matrix.shard == 'compatibility' || startsWith(matrix.shard, 'integration-') || matrix.shard == 'build'
         with:
           path: .cache/wpt
           key: wpt-${{ hashFiles('tests/wpt/revision.txt') }}
@@ -197,7 +197,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y fonts-dejavu fonts-liberation fonts-noto-core fonts-noto-cjk
       - name: Fetch WPT references for integration tests
-        if: matrix.shard == 'integration'
+        if: startsWith(matrix.shard, 'integration-')
         env:
           WPT_ROOT: .cache/wpt
         run: scripts/fetch-wpt.sh
