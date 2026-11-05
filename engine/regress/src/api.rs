@@ -57,6 +57,11 @@ pub struct Flags {
 }
 
 impl Flags {
+    /// Whether `u` or `v` enables Unicode-aware syntax and canonicalization.
+    pub(crate) const fn unicode_aware(&self) -> bool {
+        self.unicode || self.unicode_sets
+    }
+
     /// Construct a Flags from a Unicode codepoints iterator, using JavaScript field names.
     /// 'i' means to ignore case, 'm' means multiline, 'u' means unicode.
     /// Note the 'g' flag implies a stateful regex and is not supported.
@@ -113,6 +118,9 @@ impl fmt::Display for Flags {
         }
         if self.unicode {
             f.write_str("u")?;
+        }
+        if self.unicode_sets {
+            f.write_str("v")?;
         }
         Ok(())
     }
@@ -468,7 +476,7 @@ impl Regex {
         start: usize,
     ) -> exec::Matches<super::classicalbacktrack::BacktrackExecutor<'r, indexing::Utf16Input<'t>>>
     {
-        let input = Utf16Input::new(text, self.cr.flags.unicode);
+        let input = Utf16Input::new(text, self.cr.flags.unicode_aware());
         exec::Matches::new(
             super::classicalbacktrack::BacktrackExecutor::new(
                 input,
@@ -486,7 +494,7 @@ impl Regex {
         start: usize,
     ) -> exec::Matches<super::classicalbacktrack::BacktrackExecutor<'r, indexing::Ucs2Input<'t>>>
     {
-        let input = Ucs2Input::new(text, self.cr.flags.unicode);
+        let input = Ucs2Input::new(text, self.cr.flags.unicode_aware());
         exec::Matches::new(
             super::classicalbacktrack::BacktrackExecutor::new(
                 input,
@@ -502,7 +510,7 @@ impl Regex {
     /// available to lookbehind and boundary assertions.
     #[cfg(feature = "utf16")]
     pub fn match_at_utf16(&self, text: &[u16], start: usize) -> Option<Match> {
-        let input = Utf16Input::new(text, self.cr.flags.unicode);
+        let input = Utf16Input::new(text, self.cr.flags.unicode_aware());
         super::classicalbacktrack::BacktrackExecutor::new(
             input,
             MatchAttempter::new(&self.cr, input.left_end()),
@@ -516,7 +524,7 @@ impl Regex {
     /// including the prefix preceding `start`.
     #[cfg(feature = "utf16")]
     pub fn match_at_ucs2(&self, text: &[u16], start: usize) -> Option<Match> {
-        let input = Ucs2Input::new(text, self.cr.flags.unicode);
+        let input = Ucs2Input::new(text, self.cr.flags.unicode_aware());
         super::classicalbacktrack::BacktrackExecutor::new(
             input,
             MatchAttempter::new(&self.cr, input.left_end()),
@@ -1041,5 +1049,59 @@ mod exact_position_tests {
         assert_eq!(regex.match_at_utf16(&input, 1).unwrap().range, 1..3);
         assert_eq!(regex.match_at_ucs2(&input, 1).unwrap().range, 1..2);
         assert_eq!(regex.match_at_ucs2(&input, 2).unwrap().range, 2..3);
+    }
+}
+
+#[cfg(all(test, feature = "utf16"))]
+mod canonicalization_tests {
+    use super::{Flags, Regex};
+
+    #[test]
+    fn legacy_and_unicode_modes_agree_across_utf8_and_code_unit_inputs() {
+        let cases = [
+            ("ſ", "s", [false, true, true]),
+            ("K", "k", [false, true, true]),
+            ("É", "é", [true, true, true]),
+            ("[ſ]", "s", [false, true, true]),
+            ("[^s]", "ſ", [true, false, false]),
+            ("[ı]", "i", [false, false, false]),
+            (r"(s)\1", "sſ", [false, true, true]),
+            (r"(k)\1", "kK", [false, true, true]),
+        ];
+        for (pattern, text, expected) in cases {
+            let units: Vec<u16> = text.encode_utf16().collect();
+            for (index, flags) in ["i", "iu", "iv"].into_iter().enumerate() {
+                let regex = Regex::with_flags(pattern, flags).unwrap();
+                assert_eq!(
+                    regex.find(text).is_some(),
+                    expected[index],
+                    "{pattern}/{flags}"
+                );
+                assert_eq!(
+                    regex.match_at_utf16(&units, 0).is_some(),
+                    expected[index],
+                    "UTF16 {pattern}/{flags}"
+                );
+                assert_eq!(
+                    regex.match_at_ucs2(&units, 0).is_some(),
+                    expected[index],
+                    "UCS2 {pattern}/{flags}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_sets_is_unicode_aware_without_changing_the_flags_record() {
+        let flags = Flags::from("v");
+        assert!(flags.unicode_aware());
+        assert!(flags.unicode_sets);
+        assert!(!flags.unicode);
+        assert_eq!(flags.to_string(), "v");
+        let regex = Regex::with_flags(".", flags).unwrap();
+        assert!(!regex.cr.flags.unicode);
+        for pattern in [r"\a", r"\1", r"\01"] {
+            assert!(Regex::with_flags(pattern, flags).is_err(), "{pattern}/v");
+        }
     }
 }
