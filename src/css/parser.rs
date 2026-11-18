@@ -2202,6 +2202,25 @@ fn has_empty_top_level_comma_segment(tokens: &[CssToken]) -> bool {
     saw_comma && !segment_has_value
 }
 
+/// Reports whether a `+` or `-` operator lacks whitespace on either side.
+///
+/// CSS Values 4 §10.8 requires whitespace around both additive operators,
+/// while `*` and `/` may be written without it. A sign directly attached to a
+/// number is part of that numeric token, so only delimiter tokens are
+/// operators here. `var()` references are not substituted at parse time, so
+/// `var(--a)+var(--b)` is rejected by the same token-level rule.
+fn has_unspaced_additive_operator(tokens: &[CssToken]) -> bool {
+    use CssToken as Css;
+    let is_space = |candidate: Option<&CssToken>| matches!(candidate, Some(Css::Whitespace));
+    tokens.iter().enumerate().any(|(index, candidate)| {
+        matches!(candidate, Css::Delim('+' | '-'))
+            && !(index
+                .checked_sub(1)
+                .is_some_and(|before| is_space(tokens.get(before)))
+                && is_space(tokens.get(index + 1)))
+    })
+}
+
 fn parse_value_sequence_with_mode(
     tokens: &[CssToken],
     preserve_math_delims: bool,
@@ -2271,13 +2290,18 @@ fn parse_value_sequence_with_mode(
                             | "log"
                             | "exp"
                     );
-                    if ((name.eq_ignore_ascii_case("rgb")
+                    let accepts_comma_validation = name.eq_ignore_ascii_case("rgb")
                         || name.eq_ignore_ascii_case("rgba")
                         || name.eq_ignore_ascii_case("hsl")
                         || name.eq_ignore_ascii_case("hsla")
-                        || name.eq_ignore_ascii_case("anchor-size"))
-                        || is_math_function)
-                        && has_empty_top_level_comma_segment(&tokens[start..end])
+                        || name.eq_ignore_ascii_case("anchor-size")
+                        || is_math_function;
+                    // Keep malformed functions as their source text so the
+                    // math evaluators reject them while custom properties,
+                    // which accept any token sequence, still retain them.
+                    if (accepts_comma_validation
+                        && has_empty_top_level_comma_segment(&tokens[start..end]))
+                        || (is_math_function && has_unspaced_additive_operator(&tokens[start..end]))
                     {
                         values.push(Value::Keyword(format!(
                             "{name}({})",

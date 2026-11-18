@@ -4296,20 +4296,72 @@ fn resolves_calc_with_var_lengths() {
 }
 
 #[test]
-fn resolves_calc_with_var_lengths_without_operator_whitespace() {
+fn calc_with_var_rejects_additive_operators_without_whitespace() {
+    // CSS Values 4 §10.8 requires whitespace on both sides of `+` and `-`;
+    // Chrome and Firefox both reject `var(--a)+var(--b)`.
+    for value in [
+        "calc(var(--main-width)+var(--gap)*2)",
+        "calc(var(--main-width)+ var(--gap)*2)",
+        "calc(var(--main-width) +var(--gap)*2)",
+        "calc(var(--main-width)-var(--gap)*2)",
+        "max(0px, var(--main-width)+var(--gap))",
+    ] {
+        let (_document, body, _title, _html) = sample_tree();
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!(
+                ":root {{ --main-width: 720px; --gap: 24px; }} body {{ max-width: {value}; }}"
+            ))
+            .unwrap(),
+        );
+
+        assert_eq!(
+            resolver.computed_style(&body).get("max-width"),
+            None,
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn calc_without_additive_operator_whitespace_does_not_replace_an_earlier_declaration() {
+    for value in [
+        "calc(720px+ 48px)",
+        "calc(720px -48px)",
+        "calc((720px)+(48px))",
+    ] {
+        let (_document, body, _title, _html) = sample_tree();
+        let mut resolver = StyleResolver::new();
+        resolver.add_stylesheet(
+            Origin::Author,
+            parse_stylesheet(&format!("body {{ max-width: 100px; max-width: {value}; }}")).unwrap(),
+        );
+
+        assert_eq!(
+            resolver.computed_style(&body).get("max-width"),
+            Some(&ComputedValue::Px(100.0)),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn calc_multiplicative_operators_still_accept_missing_whitespace() {
     let (_document, body, _title, _html) = sample_tree();
     let mut resolver = StyleResolver::new();
     resolver.add_stylesheet(
         Origin::Author,
         parse_stylesheet(
-            ":root { --main-width: 720px; --gap: 24px; } \
-             body { max-width: calc(var(--main-width)+var(--gap)*2); }",
+            ":root { --gap: 24px; } \
+             body { max-width: calc(var(--gap)*2); min-width: calc(48px/2 + 1px); }",
         )
         .unwrap(),
     );
 
     let style = resolver.computed_style(&body);
-    assert_eq!(style.get("max-width"), Some(&ComputedValue::Px(768.0)));
+    assert_eq!(style.get("max-width"), Some(&ComputedValue::Px(48.0)));
+    assert_eq!(style.get("min-width"), Some(&ComputedValue::Px(25.0)));
 }
 
 #[test]
