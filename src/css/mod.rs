@@ -908,6 +908,32 @@ mod tests {
     }
 
     #[test]
+    fn keeps_calc_with_unspaced_additive_operator_as_unparsed_source() {
+        let stylesheet = parse_stylesheet(
+            "body { width: calc(var(--a)+var(--b)); --x: calc(1px+ 2px); height: calc(1px + 2px); }",
+        )
+        .unwrap();
+        let Rule::Style(rule) = &stylesheet.rules[0] else {
+            panic!("expected style rule");
+        };
+
+        assert_eq!(
+            rule.declarations[0].value,
+            Value::Keyword("calc(var(--a)+var(--b))".to_string())
+        );
+        assert_eq!(rule.declarations[1].name, "--x");
+        assert_eq!(
+            rule.declarations[1].value,
+            Value::Keyword("calc(1px+ 2px)".to_string()),
+            "custom properties retain any token sequence"
+        );
+        assert!(matches!(
+            rule.declarations[2].value,
+            Value::Function { ref name, .. } if name == "calc"
+        ));
+    }
+
+    #[test]
     fn parses_calc_operators_without_whitespace() {
         let stylesheet =
             parse_stylesheet("body { width: calc(var(--gap)*2); height: calc(100%/2); }").unwrap();
