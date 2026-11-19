@@ -652,11 +652,12 @@ fn create_shared_worker_runtime(
             })
     };
     let shared_id = next_shared_worker_id();
-    let mut runtime = JsRuntime::with_document_url_and_storage(
+    let mut runtime = JsRuntime::with_child_bootstrap(
         blank_html_document(),
         worker_url,
         storage,
         session_id,
+        BootstrapKind::SharedWorker,
     )?;
     runtime.set_user_agent(user_agent);
     if let Some(loaded) = loaded.as_ref() {
@@ -953,5 +954,45 @@ impl JsRuntime {
         }
         self.record_error_from("shared worker owner message", result);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_surface_contract_tests {
+    use super::super::bootstrap_surface_tests::{
+        assert_cached_kind, assert_child_non_dom_apis, assert_private_capabilities_absent,
+        factory_owner, record_surface,
+    };
+    use super::*;
+
+    #[test]
+    fn shared_worker_factory_preserves_the_bootstrap_surface() {
+        let mut owner = factory_owner();
+        owner.eval("globalThis.surfaceShared = new SharedWorker('/surface-shared.js', 'surface-oracle')").unwrap();
+        owner.run_until_idle().unwrap();
+        let child = SHARED_WORKER_REGISTRY.with(|registry| {
+            let registry = registry.borrow();
+            registry
+                .iter()
+                .find_map(|entry| {
+                    let entry = entry.borrow();
+                    entry
+                        .connections
+                        .values()
+                        .any(|connection| {
+                            connection
+                                .owner_state
+                                .upgrade()
+                                .is_some_and(|state| Rc::ptr_eq(&state, &owner.host_state))
+                        })
+                        .then(|| Rc::clone(&entry.runtime))
+                })
+                .unwrap()
+        });
+        let mut child = child.borrow_mut();
+        assert_cached_kind(&child, BootstrapKind::SharedWorker);
+        record_surface(&mut child, "factory-shared-worker");
+        assert_child_non_dom_apis(&mut child);
+        assert_private_capabilities_absent(&mut child);
     }
 }

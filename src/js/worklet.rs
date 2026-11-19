@@ -386,11 +386,12 @@ fn create_worklet_runtime(
     owner_state: &Rc<RefCell<HostState>>,
     config: WorkletRuntimeConfig,
 ) -> Result<WorkletRuntimeHandle, JsValue> {
-    let mut runtime = JsRuntime::with_document_url_and_storage(
+    let mut runtime = JsRuntime::with_child_bootstrap(
         blank_html_document(),
         &config.owner_url,
         config.storage,
         config.session_id,
+        BootstrapKind::Worklet,
     )
     .map_err(|error| worklet_status(false, "OperationError", &error.to_string(), false))?;
     runtime.set_user_agent(config.user_agent);
@@ -2794,5 +2795,39 @@ impl State {
             "fixture must own one Worklet runtime"
         );
         self.runtimes.values().next().cloned()
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_surface_contract_tests {
+    use super::super::bootstrap_surface_tests::{
+        assert_cached_kind, assert_child_non_dom_apis, assert_private_capabilities_absent,
+        factory_owner, record_surface,
+    };
+    use super::*;
+
+    #[test]
+    fn worklet_factory_preserves_the_bootstrap_surface() {
+        let mut owner = factory_owner();
+        owner.eval("globalThis.surfaceLoaded=false; CSS.paintWorklet.addModule('/surface-worklet.js').then(()=>surfaceLoaded=true)").unwrap();
+        owner.run_until_idle().unwrap();
+        assert_eq!(
+            owner.eval("surfaceLoaded").unwrap().as_boolean(),
+            Some(true)
+        );
+        let id = owner.document().identity();
+        let child = owner
+            .host_state
+            .borrow()
+            .worklet
+            .runtimes
+            .get(&id)
+            .cloned()
+            .unwrap();
+        let mut child = child.borrow_mut();
+        assert_cached_kind(&child, BootstrapKind::Worklet);
+        record_surface(&mut child, "factory-worklet");
+        assert_child_non_dom_apis(&mut child);
+        assert_private_capabilities_absent(&mut child);
     }
 }

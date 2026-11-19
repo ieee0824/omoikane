@@ -9,7 +9,32 @@ let omoikaneUserActivationState;
 
 (() => {
   // Capture intrinsic identities before author code can replace global Symbol.
-  const windowProxyToStringTag = Symbol.toStringTag;
+  /* @omoikane-bootstrap worker-only node-brand */  function workerIsNode(value) { return value !== null && (typeof value === "object" || typeof value === "function") && safeWeakMapHas(canonicalNodeIds, value); }
+  // These DOM image interfaces are unavailable in child globals. Keep their
+  // typeof guards lexical so author-defined globals cannot supply brand hooks.
+  const HTMLImageElement = undefined;
+  const SVGImageElement = undefined;
+  const HTMLVideoElement = undefined;
+  // Private genuine brands, with no public or constructible DOM interface.
+  const Element = Object.freeze({
+    [Symbol.hasInstance](value) {
+      return workerIsNode(value) && internalNodeType(value) === 1;
+    },
+  });
+  const HTMLCanvasElement = Object.freeze({
+    [Symbol.hasInstance](value) {
+      return hasCanonicalWrapperId(canonicalHtmlElementIds, value)
+        && internalNodeLocalName(value) === "canvas";
+    },
+  });
+  const HTMLElement = Object.freeze({
+    [Symbol.hasInstance](value) {
+      return hasCanonicalWrapperId(canonicalHtmlElementIds, value);
+    },
+  });
+
+
+/* @omoikane-bootstrap end */const windowProxyToStringTag = Symbol.toStringTag;
   const windowProxyHasInstance = Symbol.hasInstance;
   const windowProxyIsConcatSpreadable = Symbol.isConcatSpreadable;
   function isCrossOriginWindowFallbackKey(property) {
@@ -1496,7 +1521,7 @@ let omoikaneUserActivationState;
     }
     return windows;
   }
-  class Window {
+/* @omoikane-bootstrap window-only window-focus-bridge */  class Window {
     constructor() {
       throw new TypeError("Illegal constructor");
     }
@@ -1514,7 +1539,25 @@ let omoikaneUserActivationState;
       }
     }
   }
-  // The browsing-context opener is separate from an author's own `opener`
+/* @omoikane-bootstrap end *//* @omoikane-bootstrap worker-only window-focus-bridge */  class Window {
+    constructor() {
+      throw new TypeError("Illegal constructor");
+    }
+
+    focus() {
+      if (!windowObjects.has(this)) {
+        throw new TypeError("Illegal invocation");
+      }
+      focusWindowAcrossDocuments();
+    }
+
+    blur() {
+      if (!windowObjects.has(this)) {
+        throw new TypeError("Illegal invocation");
+      }
+    }
+  }
+/* @omoikane-bootstrap end */  // The browsing-context opener is separate from an author's own `opener`
   // property. A named-window reuse updates this slot without replacing that
   // property; deleting the override reveals the current relation again.
   let browsingOpener = null;
@@ -1547,7 +1590,7 @@ let omoikaneUserActivationState;
     },
   });
 
-  class NodeList extends Array {
+  /* @omoikane-bootstrap window-only NodeList-594 */class NodeList extends Array {
     constructor() {
       throw new TypeError("Illegal constructor");
     }
@@ -1567,7 +1610,7 @@ let omoikaneUserActivationState;
     value: "NodeList",
   });
 
-  function makeNodeList(nodes) {
+  /* @omoikane-bootstrap end */function makeNodeList(nodes) {
     return Object.setPrototypeOf(nodes, NodeList.prototype);
   }
 
@@ -2359,7 +2402,7 @@ let omoikaneUserActivationState;
 
   __omoikane_register_error_reporter(reportEventListenerError);
 
-  function callListener(entry, target, event) {
+  /* @omoikane-bootstrap window-only callListener-674 */function callListener(entry, target, event) {
     const previousPassive = passiveListenerState.get(event);
     passiveListenerState.set(event, entry.passive);
     try {
@@ -2376,7 +2419,24 @@ let omoikaneUserActivationState;
     }
   }
 
-  function eventListenerStore(target) {
+  /* @omoikane-bootstrap end *//* @omoikane-bootstrap worker-only callListener-674 */function callListener(entry, target, event) {
+    const previousPassive = passiveListenerState.get(event);
+    passiveListenerState.set(event, entry.passive);
+    try {
+      __omoikane_call_event_listener(
+        entry.listener,
+        typeof entry.listener === "function" ? target : entry.listener,
+        event,
+        workerIsNode(target) && isEventShadowRoot(nodeRoot(target))
+      );
+    } catch (error) {
+      reportEventListenerError(error);
+    } finally {
+      passiveListenerState.set(event, previousPassive);
+    }
+  }
+
+  /* @omoikane-bootstrap end */function eventListenerStore(target) {
     if (safeWeakSetHas(registeredWindowProxies, target)) {
       const document = cachedNode(nativeWindowEventDocument(target));
       const store = document && safeWeakMapGet(windowListenerStores, document);
@@ -2924,7 +2984,7 @@ let omoikaneUserActivationState;
   // A node keeps one JS wrapper when it moves between browsing-context
   // Realms. Its constructor belongs to the old Realm, so instanceof the
   // current Realm's Node cannot identify it during event propagation.
-  function isEventNode(node) {
+  /* @omoikane-bootstrap window-only isEventNode-729 */function isEventNode(node) {
     if (node instanceof Node) return true;
     if (node === null || (typeof node !== "object" && typeof node !== "function")) return false;
     try {
@@ -2934,13 +2994,25 @@ let omoikaneUserActivationState;
       return false;
     }
   }
-  function isEventShadowRoot(node) {
+  /* @omoikane-bootstrap end *//* @omoikane-bootstrap worker-only isEventNode-729 */function isEventNode(node) {
+    if (workerIsNode(node)) return true;
+    if (node === null || (typeof node !== "object" && typeof node !== "function")) return false;
+    try {
+      const id = internalNodeId(node);
+      return id !== undefined && cachedNode(id) === node;
+    } catch (_) {
+      return false;
+    }
+  }
+  /* @omoikane-bootstrap end *//* @omoikane-bootstrap window-only isEventShadowRoot-730 */function isEventShadowRoot(node) {
     if (node instanceof Node) return node instanceof ShadowRoot;
     return isEventNode(node) && internalNodeType(node) === 11 &&
       nativeShadowHost(internalNodeId(node)) !== null;
   }
 
-  function shadowRootsContaining(node) {
+  /* @omoikane-bootstrap end *//* @omoikane-bootstrap worker-only isEventShadowRoot-730 */function isEventShadowRoot(node) { return workerIsNode(node) && internalNodeType(node) === 11 && nativeShadowHost(internalNodeId(node)) !== null; }
+
+  /* @omoikane-bootstrap end */function shadowRootsContaining(node) {
     if (!isEventNode(node)) return [];
     const roots = [];
     let current = node;
@@ -3088,7 +3160,7 @@ let omoikaneUserActivationState;
     return invokeListeners(entry.node, event, capture, entry.hostTarget ? 2 : phase);
   }
 
-  function dispatchEventOnTarget(target, event, activationInfo = null) {
+  /* @omoikane-bootstrap window-only dispatchEventOnTarget-739 */function dispatchEventOnTarget(target, event, activationInfo = null) {
     if (!isEventInstance(event)) throw new TypeError("dispatchEvent requires an Event");
     if (event.__dispatching || event.type === "") {
       throw new DOMException("The event is already being dispatched or has no type.", "InvalidStateError");
@@ -3151,7 +3223,70 @@ let omoikaneUserActivationState;
     return !event.defaultPrevented;
   }
 
-  function clickActivationTarget(path, event) {
+  /* @omoikane-bootstrap end *//* @omoikane-bootstrap worker-only dispatchEventOnTarget-739 */function dispatchEventOnTarget(target, event, activationInfo = null) {
+    if (!isEventInstance(event)) throw new TypeError("dispatchEvent requires an Event");
+    if (event.__dispatching || event.type === "") {
+      throw new DOMException("The event is already being dispatched or has no type.", "InvalidStateError");
+    }
+    // Host dispatch and IDL handlers use the backing Window's slots, but
+    // listeners observe the browsing context's WindowProxy as their target.
+    if (target === globalThis && globalThis.document) {
+      target = windowForDocument(globalThis.document) || target;
+    }
+    event.__dispatching = true;
+    event.__stopped = false;
+    event.__stoppedImmediate = false;
+    const submissionRelatedTarget = safeWeakMapGet(submissionRelatedTargets, event);
+    event.__originalRelatedTarget = submissionRelatedTarget === undefined
+      ? event.relatedTarget ?? null : submissionRelatedTarget;
+    const path = buildEventPath(target, event);
+    event.__path = path;
+    if (activationInfo) activationInfo.target = clickActivationTarget(path, event);
+
+    try {
+      if (activationInfo) activationInfo.checkable = beginCheckableActivation(activationInfo.target, event);
+      if (path.length === 0) return !event.defaultPrevented;
+      let stopped = false;
+      for (let i = path.length - 1; i >= 1; i -= 1) {
+        if (invokeEventPathEntry(path[i], event, true, 1)) {
+          stopped = true;
+          break;
+        }
+      }
+
+      if (!stopped) {
+        invokeEventPathEntry(path[0], event, true, 2);
+      }
+      if (!stopped && !event.__stoppedImmediate) {
+        invokeEventPathEntry(path[0], event, false, 2);
+      }
+      if (event.__stopped) stopped = true;
+
+      if (!stopped) {
+        for (let i = 1; i < path.length; i += 1) {
+          const entry = path[i];
+          if (!event.bubbles && !entry.hostTarget) continue;
+          if (invokeEventPathEntry(entry, event, false, 3)) break;
+        }
+      }
+    } finally {
+      event.__dispatching = false;
+      if (safeWeakMapGet(inputEventRanges, event)) safeWeakMapSet(inputEventRanges, event, []);
+      event.currentTarget = null;
+      event.eventPhase = 0;
+      const finalEntry = path[path.length - 1];
+      const clearTargets = !finalEntry ||
+        (workerIsNode(finalEntry.target) && nodeRoot(finalEntry.target) instanceof ShadowRoot) ||
+        (workerIsNode(finalEntry.relatedTarget) &&
+          nodeRoot(finalEntry.relatedTarget) instanceof ShadowRoot);
+      event.target = clearTargets ? null : finalEntry.target;
+      setEventPathRelatedTarget(event, clearTargets ? null : finalEntry.relatedTarget);
+      event.__path = [];
+    }
+    return !event.defaultPrevented;
+  }
+
+  /* @omoikane-bootstrap end */function clickActivationTarget(path, event) {
     for (let index = 0; index < path.length; index += 1) {
       if (index > 0 && !event.bubbles) break;
       const current = path[index].node;
@@ -3369,11 +3504,17 @@ let omoikaneUserActivationState;
     return focusChainIds()[0]?.[0] ?? null;
   }
 
-  function focusDocumentCommand(id, kind, args = []) {
+/* @omoikane-bootstrap window-only focus-command-bridge */  function focusDocumentCommand(id, kind, args = []) {
     if (id === null) return null;
     if (id === __omoikane_document_id) return safeApply(focusDocumentCommands[kind], undefined, args);
     return nativeForwardInput(id, "focus", [kind, ...args]);
-  }
+  }/* @omoikane-bootstrap end *//* @omoikane-bootstrap worker-only focus-command-bridge */  function focusDocumentCommand(id, kind, args = []) {
+    if (id === null) return null;
+    // Child globals have no DOM elements; their viewport snapshot has no element ID.
+    if (id === __omoikane_document_id && kind === "snapshot") return null;
+    if (id === __omoikane_document_id) return safeApply(focusDocumentCommands[kind], undefined, args);
+    return nativeForwardInput(id, "focus", [kind, ...args]);
+  }/* @omoikane-bootstrap end */
 
   const focusDocumentCommands = {
     snapshot() {
@@ -3498,11 +3639,13 @@ let omoikaneUserActivationState;
     focusAcrossDocuments(internalOwnerDocument(node), node, preventScroll);
   }
 
-  function focusWindowAcrossDocuments() {
+/* @omoikane-bootstrap window-only focus-window-id */  function focusWindowAcrossDocuments() {
     focusAcrossDocuments(focusDocument, null, true);
-  }
+  }/* @omoikane-bootstrap end *//* @omoikane-bootstrap worker-only focus-window-id */  function focusWindowAcrossDocuments() {
+    focusAcrossDocumentIds(__omoikane_document_id, null, true);
+  }/* @omoikane-bootstrap end */
 
-  const parserAutofocusProcessedDocuments = new WeakSet();
+/* @omoikane-bootstrap window-only parser-autofocus */  const parserAutofocusProcessedDocuments = new WeakSet();
   globalThis.__omoikane_flush_parser_autofocus = function() {
     const doc = focusDocument;
     if (parserAutofocusProcessedDocuments.has(doc)) return;
@@ -3519,7 +3662,7 @@ let omoikaneUserActivationState;
       const children = internalChildNodes(node);
       for (let index = children.length - 1; index >= 0; index--) pending.push(children[index]);
     }
-  };
+  };/* @omoikane-bootstrap end */
 
   // No focus event is cancelable, and all four are composed so they cross
   // shadow boundaries. Bubbling differs per event — `focusin` and `focusout`
@@ -4125,7 +4268,7 @@ let omoikaneUserActivationState;
     signalFallbackSlotChanges(receiver);
   }
 
-  class Node {
+  /* @omoikane-bootstrap window-only Node-791 */class Node {
     constructor(id) {
       safeWeakMapSet(nativeNodeIds, this, id);
       safeDefineProperty(this, "__id", {
@@ -5645,7 +5788,7 @@ let omoikaneUserActivationState;
 
   // Web IDL DOMString conversion uses ECMAScript ToString, which rejects a
   // Symbol. Calling the public String function would instead stringify one.
-  function toDOMString(value) {
+  /* @omoikane-bootstrap end */function toDOMString(value) {
     if (typeof value === "symbol") {
       throw new IntrinsicTypeError("Cannot convert a Symbol value to a string");
     }
@@ -5725,7 +5868,7 @@ let omoikaneUserActivationState;
     return fragment;
   }
 
-  function requireParentNode(receiver) {
+  /* @omoikane-bootstrap window-only requireParentNode-799 */function requireParentNode(receiver) {
     requireNodeReceiver(receiver);
     if (![1, 9, 11].includes(internalNodeType(receiver))) {
       throw new IntrinsicTypeError("ParentNode method called on an incompatible receiver");
@@ -5819,11 +5962,11 @@ let omoikaneUserActivationState;
     }
   }
 
-  function insertedMutationNodes(node) {
+  /* @omoikane-bootstrap end */function insertedMutationNodes(node) {
     return internalNodeType(node) === 11 ? internalChildNodes(node) : [node];
   }
 
-  function replaceChildrenInternal(receiver, values, trustedHTMLGuard = null) {
+  /* @omoikane-bootstrap window-only replaceChildrenInternal-805 */function replaceChildrenInternal(receiver, values, trustedHTMLGuard = null) {
     requireParentNode(receiver);
     const node = mutationArgumentsNode(convertMutationArguments(values), receiver);
     const removedNodes = internalChildNodes(receiver);
@@ -5846,7 +5989,7 @@ let omoikaneUserActivationState;
     return replaceChildrenInternal(this, values);
   }
 
-  function mutateSibling(receiver, values, operation) {
+  /* @omoikane-bootstrap end */function mutateSibling(receiver, values, operation) {
     requireNodeReceiver(receiver);
     if (![1, 3, 4, 7, 8, 10].includes(internalNodeType(receiver))) {
       throw new IntrinsicTypeError("ChildNode method called on an incompatible receiver");
@@ -5882,7 +6025,7 @@ let omoikaneUserActivationState;
 
   function before(...values) { mutateSibling(this, values, "before"); }
   function after(...values) { mutateSibling(this, values, "after"); }
-  function replaceWith(...values) { mutateSibling(this, values, "replaceWith"); }
+  /* @omoikane-bootstrap window-only replaceWith-810 */function replaceWith(...values) { mutateSibling(this, values, "replaceWith"); }
 
   function elementNodeDocument(element) {
     return internalOwnerDocument(element) || globalThis.document;
@@ -6274,8 +6417,8 @@ let omoikaneUserActivationState;
   const ariaGetAttribute = Element.prototype.getAttribute;
   const ariaRemoveAttribute = Element.prototype.removeAttribute;
 
-  const htmlConstructorInterfaceToken = {};
-  const editingRemoveAttributeNS = Element.prototype.removeAttributeNS;
+  /* @omoikane-bootstrap end */const htmlConstructorInterfaceToken = {};
+  /* @omoikane-bootstrap window-only editingRemoveAttributeNS-828 */const editingRemoveAttributeNS = Element.prototype.removeAttributeNS;
   const elementInnerTextGetter = Object.getOwnPropertyDescriptor(Node.prototype, "innerText").get;
 
   function editingHtmlId(element) {
@@ -6474,7 +6617,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  const popoverData = new WeakMap();
+  /* @omoikane-bootstrap end */const popoverData = new WeakMap();
   const autoPopoversByDocument = new WeakMap();
   const popoverTargetOverrides = new WeakMap();
   const commandForOverrides = new WeakMap();
@@ -6541,7 +6684,7 @@ let omoikaneUserActivationState;
     }, 0);
   }
 
-  function validatePopoverForShow(element) {
+  /* @omoikane-bootstrap window-only validatePopoverForShow-846 */function validatePopoverForShow(element) {
     if (popoverType(element) === null) {
       throw new DOMException("The element does not have a popover attribute", "NotSupportedError");
     }
@@ -6578,7 +6721,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  function hideAutoDescendants(element) {
+  /* @omoikane-bootstrap end */function hideAutoDescendants(element) {
     const doc = element.ownerDocument;
     if (!doc) return;
     const stack = autoPopoverStack(doc);
@@ -6592,14 +6735,14 @@ let omoikaneUserActivationState;
     }
   }
 
-  function hideAllAutoPopovers(doc) {
+  /* @omoikane-bootstrap window-only hideAllAutoPopovers-850 */function hideAllAutoPopovers(doc) {
     const stack = autoPopoverStack(doc);
     for (let index = stack.length - 1; index >= 0; index--) {
       hidePopoverInternal(stack[index], { restoreFocus: true });
     }
   }
 
-  function nearestInclusiveAutoPopover(node, doc) {
+  /* @omoikane-bootstrap end *//* @omoikane-bootstrap window-only nearestInclusiveAutoPopover-851 */function nearestInclusiveAutoPopover(node, doc) {
     const stack = autoPopoverStack(doc);
     let invoked = null;
     for (let candidate = node; candidate instanceof Element; candidate = candidate.parentElement) {
@@ -6619,7 +6762,27 @@ let omoikaneUserActivationState;
   }
 
   // The highest open auto popover that is a flat-tree ancestor of `node`.
-  function topmostAutoPopoverAncestor(node) {
+  /* @omoikane-bootstrap end *//* @omoikane-bootstrap worker-only nearestInclusiveAutoPopover-851 */function nearestInclusiveAutoPopover(node, doc) {
+    const stack = autoPopoverStack(doc);
+    let invoked = null;
+    for (let candidate = node; candidate instanceof Element; candidate = candidate.parentElement) {
+      if (!isPopoverInvokerControl(candidate)) continue;
+      invoked = popoverTargetElementFor(candidate);
+      if (invoked) break;
+    }
+    for (let index = stack.length - 1; index >= 0; index--) {
+      const popover = stack[index];
+      const source = popoverDataFor(popover).source;
+      if ((workerIsNode(node) && (popover === node || popover.contains(node))) ||
+          invoked === popover || (source && (source === node || source.contains(node)))) {
+        return popover;
+      }
+    }
+    return null;
+  }
+
+  // The highest open auto popover that is a flat-tree ancestor of `node`.
+  /* @omoikane-bootstrap end *//* @omoikane-bootstrap window-only topmostAutoPopoverAncestor-852 */function topmostAutoPopoverAncestor(node) {
     const stack = autoPopoverStack(node.ownerDocument);
     const ancestors = new Set();
     for (let current = node.parentNode || node.host; current; current = current.parentNode || current.host) {
@@ -6631,7 +6794,7 @@ let omoikaneUserActivationState;
     return null;
   }
 
-  function lightDismissAutoPopovers(doc, boundary) {
+  /* @omoikane-bootstrap end */function lightDismissAutoPopovers(doc, boundary) {
     const stack = autoPopoverStack(doc);
     const boundaryIndex = boundary ? stack.indexOf(boundary) : -1;
     for (let index = stack.length - 1; index > boundaryIndex; index--) {
@@ -6639,7 +6802,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  function focusPopover(element) {
+  /* @omoikane-bootstrap window-only focusPopover-854 */function focusPopover(element) {
     let target = element.hasAttribute("autofocus") ? element : null;
     function visit(node) {
       for (const child of node.childNodes || []) {
@@ -6700,7 +6863,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  function hidePopoverInternal(element, options = {}) {
+  /* @omoikane-bootstrap end */function hidePopoverInternal(element, options = {}) {
     if (!isPopoverOpen(element)) return;
     closeDescendantSelectPicker(element);
     const data = popoverDataFor(element);
@@ -6739,7 +6902,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  function hidePopoverElement(element) {
+  /* @omoikane-bootstrap window-only hidePopoverElement-857 */function hidePopoverElement(element) {
     if (popoverType(element) === null) {
       throw new DOMException("The element does not have a popover attribute", "NotSupportedError");
     }
@@ -6772,7 +6935,7 @@ let omoikaneUserActivationState;
     return false;
   }
 
-  function popoverAttributeChanged(element, oldValue, newValue) {
+  /* @omoikane-bootstrap end */function popoverAttributeChanged(element, oldValue, newValue) {
     if (!(element instanceof HTMLElement) || !isPopoverOpen(element)) return;
     const normalize = value => value === null ? null :
       ((String(value).trim().toLowerCase() === "" || String(value).trim().toLowerCase() === "auto")
@@ -6800,7 +6963,7 @@ let omoikaneUserActivationState;
     if (attributeName === "popovertarget") popoverTargetOverrides.delete(control);
     else if (attributeName === "commandfor") commandForOverrides.delete(control);
   }
-  class HTMLHtmlElement extends HTMLElement {
+  /* @omoikane-bootstrap window-only HTMLHtmlElement-862 */class HTMLHtmlElement extends HTMLElement {
     constructor(...args) {
       super(args[0], htmlConstructorInterfaceToken,
         args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLHtmlElement);
@@ -6909,7 +7072,7 @@ let omoikaneUserActivationState;
   }
 
   // Open dialogs in show order, per Document (HTML "open dialogs list").
-  const openDialogsByDocument = new WeakMap();
+  /* @omoikane-bootstrap end */const openDialogsByDocument = new WeakMap();
   function openDialogsList(doc) {
     let list = openDialogsByDocument.get(doc);
     if (!list) {
@@ -7136,10 +7299,10 @@ let omoikaneUserActivationState;
   // an activation-triggering input; the transient flag above is consumed by
   // fullscreen, focus, pickers and Storage Access.
   let stickyUserActivation = false;
-  omoikaneUserActivationState = () => [stickyUserActivation, fullscreenTransientActivation];
+  /* @omoikane-bootstrap window-only dom-initialization-900 */omoikaneUserActivationState = () => [stickyUserActivation, fullscreenTransientActivation];
   // HTML activation notification: an activation-triggering input activates
   // this Window, every ancestor Window and each same-origin descendant.
-  function grantFullscreenTransientActivation() {
+  /* @omoikane-bootstrap end */function grantFullscreenTransientActivation() {
     grantLocalUserActivation();
     for (const [, parent] of documentFocusChain(__omoikane_document_id) || []) {
       if (parent !== null) focusDocumentCommand(parent, "userActivation", [false]);
@@ -7171,7 +7334,7 @@ let omoikaneUserActivationState;
     }, 0);
   }
 
-  function pointerLockElementForRoot(root) {
+  /* @omoikane-bootstrap window-only pointerLockElementForRoot-904 */function pointerLockElementForRoot(root) {
     const doc = internalNodeType(root) === 9 ? root : internalOwnerDocument(root);
     const id = internalNodeId(doc);
     const raw = id === undefined ? null : wrapNode(nativePointerLockTarget(id));
@@ -7181,25 +7344,25 @@ let omoikaneUserActivationState;
     return tree === root ? candidate : null;
   }
 
-  function rawFullscreenElementForDocument(doc) {
+  /* @omoikane-bootstrap end */function rawFullscreenElementForDocument(doc) {
     if (!(isDocumentNode(doc))) return null;
     const documentId = internalNodeId(doc);
     return documentId === undefined ? null : wrapNode(nativeFullscreenElement(documentId));
   }
 
-  function fullscreenElementForDocument(doc) {
+  /* @omoikane-bootstrap window-only fullscreenElementForDocument-906 */function fullscreenElementForDocument(doc) {
     const element = rawFullscreenElementForDocument(doc);
     return element ? retargetNode(element, doc) : null;
   }
 
-  function pictureInPictureElementForDocument(doc) {
+  /* @omoikane-bootstrap end */function pictureInPictureElementForDocument(doc) {
     if (!isDocumentNode(doc)) throw new TypeError("Illegal invocation");
     const id = safeWeakMapGet(pictureInPictureElementIds, doc);
     const element = id === undefined ? null : wrapNode(id);
     return element && internalOwnerDocument(element) === doc ? element : null;
   }
 
-  function pictureInPictureElementForRoot(root) {
+  /* @omoikane-bootstrap window-only pictureInPictureElementForRoot-908 */function pictureInPictureElementForRoot(root) {
     requireNodeReceiver(root);
     const doc = internalNodeType(root) === 9 ? root : internalOwnerDocument(root);
     const element = pictureInPictureElementForDocument(doc);
@@ -7210,7 +7373,7 @@ let omoikaneUserActivationState;
     return tree === root ? candidate : null;
   }
 
-  function pictureInPictureEvent(type, window) {
+  /* @omoikane-bootstrap end */function pictureInPictureEvent(type, window) {
     return new PictureInPictureEvent(type, { pictureInPictureWindow: window });
   }
 
@@ -7226,19 +7389,19 @@ let omoikaneUserActivationState;
     return true;
   }
 
-  function leavePictureInPicture(doc) {
+  /* @omoikane-bootstrap window-only leavePictureInPicture-911 */function leavePictureInPicture(doc) {
     if (!exitPictureInPictureElement(doc)) {
       return Promise.reject(new DOMException("No element is in Picture-in-Picture", "InvalidStateError"));
     }
     return Promise.resolve(undefined);
   }
 
-  function dispatchFullscreenEvent(type, target, doc) {
+  /* @omoikane-bootstrap end */function dispatchFullscreenEvent(type, target, doc) {
     const receiver = target && internalIsConnected(target) ? target : doc;
     receiver.dispatchEvent(new Event(type, { bubbles: true, composed: true }));
   }
 
-  function requestFullscreenElement(element, options) {
+  /* @omoikane-bootstrap window-only requestFullscreenElement-913 */function requestFullscreenElement(element, options) {
     const dictionary = options === undefined ? {} : Object(options);
     const navigationUI = dictionary.navigationUI === undefined
       ? "auto" : String(dictionary.navigationUI);
@@ -7294,7 +7457,7 @@ let omoikaneUserActivationState;
     }));
   }
 
-  function fullyExitFullscreenForUser(doc) {
+  /* @omoikane-bootstrap end */function fullyExitFullscreenForUser(doc) {
     const element = rawFullscreenElementForDocument(doc);
     const documentId = internalNodeId(doc);
     if (!element || documentId === undefined || !nativeExitFullscreen(documentId, false)) {
@@ -7321,7 +7484,7 @@ let omoikaneUserActivationState;
     return processCloseWatchers();
   }
 
-  class HTMLDialogElement extends HTMLElement {
+  /* @omoikane-bootstrap window-only HTMLDialogElement-918 */class HTMLDialogElement extends HTMLElement {
     constructor(...args) {
       super(args[0], htmlConstructorInterfaceToken,
         args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLDialogElement);
@@ -7426,7 +7589,7 @@ let omoikaneUserActivationState;
     set closedBy(value) { this.setAttribute("closedby", String(value)); }
   }
 
-  const pendingDetailsToggles = new WeakMap();
+  /* @omoikane-bootstrap end */const pendingDetailsToggles = new WeakMap();
   function detailsAttributeChanged(element, name, oldValue, newValue, namespace) {
     if (name !== "open" || namespace != null || !(element instanceof HTMLDetailsElement)) return;
     const oldState = oldValue === null ? "closed" : "open";
@@ -7457,7 +7620,7 @@ let omoikaneUserActivationState;
     });
   }
 
-  class HTMLDetailsElement extends HTMLElement {
+  /* @omoikane-bootstrap window-only HTMLDetailsElement-921 */class HTMLDetailsElement extends HTMLElement {
     constructor(...args) {
       super(args[0], htmlConstructorInterfaceToken,
         args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLDetailsElement);
@@ -7757,7 +7920,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  const NAMED_NODE_MAP_CONSTRUCTION = {};
+  /* @omoikane-bootstrap end */const NAMED_NODE_MAP_CONSTRUCTION = {};
 
   function requireNamedNodeMap(map) {
     const element = safeWeakMapGet(namedNodeMapElements, map);
@@ -7901,7 +8064,7 @@ let omoikaneUserActivationState;
     get [Symbol.toStringTag]() { return "NamedNodeMap"; }
   }
 
-  function namedNodeMapPropertyNames(element, target) {
+  /* @omoikane-bootstrap window-only namedNodeMapPropertyNames-939 */function namedNodeMapPropertyNames(element, target) {
     const records = nativeAttributeRecords(element.__id) || [];
     const names = [];
     const htmlNamesOnly = isHtmlElementInHtmlDocument(element);
@@ -7962,7 +8125,7 @@ let omoikaneUserActivationState;
     "assignedSlot",
   ]);
 
-  const NodeFilter = {
+  /* @omoikane-bootstrap end */const NodeFilter = {
     FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3,
     SHOW_ALL: 0xffffffff, SHOW_ELEMENT: 0x1, SHOW_ATTRIBUTE: 0x2,
     SHOW_TEXT: 0x4, SHOW_CDATA_SECTION: 0x8,
@@ -7972,7 +8135,7 @@ let omoikaneUserActivationState;
     SHOW_DOCUMENT_FRAGMENT: 0x400, SHOW_NOTATION: 0x800,
   };
 
-  function filterNode(node, whatToShow, filter) {
+  /* @omoikane-bootstrap window-only filterNode-943 */function filterNode(node, whatToShow, filter) {
     const bit = 1 << (node.nodeType - 1);
     if ((whatToShow & bit) === 0) return NodeFilter.FILTER_SKIP;
     if (filter == null) return NodeFilter.FILTER_ACCEPT;
@@ -8171,7 +8334,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  function nodeLength(node) {
+  /* @omoikane-bootstrap end */function nodeLength(node) {
     if (safeWeakMapHas(attributeNodeStates, node)) return 0;
     const type = internalNodeType(node);
     if (type === 2) return 0;
@@ -8294,7 +8457,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  const rangeInstances = browsingInput.rangeInstances || (browsingInput.rangeInstances = new WeakSet());
+  /* @omoikane-bootstrap window-only rangeInstances-955 */const rangeInstances = browsingInput.rangeInstances || (browsingInput.rangeInstances = new WeakSet());
   const rangeElementClientRects = Element.prototype.getClientRects;
 
   function rangeClientRects(range) {
@@ -8623,7 +8786,7 @@ let omoikaneUserActivationState;
   // owns the currently exposed range and derives its anchor/focus from that
   // range. This keeps iframe documents isolated because each contentDocument
   // has its own wrapper identity and WeakMap entry.
-  const selectionConstructionToken = {};
+  /* @omoikane-bootstrap end */const selectionConstructionToken = {};
   const selectionByDocument = new WeakMap();
   const selectionStateByObject = new WeakMap();
   function selectionState(selection) {
@@ -8652,7 +8815,7 @@ let omoikaneUserActivationState;
   function selectionRange(selection) {
     return safeWeakMapGet(composedRangeBySelection, selection) || selectionState(selection).range;
   }
-  function selectionCollapsed(selection) {
+  /* @omoikane-bootstrap window-only selectionCollapsed-981 */function selectionCollapsed(selection) {
     const range = selectionRange(selection);
     return !range || (range.__startContainer === range.__endContainer && range.__startOffset === range.__endOffset);
   }
@@ -8665,7 +8828,7 @@ let omoikaneUserActivationState;
   }
   // User input retains real shadow-tree endpoints; the public anchor/focus
   // getters apply their document-tree visibility rule separately.
-  function selectionInternalBoundary(selection, anchor) {
+  /* @omoikane-bootstrap end */function selectionInternalBoundary(selection, anchor) {
     const range = selectionRange(selection);
     if (!range) return null;
     const end = anchor === (selectionState(selection).direction === "backward");
@@ -8802,7 +8965,7 @@ let omoikaneUserActivationState;
     queueSelectionChange(selectionState(selection).doc);
   }
 
-  class Selection {
+  /* @omoikane-bootstrap window-only Selection-994 */class Selection {
     constructor(token, doc) {
       if (token !== selectionConstructionToken || !(isDocumentNode(doc))) {
         throw new TypeError("Illegal constructor");
@@ -8989,7 +9152,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  function selectionForDocument(doc) {
+  /* @omoikane-bootstrap end */function selectionForDocument(doc) {
     if (!(isDocumentNode(doc))) return null;
     let selection = safeWeakMapGet(selectionByDocument, doc);
     if (!selection) {
@@ -9027,7 +9190,7 @@ let omoikaneUserActivationState;
   }
 
   const mouseSelectionByDocument = new WeakMap();
-  const caretPositions = browsingInput.caretPositions || (browsingInput.caretPositions = new WeakMap());
+  /* @omoikane-bootstrap window-only caretPositions-998 */const caretPositions = browsingInput.caretPositions || (browsingInput.caretPositions = new WeakMap());
   const finiteCaretCoordinate = Number.isFinite;
   const caretPositionToken = {};
   function caretPositionState(value) {
@@ -9102,7 +9265,7 @@ let omoikaneUserActivationState;
   }
   const userSelectionSetBaseAndExtent = Selection.prototype.setBaseAndExtent;
   const userSelectionDispatchEvent = Node.prototype.dispatchEvent;
-  function allowPointerSelection(selection, anchor, focus) {
+  /* @omoikane-bootstrap end */function allowPointerSelection(selection, anchor, focus) {
     const range = selectionRange(selection);
     if (range && (range.__startContainer !== range.__endContainer || range.__startOffset !== range.__endOffset)) return true;
     const start = composedBoundaryCompare(...anchor, ...focus) <= 0 ? anchor : focus;
@@ -9168,7 +9331,7 @@ let omoikaneUserActivationState;
   // for which `predicate` holds. Used to build the live document HTMLCollections
   // (forms / links / images / anchors), scoped to `root`'s own document tree so
   // an iframe's contentDocument never leaks nodes into the main document.
-  function collectElements(root, predicate) {
+  /* @omoikane-bootstrap window-only collectElements-1014 */function collectElements(root, predicate) {
     const out = [];
     const walk = (node) => {
       // Collection membership uses native tree state, not author-overridden accessors.
@@ -9187,7 +9350,7 @@ let omoikaneUserActivationState;
   // factory implements indexed properties and live methods over this resolver.
   // `attributes` declares which attributes `collect` reads (see
   // domInterfaces.makeCollection); omitted means any attribute change.
-  function makeHTMLCollection(
+  /* @omoikane-bootstrap end */function makeHTMLCollection(
     collect,
     allowsNamedName = element => element.namespaceURI === "http://www.w3.org/1999/xhtml" || element instanceof HTMLElement,
     missingNamedValue = undefined,
@@ -9196,7 +9359,7 @@ let omoikaneUserActivationState;
     return domInterfaces.makeCollection(collect, allowsNamedName, missingNamedValue, attributes);
   }
 
-  function documentTagElement(root, tag) {
+  /* @omoikane-bootstrap window-only documentTagElement-1016 */function documentTagElement(root, tag) {
     const id = nativeQuerySelector(internalNodeId(root), tag);
     if (id == null) return null;
     const element = wrapNode(id);
@@ -9260,7 +9423,7 @@ let omoikaneUserActivationState;
     __omoikane_document_write(internalNodeId(document), newline ? checked + "\n" : checked);
   }
 
-  const policyConstructionToken = {};
+  /* @omoikane-bootstrap end */const policyConstructionToken = {};
   const policyOwnerIds = new WeakMap();
   const nodePolicyObjects = new WeakMap();
   function policyOwnerId(policy) {
@@ -9306,7 +9469,7 @@ let omoikaneUserActivationState;
   const activeDocumentTransitions = new WeakMap();
   const VIEW_TRANSITION_CONSTRUCTION = {};
 
-  function viewTransitionValueFromCssText(text, property) {
+  /* @omoikane-bootstrap window-only viewTransitionValueFromCssText-1032 */function viewTransitionValueFromCssText(text, property) {
     const body = String(text || "").replace(/^[^{]*\{/, "").replace(/\}[^}]*$/, "");
     let value = "";
     for (const declaration of body.split(";")) {
@@ -9423,7 +9586,7 @@ let omoikaneUserActivationState;
     root.__viewTransitionAnimations = animations;
   }
 
-  function viewTransitionPseudoStyle(document, pseudo) {
+  /* @omoikane-bootstrap end */function viewTransitionPseudoStyle(document, pseudo) {
     const state = activeDocumentTransitions.get(document);
     if (!state || !state.pseudoNames) return {};
     if (pseudo === "::view-transition") {
@@ -9473,7 +9636,7 @@ let omoikaneUserActivationState;
     get [Symbol.toStringTag]() { return "ViewTransition"; }
   }
 
-  function startDocumentViewTransition(document, callbackOptions) {
+  /* @omoikane-bootstrap window-only startDocumentViewTransition-1038 */function startDocumentViewTransition(document, callbackOptions) {
     if (!isDocumentNode(document)) throw new TypeError("Illegal invocation");
     const previous = activeDocumentTransitions.get(document);
     if (previous) previous.skip();
@@ -9549,9 +9712,9 @@ let omoikaneUserActivationState;
     return transition;
   }
 
-  globalThis.ViewTransition = ViewTransition;
+  /* @omoikane-bootstrap end */globalThis.ViewTransition = ViewTransition;
 
-  class Document extends Node {
+  /* @omoikane-bootstrap window-only Document-1040 */class Document extends Node {
     get customElementRegistry() {
       if (!isDocumentNode(this)) throw new TypeError("Document required");
       return customRegistryForDocument(this);
@@ -10525,7 +10688,7 @@ let omoikaneUserActivationState;
   // CSS syntax is accepted/rejected by the native engine parser. This scanner
   // only preserves each accepted top-level rule's source text for CSSOM
   // serialization; it understands strings, comments and nested blocks.
-  function cssRuleWithoutLeadingComments(source) {
+  /* @omoikane-bootstrap end */function cssRuleWithoutLeadingComments(source) {
     let text = String(source || "").trim();
     while (text.startsWith("/*")) {
       const end = text.indexOf("*/", 2);
@@ -10970,9 +11133,9 @@ let omoikaneUserActivationState;
   }
 
   const nativeCssSelectorText = globalThis.__omoikane_css_selector_text;
-  delete globalThis.__omoikane_css_selector_text;
+  /* @omoikane-bootstrap window-only dom-initialization-1085 */delete globalThis.__omoikane_css_selector_text;
 
-  class CSSStyleRule extends CSSGroupingRule {
+  /* @omoikane-bootstrap end */class CSSStyleRule extends CSSGroupingRule {
     constructor(text, sheet = null, index = -1) {
       super();
       this.__text = text;
@@ -11143,7 +11306,7 @@ let omoikaneUserActivationState;
   ]);
 
   class CSSPositionTryDescriptors {}
-  for (const property of positionTryDescriptorProperties) {
+  /* @omoikane-bootstrap window-only dom-initialization-1094 */for (const property of positionTryDescriptorProperties) {
     const camel = property.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
     for (const attribute of new Set([property, camel])) {
       Object.defineProperty(CSSPositionTryDescriptors.prototype, attribute, {
@@ -11155,7 +11318,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  class CSSPositionTryRule extends CSSDescriptorRule {
+  /* @omoikane-bootstrap end */class CSSPositionTryRule extends CSSDescriptorRule {
     constructor(text, sheet = null, index = -1) {
       const source = cssRuleWithoutLeadingComments(text);
       const open = cssRuleBlockStart(source), close = source.lastIndexOf("}");
@@ -11258,7 +11421,7 @@ let omoikaneUserActivationState;
       if (this.__sheet) this.__sheet.__replaceRule(this.__index, this.__text);
     }
   }
-  for (const attribute of ["system", "symbols", "additiveSymbols", "negative", "prefix",
+  /* @omoikane-bootstrap window-only dom-initialization-1102 */for (const attribute of ["system", "symbols", "additiveSymbols", "negative", "prefix",
     "suffix", "range", "pad", "fallback", "speakAs"]) {
     const descriptor = attribute.replace(/[A-Z]/g, letter => "-" + letter.toLowerCase());
     Object.defineProperty(CSSCounterStyleRule.prototype, attribute, {
@@ -11268,7 +11431,7 @@ let omoikaneUserActivationState;
     });
   }
 
-  class CSSFontFeatureValuesMap {
+  /* @omoikane-bootstrap end */class CSSFontFeatureValuesMap {
     constructor(limit, onChange) {
       this.__values = new Map();
       this.__limit = limit;
@@ -11432,14 +11595,14 @@ let omoikaneUserActivationState;
     }
     return result;
   }
-  for (const [attribute, block] of featureValueBlocks) {
+  /* @omoikane-bootstrap window-only dom-initialization-1109 */for (const [attribute, block] of featureValueBlocks) {
     Object.defineProperty(CSSFontFeatureValuesRule.prototype, attribute, {
       configurable: true, enumerable: true,
       get() { return this.__maps.get(block); },
     });
   }
 
-  class CSSPropertyRule {
+  /* @omoikane-bootstrap end */class CSSPropertyRule {
     constructor(text, sheet = null, index = -1) {
       const encoded = __omoikane_css_property_rule(String(text));
       if (encoded === null) throw new DOMException("Invalid @property rule.", "SyntaxError");
@@ -12196,7 +12359,7 @@ let omoikaneUserActivationState;
   }
 
   function adoptedRootsForSheet(sheet) {
-    const refs = adoptedRootsBySheet.get(sheet);
+    const refs = safeWeakMapGet(adoptedRootsBySheet, sheet);
     if (!refs) return [];
     const roots = [];
     for (const ref of Array.from(refs)) {
@@ -12208,7 +12371,7 @@ let omoikaneUserActivationState;
   }
 
   function detachAdoptedRootFromSheet(root, sheet) {
-    const refs = adoptedRootsBySheet.get(sheet);
+    const refs = safeWeakMapGet(adoptedRootsBySheet, sheet);
     if (!refs) return;
     for (const ref of Array.from(refs)) {
       const target = adoptedRefTarget(ref);
@@ -12217,10 +12380,10 @@ let omoikaneUserActivationState;
   }
 
   function attachAdoptedRootToSheet(root, sheet) {
-    let refs = adoptedRootsBySheet.get(sheet);
+    let refs = safeWeakMapGet(adoptedRootsBySheet, sheet);
     if (!refs) {
       refs = new Set();
-      adoptedRootsBySheet.set(sheet, refs);
+      safeWeakMapSet(adoptedRootsBySheet, sheet, refs);
     }
     if (!adoptedRootsForSheet(sheet).includes(root)) {
       refs.add(typeof WeakRef === "function" ? new WeakRef(root) : root);
@@ -12333,7 +12496,7 @@ let omoikaneUserActivationState;
         return false;
       },
     });
-    adoptedListReplacers.set(observable, candidate => commit(candidate));
+    safeWeakMapSet(adoptedListReplacers, observable, candidate => commit(candidate));
     if (values.length) commit(values.slice());
     return observable;
   }
@@ -12344,17 +12507,17 @@ let omoikaneUserActivationState;
     // Keep the JS bookkeeping unchanged if the native root has already been
     // detached or otherwise rejects the update.
     __omoikane_set_adopted_stylesheets(root.__id, cssText);
-    const previous = adoptedStyleSheetsByRoot.get(root) || [];
+    const previous = safeWeakMapGet(adoptedStyleSheetsByRoot, root) || [];
     for (const sheet of previous) detachAdoptedRootFromSheet(root, sheet);
-    adoptedStyleSheetsByRoot.set(root, value);
+    safeWeakMapSet(adoptedStyleSheetsByRoot, root, value);
     for (const sheet of value) attachAdoptedRootToSheet(root, sheet);
   }
 
   function adoptedStyleSheetsForRoot(root) {
-    let value = adoptedStyleSheetsByRoot.get(root);
+    let value = safeWeakMapGet(adoptedStyleSheetsByRoot, root);
     if (!value) {
       value = makeAdoptedStyleSheetList(root);
-      adoptedStyleSheetsByRoot.set(root, value);
+      safeWeakMapSet(adoptedStyleSheetsByRoot, root, value);
     }
     return value;
   }
@@ -12369,7 +12532,7 @@ let omoikaneUserActivationState;
     // The ObservableArray setter replaces the backing list, preserving the
     // object returned by earlier getter calls. `commit` validates and rolls
     // back the list itself if the native update fails.
-    adoptedListReplacers.get(list)(values.slice());
+    safeWeakMapGet(adoptedListReplacers, list)(values.slice());
   }
 
   class CSSStyleSheet {
@@ -12414,7 +12577,7 @@ let omoikaneUserActivationState;
     }
     __syncAdoptedRoots() {
       for (const root of adoptedRootsForSheet(this)) {
-        const list = adoptedStyleSheetsByRoot.get(root);
+        const list = safeWeakMapGet(adoptedStyleSheetsByRoot, root);
         if (list) syncAdoptedStyleSheetRoot(root, list);
       }
     }
@@ -12815,7 +12978,7 @@ let omoikaneUserActivationState;
     return internalNodeLocalName(frame) === "iframe" && frame.hasAttribute("srcdoc");
   }
 
-  class HTMLIFrameElement extends HTMLElement {
+  /* @omoikane-bootstrap window-only HTMLIFrameElement-1187 */class HTMLIFrameElement extends HTMLElement {
     constructor(...args) {
       super(args[0], htmlConstructorInterfaceToken,
         args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLIFrameElement);
@@ -13774,7 +13937,7 @@ let omoikaneUserActivationState;
     "video/mp4", "video/ogg", "video/webm", "video/mpeg",
   ]);
 
-  const mediaErrorConstructionToken = {};
+  /* @omoikane-bootstrap end */const mediaErrorConstructionToken = {};
   class MediaError {
     constructor(token, code, message = "") {
       if (token !== mediaErrorConstructionToken) throw new TypeError("Illegal constructor");
@@ -13783,7 +13946,7 @@ let omoikaneUserActivationState;
     }
     get [Symbol.toStringTag]() { return "MediaError"; }
   }
-  MediaError.MEDIA_ERR_ABORTED = 1;
+  /* @omoikane-bootstrap window-only dom-initialization-1206 */MediaError.MEDIA_ERR_ABORTED = 1;
   MediaError.MEDIA_ERR_NETWORK = 2;
   MediaError.MEDIA_ERR_DECODE = 3;
   MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED = 4;
@@ -13819,7 +13982,7 @@ let omoikaneUserActivationState;
     return Number.isFinite(duration) && duration >= 0 ? duration : 1;
   }
 
-  function queueMediaTask(callback) {
+  /* @omoikane-bootstrap end */function queueMediaTask(callback) {
     if (typeof __omoikane_queue_media_task === "function") {
       __omoikane_queue_media_task(callback);
     } else if (typeof __omoikane_queue_dom_manipulation_task === "function") {
@@ -13829,7 +13992,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  class HTMLMediaElement extends HTMLElement {
+  /* @omoikane-bootstrap window-only HTMLMediaElement-1216 */class HTMLMediaElement extends HTMLElement {
     constructor(id = undefined, interfaceToken, constructorInterface) {
       super(id, htmlConstructorInterfaceToken,
         interfaceToken === htmlConstructorInterfaceToken ? constructorInterface : HTMLMediaElement);
@@ -14984,38 +15147,38 @@ let omoikaneUserActivationState;
   // it. The shared browsing-context registry provides cross-Realm IDL branding.
   const internalsObjects = browsingInput.internalsObjects ||
     (browsingInput.internalsObjects = new WeakMap());
-  const formDataObjects = browsingInput.formDataObjects ||
+  /* @omoikane-bootstrap end */const formDataObjects = browsingInput.formDataObjects ||
     (browsingInput.formDataObjects = new WeakMap());
   const fileObjects = browsingInput.fileObjects ||
     (browsingInput.fileObjects = new WeakMap());
-  const nativeRegisterValidation = globalThis.__omoikane_register_validation;
-  const nativeFlushValidation = globalThis.__omoikane_flush_validation;
+  /* @omoikane-bootstrap window-only nativeRegisterValidation-1254 */const nativeRegisterValidation = globalThis.__omoikane_register_validation;
+  /* @omoikane-bootstrap end */const nativeFlushValidation = globalThis.__omoikane_flush_validation;
   const nativeInvalidateValidation = globalThis.__omoikane_invalidate_validation;
   const nativeSetUserValidity = globalThis.__omoikane_set_user_validity;
-  delete globalThis.__omoikane_set_user_validity;
-  const nativeSetControlValueEmpty = globalThis.__omoikane_set_control_value_empty;
+  /* @omoikane-bootstrap window-only dom-initialization-1258 */delete globalThis.__omoikane_set_user_validity;
+  /* @omoikane-bootstrap end */const nativeSetControlValueEmpty = globalThis.__omoikane_set_control_value_empty;
   const nativeSanitizeInputValue = globalThis.__omoikane_sanitize_input_value;
   const nativeSanitizeRange = globalThis.__omoikane_sanitize_range;
   const nativeInputNumber = globalThis.__omoikane_input_number;
-  const nativeAdvanceInputNumber = globalThis.__omoikane_advance_input_number;
-  const nativeInputStepMismatch = globalThis.__omoikane_input_step_mismatch;
+  /* @omoikane-bootstrap window-only nativeAdvanceInputNumber-1263 */const nativeAdvanceInputNumber = globalThis.__omoikane_advance_input_number;
+  /* @omoikane-bootstrap end */const nativeInputStepMismatch = globalThis.__omoikane_input_step_mismatch;
   const nativeInputType = globalThis.__omoikane_input_type;
-  const nativeButtonType = globalThis.__omoikane_button_type;
-  const nativeGetIndeterminate = globalThis.__omoikane_get_indeterminate;
+  /* @omoikane-bootstrap window-only nativeButtonType-1266 */const nativeButtonType = globalThis.__omoikane_button_type;
+  /* @omoikane-bootstrap end */const nativeGetIndeterminate = globalThis.__omoikane_get_indeterminate;
   const nativeSetIndeterminate = globalThis.__omoikane_set_indeterminate;
-  const nativeResetCheckedness = globalThis.__omoikane_reset_checkedness;
-  const nativeCheckableGetChecked = globalThis.__omoikane_get_checked;
+  /* @omoikane-bootstrap window-only nativeResetCheckedness-1269 */const nativeResetCheckedness = globalThis.__omoikane_reset_checkedness;
+  /* @omoikane-bootstrap end */const nativeCheckableGetChecked = globalThis.__omoikane_get_checked;
   const nativeCheckableSetChecked = globalThis.__omoikane_set_checked;
   const nativeCheckableQueryAll = globalThis.__omoikane_query_selector_all;
-  const nativeFormDispatch = Function.prototype.call.bind(Node.prototype.dispatchEvent);
-  const formControlTypeError = TypeError;
+  /* @omoikane-bootstrap window-only nativeFormDispatch-1273 */const nativeFormDispatch = Function.prototype.call.bind(Node.prototype.dispatchEvent);
+  /* @omoikane-bootstrap end */const formControlTypeError = TypeError;
   const formRadioIdSet = Set;
   const formRadioIdAdd = Function.prototype.call.bind(Set.prototype.add);
   const formRadioIdHas = Function.prototype.call.bind(Set.prototype.has);
   const formRadioIdSize = Function.prototype.call.bind(Object.getOwnPropertyDescriptor(Set.prototype, "size").get);
 
 
-  const removeFormAttributeNS = Function.prototype.call.bind(Element.prototype.removeAttributeNS);
+  /* @omoikane-bootstrap window-only removeFormAttributeNS-1279 */const removeFormAttributeNS = Function.prototype.call.bind(Element.prototype.removeAttributeNS);
   const nativeValidationTree = globalThis.__omoikane_validation_tree;
   delete globalThis.__omoikane_register_validation;
   delete globalThis.__omoikane_flush_validation;
@@ -15032,7 +15195,7 @@ let omoikaneUserActivationState;
   delete globalThis.__omoikane_set_indeterminate;
   delete globalThis.__omoikane_reset_checkedness;
   delete globalThis.__omoikane_validation_tree;
-  let validationReady = false;
+  /* @omoikane-bootstrap end */let validationReady = false;
 
   function htmlInputControlId(element) {
     if (!hasCanonicalWrapperId(canonicalHtmlElementIds, element) ||
@@ -15162,7 +15325,7 @@ let omoikaneUserActivationState;
     return snapshot;
   }
 
-  function restoreCanceledCheckable(snapshot) {
+  /* @omoikane-bootstrap window-only restoreCanceledCheckable-1307 */function restoreCanceledCheckable(snapshot) {
     const element = snapshot.element, id = internalNodeId(element), type = checkableType(element);
     if (type === "checkbox") {
       nativeCheckableSetChecked(id, snapshot.checked);
@@ -15199,21 +15362,21 @@ let omoikaneUserActivationState;
     else removeFormAttributeNS(element, null, name);
   }
 
-  const nativeParserFormOwner = globalThis.__omoikane_parser_form_owner;
-  delete globalThis.__omoikane_parser_form_owner;
-  const nativeValidCustomElementName = globalThis.__omoikane_valid_custom_element_name;
-  delete globalThis.__omoikane_valid_custom_element_name;
-  const nativeCustomElementIs = globalThis.__omoikane_custom_element_is;
-  delete globalThis.__omoikane_custom_element_is;
-  const nativeSetCustomElementDefined = globalThis.__omoikane_set_custom_element_defined;
-  delete globalThis.__omoikane_set_custom_element_defined;
-  const nativeSetFormAssociatedCustom = globalThis.__omoikane_set_form_associated_custom;
-  delete globalThis.__omoikane_set_form_associated_custom;
-  const customInternalsDefinitions = browsingInput.customInternalsDefinitions ||
+  /* @omoikane-bootstrap end */const nativeParserFormOwner = globalThis.__omoikane_parser_form_owner;
+  /* @omoikane-bootstrap window-only dom-initialization-1311 */delete globalThis.__omoikane_parser_form_owner;
+  /* @omoikane-bootstrap end */const nativeValidCustomElementName = globalThis.__omoikane_valid_custom_element_name;
+  /* @omoikane-bootstrap window-only dom-initialization-1313 */delete globalThis.__omoikane_valid_custom_element_name;
+  /* @omoikane-bootstrap end */const nativeCustomElementIs = globalThis.__omoikane_custom_element_is;
+  /* @omoikane-bootstrap window-only dom-initialization-1315 */delete globalThis.__omoikane_custom_element_is;
+  /* @omoikane-bootstrap end */const nativeSetCustomElementDefined = globalThis.__omoikane_set_custom_element_defined;
+  /* @omoikane-bootstrap window-only dom-initialization-1317 */delete globalThis.__omoikane_set_custom_element_defined;
+  /* @omoikane-bootstrap end */const nativeSetFormAssociatedCustom = globalThis.__omoikane_set_form_associated_custom;
+  /* @omoikane-bootstrap window-only dom-initialization-1319 */delete globalThis.__omoikane_set_form_associated_custom;
+  /* @omoikane-bootstrap end */const customInternalsDefinitions = browsingInput.customInternalsDefinitions ||
     (browsingInput.customInternalsDefinitions = new WeakMap());
-  const internalsConstructionToken = {};
+  /* @omoikane-bootstrap window-only internalsConstructionToken-1321 */const internalsConstructionToken = {};
 
-  function formDataEntries(value) {
+  /* @omoikane-bootstrap end */function formDataEntries(value) {
     const entries = safeWeakMapGet(formDataObjects, value);
     if (!entries) throw new TypeError("Illegal FormData invocation");
     return entries;
@@ -15252,7 +15415,7 @@ let omoikaneUserActivationState;
     return !!state && state.definition.formAssociated && state.phase === "custom";
   }
 
-  function internalsTarget(object, requireForm = true) {
+  /* @omoikane-bootstrap window-only internalsTarget-1328 */function internalsTarget(object, requireForm = true) {
     const state = safeWeakMapGet(internalsObjects, object);
     if (!state) throw new TypeError("Illegal invocation");
     if (requireForm && (!state.definition.formAssociated ||
@@ -15262,7 +15425,7 @@ let omoikaneUserActivationState;
     return state;
   }
 
-  function formTreeRoot(element) {
+  /* @omoikane-bootstrap end */function formTreeRoot(element) {
     let root = element;
     while (internalParentNode(root)) root = internalParentNode(root);
     return root;
@@ -15326,7 +15489,7 @@ let omoikaneUserActivationState;
     if (internalIsConnected(element)) scheduleCustomFormRestoration();
   }
 
-  function isListedFormControl(element) {
+  /* @omoikane-bootstrap window-only isListedFormControl-1334 */function isListedFormControl(element) {
     return internalNodeType(element) === 1 &&
       (FORM_CONTROL_TAGS.has(String(internalNodeLocalName(element)).toUpperCase()) ||
        isFormAssociatedElement(element));
@@ -15480,9 +15643,9 @@ let omoikaneUserActivationState;
 
   const nativeUpdateCustomState = globalThis.__omoikane_update_custom_state;
   delete globalThis.__omoikane_update_custom_state;
-  const customStateSetObjects = browsingInput.customStateSetObjects ||
+  /* @omoikane-bootstrap end */const customStateSetObjects = browsingInput.customStateSetObjects ||
     (browsingInput.customStateSetObjects = new WeakMap());
-  const customStateSetToken = {};
+  /* @omoikane-bootstrap window-only customStateSetToken-1349 */const customStateSetToken = {};
   const customStateSetConstructor = Set;
   const customStateSetClear = Function.prototype.call.bind(Set.prototype.clear);
   const customStateSetSize = Function.prototype.call.bind(
@@ -15626,15 +15789,15 @@ let omoikaneUserActivationState;
 
   const nativeRegisterFormState = globalThis.__omoikane_register_form_state;
   delete globalThis.__omoikane_register_form_state;
-  const formStateStringify = JSON.stringify;
-  const formStateParse = JSON.parse;
-  const queueFormStateTask = globalThis.__omoikane_queue_dom_manipulation_task;
+  /* @omoikane-bootstrap end */const formStateStringify = JSON.stringify;
+  /* @omoikane-bootstrap window-only formStateParse-1369 */const formStateParse = JSON.parse;
+  /* @omoikane-bootstrap end */const queueFormStateTask = globalThis.__omoikane_queue_dom_manipulation_task;
   let formStateDocument = null;
   let pendingFormRestoration = new Map();
   let pendingFormRestoreMode = "restore";
   let formRestoreTaskQueued = false;
 
-  function serializeCustomFormValue(value) {
+  /* @omoikane-bootstrap window-only serializeCustomFormValue-1375 */function serializeCustomFormValue(value) {
     if (typeof value === "string") return { kind: "string", value };
     if (isFile(value)) return {
       kind: "file", bytes: base64FromBytes(value.__bytes),
@@ -15669,7 +15832,7 @@ let omoikaneUserActivationState;
     throw new TypeError("Invalid saved form value");
   }
 
-  function visitFormStateElements(callback) {
+  /* @omoikane-bootstrap end */function visitFormStateElements(callback) {
     if (!formStateDocument) return;
     const visit = (node, path) => {
       if (internalNodeType(node) === 1) {
@@ -15683,7 +15846,7 @@ let omoikaneUserActivationState;
     visit(formStateDocument, []);
   }
 
-  function captureCustomFormState() {
+  /* @omoikane-bootstrap window-only captureCustomFormState-1378 */function captureCustomFormState() {
     const records = [];
     visitFormStateElements((element, path) => {
       const state = customInternalsState(element);
@@ -15695,7 +15858,7 @@ let omoikaneUserActivationState;
     return formStateStringify(records);
   }
 
-  function scheduleCustomFormRestoration() {
+  /* @omoikane-bootstrap end */function scheduleCustomFormRestoration() {
     if (!pendingFormRestoration.size || formRestoreTaskQueued) return;
     formRestoreTaskQueued = true;
     queueFormStateTask(() => {
@@ -15717,7 +15880,7 @@ let omoikaneUserActivationState;
     });
   }
 
-  function restoreCustomFormState(json, mode) {
+  /* @omoikane-bootstrap window-only restoreCustomFormState-1380 */function restoreCustomFormState(json, mode) {
     const records = formStateParse(json);
     if (!Array.isArray(records)) throw new TypeError("Invalid form state snapshot");
     const pending = new Map();
@@ -15737,7 +15900,7 @@ let omoikaneUserActivationState;
   // A DOM move has a removal reaction followed by an insertion reaction. Hold
   // both until the native mutation is complete; callbacks may then mutate DOM
   // again without seeing a half-applied tree operation.
-  const customFormReactions = browsingInput.customFormReactions ||
+  /* @omoikane-bootstrap end */const customFormReactions = browsingInput.customFormReactions ||
     (browsingInput.customFormReactions = { pending: [], delivering: false });
   const formIdWatches = browsingInput.formIdWatches ||
     (browsingInput.formIdWatches = new Map());
@@ -15853,21 +16016,21 @@ let omoikaneUserActivationState;
   }
 
 
-  const FORM_CONTROL_TAGS = new Set([
+  /* @omoikane-bootstrap window-only FORM_CONTROL_TAGS-1390 */const FORM_CONTROL_TAGS = new Set([
     "INPUT", "SELECT", "TEXTAREA", "BUTTON", "FIELDSET", "OBJECT", "OUTPUT", "KEYGEN",
   ]);
 
-  function normalizeFormLineBreaks(value) {
+  /* @omoikane-bootstrap end */function normalizeFormLineBreaks(value) {
     return String(value).replace(/\r(?!\n)|(?<!\r)\n/g, "\r\n");
   }
 
   // Encodings that cannot carry a file — `application/x-www-form-urlencoded` and
   // `text/plain` — submit a File entry as its filename.
-  function formEntryValueAsText(value) {
+  /* @omoikane-bootstrap window-only formEntryValueAsText-1392 */function formEntryValueAsText(value) {
     return isFile(value) ? value.name : String(value);
   }
 
-  function collectFormEntries(form, submitter = null) {
+  /* @omoikane-bootstrap end */function collectFormEntries(form, submitter = null) {
     const entries = [];
     for (const control of form.__controls()) {
       const name = control.getAttribute("name") || "";
@@ -15913,7 +16076,7 @@ let omoikaneUserActivationState;
     return entries;
   }
 
-  function formUrlEncode(entries) {
+  /* @omoikane-bootstrap window-only formUrlEncode-1394 */function formUrlEncode(entries) {
     const encode = value => encodeURIComponent(normalizeFormLineBreaks(value))
       .replace(/%20/g, "+").replace(/[!'()~]/g, c => "%" + c.charCodeAt(0).toString(16).toUpperCase());
     return entries.map(([name, value]) => encode(name) + "=" + encode(formEntryValueAsText(value))).join("&");
@@ -15926,7 +16089,7 @@ let omoikaneUserActivationState;
   // The multipart/form-data encoding algorithm escapes CR, LF and `"` in field
   // names and filenames rather than dropping them, so a name can never break out
   // of its Content-Disposition header.
-  function escapeMultipartHeaderValue(value) {
+  /* @omoikane-bootstrap end */function escapeMultipartHeaderValue(value) {
     return String(value).replace(/\r/g, "%0D").replace(/\n/g, "%0A").replace(/"/g, "%22");
   }
 
@@ -16027,12 +16190,12 @@ let omoikaneUserActivationState;
     }
   }
 
-  const VALIDATED_INPUT_TYPES = new Set([
+  /* @omoikane-bootstrap window-only VALIDATED_INPUT_TYPES-1402 */const VALIDATED_INPUT_TYPES = new Set([
     "checkbox", "color", "date", "datetime-local", "email", "file", "month",
     "number", "password", "radio", "range", "search", "submit", "tel", "text",
     "time", "url", "week",
   ]);
-  const REQUIRED_INPUT_TYPES = new Set([
+  /* @omoikane-bootstrap end */const REQUIRED_INPUT_TYPES = new Set([
     "checkbox", "date", "datetime-local", "email", "file", "month", "number",
     "password", "radio", "search", "tel", "text", "time", "url", "week",
   ]);
@@ -16045,15 +16208,15 @@ let omoikaneUserActivationState;
   const RANGE_INPUT_TYPES = new Set([
     "date", "datetime-local", "month", "number", "range", "time", "week",
   ]);
-  const BARRED_INPUT_TYPES = new Set(["button", "hidden", "image", "reset"]);
-  const DAY_MILLISECONDS = 86_400_000;
+  /* @omoikane-bootstrap window-only BARRED_INPUT_TYPES-1407 */const BARRED_INPUT_TYPES = new Set(["button", "hidden", "image", "reset"]);
+  /* @omoikane-bootstrap end */const DAY_MILLISECONDS = 86_400_000;
   const WEEK_MILLISECONDS = 7 * DAY_MILLISECONDS;
 
   function htmlFormControlLocalName(control) {
     return hasCanonicalWrapperId(canonicalHtmlElementIds, control) ? internalNodeLocalName(control) : "";
   }
 
-  function isoWeeksInYear(year) {
+  /* @omoikane-bootstrap window-only isoWeeksInYear-1411 */function isoWeeksInYear(year) {
     const januaryFirstDate = new Date(0);
     januaryFirstDate.setUTCFullYear(year, 0, 1);
     januaryFirstDate.setUTCHours(0, 0, 0, 0);
@@ -16079,7 +16242,7 @@ let omoikaneUserActivationState;
     return firstMonday + (week - 1) * WEEK_MILLISECONDS;
   }
 
-  function inputValueAsNumber(type, value) {
+  /* @omoikane-bootstrap end */function inputValueAsNumber(type, value) {
     const number = nativeInputNumber(type, String(value), false);
     return Number.isNaN(number) ? null : number;
   }
@@ -16189,7 +16352,7 @@ let omoikaneUserActivationState;
     return false;
   }
 
-  function buildRadioGroupStates(controls) {
+  /* @omoikane-bootstrap window-only buildRadioGroupStates-1422 */function buildRadioGroupStates(controls) {
     const states = new Map();
     for (const control of controls) {
       if (htmlFormControlLocalName(control) !== "input" || control.type !== "radio" || !control.name) continue;
@@ -16204,7 +16367,7 @@ let omoikaneUserActivationState;
     return states;
   }
 
-  function constraintValidityFlags(control, radioGroups = null) {
+  /* @omoikane-bootstrap end */function constraintValidityFlags(control, radioGroups = null) {
     const internals = customInternalsState(control);
     if (internals?.definition.formAssociated) {
       return { ...internals.flags, valid: !Object.values(internals.flags).some(Boolean) };
@@ -16249,7 +16412,7 @@ let omoikaneUserActivationState;
     return false;
   }
 
-  function controlWillValidate(control) {
+  /* @omoikane-bootstrap window-only controlWillValidate-1425 */function controlWillValidate(control) {
     if (control.__isDisabledControl() || hasDataListAncestor(control)) return false;
     if (isFormAssociatedElement(control)) return nativeAttribute(control, "readonly") === null;
     if (htmlFormControlLocalName(control) === "input") {
@@ -16344,7 +16507,7 @@ let omoikaneUserActivationState;
     return false;
   }
 
-  const validityStateConstructionToken = {};
+  /* @omoikane-bootstrap end */const validityStateConstructionToken = {};
 
   class ValidityState {
     constructor(control, token) {
@@ -16364,7 +16527,7 @@ let omoikaneUserActivationState;
     get valid() { return constraintValidityFlags(this.__control).valid; }
   }
 
-  function installConstraintValidationApi(prototype) {
+  /* @omoikane-bootstrap window-only installConstraintValidationApi-1431 */function installConstraintValidationApi(prototype) {
     Object.defineProperties(prototype, {
       form: {
         configurable: true, enumerable: true,
@@ -16576,7 +16739,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  const TEXT_INPUT_TYPES = new Set(["text", "search", "tel", "url", "email", "password"]);
+  /* @omoikane-bootstrap end */const TEXT_INPUT_TYPES = new Set(["text", "search", "tel", "url", "email", "password"]);
 
   function isTextControl(control) {
     return control instanceof HTMLTextAreaElement ||
@@ -16647,7 +16810,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  function setTextControlSelectionRange(control, start, end, direction) {
+  /* @omoikane-bootstrap window-only setTextControlSelectionRange-1440 */function setTextControlSelectionRange(control, start, end, direction) {
     if (!isTextControl(control)) throw new DOMException("The input type does not support selection", "InvalidStateError");
     setTextControlSelection(control, start, end, direction);
   }
@@ -16676,7 +16839,7 @@ let omoikaneUserActivationState;
     control.dispatchEvent(new Event("select", { bubbles: true }));
   }
 
-  function beginTextControlFocus(control) {
+  /* @omoikane-bootstrap end */function beginTextControlFocus(control) {
     if (temporalInputKind(control)) {
       const state = temporalInputState(control);
       state.index = 0;
@@ -17011,7 +17174,7 @@ let omoikaneUserActivationState;
     return true;
   }
 
-  const supportedEditingCommands = new Set([
+  /* @omoikane-bootstrap window-only supportedEditingCommands-1466 */const supportedEditingCommands = new Set([
     "bold", "copy", "cut", "delete", "forwarddelete", "inserttext",
   ]);
   const executingEditingCommands = browsingInput.executingEditingCommands ||
@@ -17144,7 +17307,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  function moveTextControlCaret(control, destination, extend) {
+  /* @omoikane-bootstrap end */function moveTextControlCaret(control, destination, extend) {
     const start = control.selectionStart;
     const end = control.selectionEnd;
     const clamped = Math.min(Math.max(destination, 0), control.value.length);
@@ -17297,7 +17460,7 @@ let omoikaneUserActivationState;
     return findElementByIdInRoot(nodeRoot(control), id);
   }
 
-  function setPopoverTargetElement(control, target) {
+  /* @omoikane-bootstrap window-only setPopoverTargetElement-1480 */function setPopoverTargetElement(control, target) {
     if (target === null) {
       popoverTargetOverrides.delete(control);
       control.removeAttribute("popovertarget");
@@ -17327,7 +17490,7 @@ let omoikaneUserActivationState;
 
   // Element reflection: an explicitly set element is exposed while it is in
   // the control's tree or in a tree containing one of its shadow hosts.
-  function reflectedElementInScope(control, element) {
+  /* @omoikane-bootstrap end */function reflectedElementInScope(control, element) {
     const elementRoot = nodeRoot(element);
     for (let root = nodeRoot(control); root; root = root.host ? nodeRoot(root.host) : null) {
       if (root === elementRoot) return true;
@@ -17335,7 +17498,7 @@ let omoikaneUserActivationState;
     return false;
   }
 
-  function commandForElementFor(button) {
+  /* @omoikane-bootstrap window-only commandForElementFor-1486 */function commandForElementFor(button) {
     const override = commandForOverrides.get(button);
     if (override && reflectedElementInScope(button, override)) return override;
     const id = button.getAttribute("commandfor");
@@ -17393,7 +17556,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  function isPopoverInvokerControl(control) {
+  /* @omoikane-bootstrap end */function isPopoverInvokerControl(control) {
     if (!(control instanceof Element)) return false;
     if (control.nodeName === "BUTTON") return true;
     if (control.nodeName !== "INPUT") return false;
@@ -17401,7 +17564,7 @@ let omoikaneUserActivationState;
     return ["button", "reset", "submit", "image"].includes(type);
   }
 
-  function installPopoverTargetMixin(prototype) {
+  /* @omoikane-bootstrap window-only installPopoverTargetMixin-1490 */function installPopoverTargetMixin(prototype) {
     Object.defineProperties(prototype, {
       popoverTargetElement: {
         configurable: true,
@@ -17430,7 +17593,7 @@ let omoikaneUserActivationState;
   }
 
   // Explicit numeric input and UTC operations avoid clock/time-zone dependence.
-  function temporalInputKind(control) {
+  /* @omoikane-bootstrap end */function temporalInputKind(control) {
     if (!hasCanonicalWrapperId(canonicalHtmlElementIds, control) ||
         internalNodeLocalName(control) !== "input") return "";
     const kind = nativeInputType(internalNodeId(control));
@@ -17561,7 +17724,7 @@ let omoikaneUserActivationState;
     return true;
   }
 
-  function inputNumberString(kind, value) {
+  /* @omoikane-bootstrap window-only inputNumberString-1500 */function inputNumberString(kind, value) {
     if (kind === "number" || kind === "range") return String(value);
     if (kind === "time") return inputNumberTimeString(value);
     const yearString = year => String(year).padStart(4, "0");
@@ -18030,7 +18193,7 @@ let omoikaneUserActivationState;
 
   // The select's list of options, including options wrapped in other
   // elements (customizable select).
-  function selectListOfOptions(select) {
+  /* @omoikane-bootstrap end */function selectListOfOptions(select) {
     const ids = nativeSelectOptions(internalNodeId(select));
     return ids ? ids.map(wrapNode) : [];
   }
@@ -18388,7 +18551,7 @@ let omoikaneUserActivationState;
     notifySelectInput(control, target, control.multiple && Boolean(init.ctrlKey || init.metaKey));
   }
 
-  class HTMLFieldSetElement extends HTMLElement {
+  /* @omoikane-bootstrap window-only HTMLFieldSetElement-1539 */class HTMLFieldSetElement extends HTMLElement {
     constructor(...args) {
       super(args[0], htmlConstructorInterfaceToken,
         args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLFieldSetElement);
@@ -18642,7 +18805,7 @@ let omoikaneUserActivationState;
   }
 
   /// An `[EnforceRange] unsigned long` argument.
-  function enforceUnsignedLong(value) {
+  /* @omoikane-bootstrap end */function enforceUnsignedLong(value) {
     const number = Number(value);
     if (!Number.isFinite(number) || Math.trunc(number) < 0 || Math.trunc(number) > 0xffffffff)
       throw new TypeError("Value is outside the 'unsigned long' range");
@@ -20635,7 +20798,7 @@ let omoikaneUserActivationState;
     next.webgl = previous.webgl;
   }
 
-  class HTMLCanvasElement extends HTMLElement {
+  /* @omoikane-bootstrap window-only HTMLCanvasElement-1668 */class HTMLCanvasElement extends HTMLElement {
     constructor(...args) {
       super(args[0], htmlConstructorInterfaceToken,
         args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLCanvasElement);
@@ -20705,7 +20868,7 @@ let omoikaneUserActivationState;
       return offscreen;
     }
   }
-  function canvasRejectPlaceholder(canvas){
+  /* @omoikane-bootstrap end */function canvasRejectPlaceholder(canvas){
     const s=canvasStates.get(canvas);
     if(s&&s.contextMode==="placeholder")throw new DOMException("The canvas has transferred control to an OffscreenCanvas","InvalidStateError");
   }
@@ -20875,7 +21038,7 @@ let omoikaneUserActivationState;
     }
   };
 
-  class HTMLLinkElement extends HTMLElement {
+  /* @omoikane-bootstrap window-only HTMLLinkElement-1682 */class HTMLLinkElement extends HTMLElement {
     constructor(...args) {
       super(args[0], htmlConstructorInterfaceToken,
         args[1] === htmlConstructorInterfaceToken ? args[2] : HTMLLinkElement);
@@ -20933,7 +21096,7 @@ let omoikaneUserActivationState;
   // expose the deterministic geometry interfaces used by scripts.  The
   // native DOM deliberately keeps no layout-specific SVG state, so geometry
   // is derived from the element attributes and the SVG ancestor chain here.
-  function finiteSvgNumber(value, fallback = 0) {
+  /* @omoikane-bootstrap end */function finiteSvgNumber(value, fallback = 0) {
     const number = Number(value);
     return Number.isFinite(number) ? number : fallback;
   }
@@ -20951,7 +21114,7 @@ let omoikaneUserActivationState;
     return numbers ? numbers.map(number => Number(number)).filter(Number.isFinite) : [];
   }
 
-  function svgRectBounds(points) {
+  /* @omoikane-bootstrap window-only svgRectBounds-1686 */function svgRectBounds(points) {
     if (!points || points.length === 0) return new SVGRect();
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const point of points) {
@@ -20975,7 +21138,7 @@ let omoikaneUserActivationState;
     return new SVGRect(minX, minY, Math.max(0, maxX - minX), Math.max(0, maxY - minY));
   }
 
-  class SVGRect {
+  /* @omoikane-bootstrap end */class SVGRect {
     constructor(x = 0, y = 0, width = 0, height = 0) {
       this.x = finiteSvgNumber(x);
       this.y = finiteSvgNumber(y);
@@ -21146,7 +21309,7 @@ let omoikaneUserActivationState;
     toArray() { return Object.values(matrixAliases).map(index => matrixRecord(this).values[index]); }
     get [Symbol.toStringTag]() { return "DOMMatrix"; }
   }
-  const matrixProperties = { ...matrixAliases };
+  /* @omoikane-bootstrap window-only matrixProperties-1703 */const matrixProperties = { ...matrixAliases };
   for (let column = 1; column <= 4; column++) {
     for (let row = 1; row <= 4; row++) matrixProperties['m' + column + row] = (column - 1) * 4 + row - 1;
   }
@@ -21168,7 +21331,7 @@ let omoikaneUserActivationState;
     Object.defineProperty(DOMMatrix.prototype, name, { enumerable: true });
   }
 
-  class SVGMatrix extends DOMMatrix {
+  /* @omoikane-bootstrap end */class SVGMatrix extends DOMMatrix {
     get [Symbol.toStringTag]() { return "SVGMatrix"; }
   }
 
@@ -21208,7 +21371,7 @@ let omoikaneUserActivationState;
     return result;
   }
 
-  function svgTransformForElement(element) {
+  /* @omoikane-bootstrap window-only svgTransformForElement-1710 */function svgTransformForElement(element) {
     let matrix = new DOMMatrix();
     const tag = String(element && element.localName || "").toLowerCase();
     if (tag === "svg") {
@@ -21797,7 +21960,7 @@ let omoikaneUserActivationState;
   class SVGTSpanElement extends SVGTextPositioningElement {}
   class SVGTextPathElement extends SVGTextContentElement {}
 
-  function svgViewBoxValues(element) {
+  /* @omoikane-bootstrap end */function svgViewBoxValues(element) {
     const values = svgNumberList(element.getAttribute("viewBox") || element.getAttribute("viewbox"));
     return [values[0] || 0, values[1] || 0, values[2] || 0, values[3] || 0];
   }
@@ -21881,7 +22044,7 @@ let omoikaneUserActivationState;
     get [Symbol.toStringTag]() { return "SVGAnimatedString"; }
   }
 
-  function defineSvgAnimatedLengthProperties(ctor, names) {
+  /* @omoikane-bootstrap window-only defineSvgAnimatedLengthProperties-1752 */function defineSvgAnimatedLengthProperties(ctor, names) {
     for (const name of names) {
       Object.defineProperty(ctor.prototype, name, {
         configurable: true,
@@ -22049,7 +22212,7 @@ let omoikaneUserActivationState;
   // HTML elements with an HTMLElement-derived interface, including obsolete
   // elements that still have a defined HTML interface. HTMLUnknownElement names
   // are excluded, as are autonomous custom element names.
-  const customizableBuiltinNames = new Set((
+  /* @omoikane-bootstrap end */const customizableBuiltinNames = new Set((
     "a abbr acronym address area article aside audio b base basefont bdi bdo big blockquote body br button " +
     "canvas caption center cite code col colgroup data datalist dd del details dfn dialog dir div dl dt em embed " +
     "fieldset figcaption figure font footer form frame frameset h1 h2 h3 h4 h5 h6 head header hgroup hr html i iframe " +
@@ -22060,7 +22223,7 @@ let omoikaneUserActivationState;
   ).split(" "));
 
   const CUSTOM_ELEMENT_REGISTRY_CONSTRUCTION = {};
-  const customElementSequenceIterator = Symbol.iterator;
+  /* @omoikane-bootstrap window-only customElementSequenceIterator-1776 */const customElementSequenceIterator = Symbol.iterator;
 
   function requireCustomElementInterface(definition, constructorInterface) {
     const expected = definition.localName === definition.name
@@ -22088,11 +22251,11 @@ let omoikaneUserActivationState;
     }
   }
 
-  function isValidCustomElementName(name) {
+  /* @omoikane-bootstrap end */function isValidCustomElementName(name) {
     return nativeValidCustomElementName(name);
   }
 
-  function isConstructor(value) {
+  /* @omoikane-bootstrap window-only isConstructor-1780 */function isConstructor(value) {
     if (typeof value !== "function") return false;
     try {
       const probe = new Proxy(value, {
@@ -22105,7 +22268,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  function invokeCustomElementCallback(element, callbackName, args) {
+  /* @omoikane-bootstrap end */function invokeCustomElementCallback(element, callbackName, args) {
     if (!element || element.__customElementState !== "custom") return;
     const definition = element.__customElementDefinition;
     const callback = definition && definition.callbacks[callbackName];
@@ -22300,7 +22463,7 @@ let omoikaneUserActivationState;
 
   // Copy private state in native clone creation order, including template
   // contents. Only explicit registry associations can upgrade inert contents.
-  function preserveClonedNodeState(source, target, deep, fallbackRegistry, candidates) {
+  /* @omoikane-bootstrap window-only preserveClonedNodeState-1790 */function preserveClonedNodeState(source, target, deep, fallbackRegistry, candidates) {
     const type = internalNodeType(source);
     if (type === 9) {
       const registry = customRegistryForDocument(source);
@@ -22378,7 +22541,7 @@ let omoikaneUserActivationState;
     return clone;
   }
 
-  function requireCustomRegistry(registry) {
+  /* @omoikane-bootstrap end */function requireCustomRegistry(registry) {
     const state = safeWeakMapGet(customRegistryStates, registry);
     if (!state) throw new TypeError("CustomElementRegistry required");
     return state;
@@ -22473,7 +22636,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  function customConstructionEntry(constructor) {
+  /* @omoikane-bootstrap window-only customConstructionEntry-1801 */function customConstructionEntry(constructor) {
     const registry = safeWeakMapGet(activeCustomRegistries, constructor);
     for (let i = customElementConstructionStack.length - 1; i >= 0; i--) {
       const entry = customElementConstructionStack[i];
@@ -22530,7 +22693,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  function customDefinitionForElement(registry, element) {
+  /* @omoikane-bootstrap end */function customDefinitionForElement(registry, element) {
     if (!hasCanonicalWrapperId(canonicalHtmlElementIds, element) ||
         customRegistryForNode(element) !== registry) return null;
     const definitions = requireCustomRegistry(registry).definitions;
@@ -22542,14 +22705,14 @@ let omoikaneUserActivationState;
     return definition && definition.localName === localName ? definition : null;
   }
 
-  function considerCustomElement(registry, element) {
+  /* @omoikane-bootstrap window-only considerCustomElement-1805 */function considerCustomElement(registry, element) {
     const definition = customDefinitionForElement(registry, element);
     if (definition) {
       upgradeCustomElement(element, definition);
     }
   }
 
-  function upgradeInsertedCustomElements(parent, nodes, reactions = null) {
+  /* @omoikane-bootstrap end */function upgradeInsertedCustomElements(parent, nodes, reactions = null) {
     if (!browsingInput.hasCustomElementDefinitions) return;
     if (!parent || !internalIsConnected(parent)) return;
     for (const node of nodes) {
@@ -22586,7 +22749,7 @@ let omoikaneUserActivationState;
     return registry;
   }
 
-  function customElementDefinitionExtends(options) {
+  /* @omoikane-bootstrap window-only customElementDefinitionExtends-1808 */function customElementDefinitionExtends(options) {
     if (options === undefined || options === null) return null;
     if (typeof options !== "object" && typeof options !== "function") {
       throw new IntrinsicTypeError("Invalid element definition options dictionary");
@@ -22859,7 +23022,7 @@ let omoikaneUserActivationState;
     });
   }
 
-  globalThis.__omoikane_dispatch_visibilitychange = function(documentId) {
+  /* @omoikane-bootstrap end *//* @omoikane-bootstrap window-only page-visibility-dispatch */globalThis.__omoikane_dispatch_visibilitychange = function(documentId) {
     const changedDocument = wrapNode(documentId);
     if (changedDocument) {
       if (documentId === __omoikane_document_id) {
@@ -22867,9 +23030,9 @@ let omoikaneUserActivationState;
       }
       changedDocument.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
     }
-  };
-  const dispatchCspEvent = Node.prototype.dispatchEvent;
-  globalThis.__omoikane_dispatch_csp_violation = function(targetId, init, workerGlobal) {
+  };/* @omoikane-bootstrap end */
+  /* @omoikane-bootstrap window-only dispatchCspEvent-1818 */const dispatchCspEvent = Node.prototype.dispatchEvent;
+  /* @omoikane-bootstrap end */globalThis.__omoikane_dispatch_csp_violation = function(targetId, init, workerGlobal) {
     const target = workerGlobal ? globalThis : wrapNode(targetId);
     if (!target) return;
     const event = new platformEventInterfaces.SecurityPolicyViolationEvent("securitypolicyviolation", {
@@ -22881,16 +23044,16 @@ let omoikaneUserActivationState;
       platformEventInterfaces.queueCspReport(init);
     }
   };
-  globalThis.__omoikane_close_auxiliary_document = function() {
+  /* @omoikane-bootstrap window-only auxiliary-document-close */globalThis.__omoikane_close_auxiliary_document = function() {
     if (browsingInput.visibilityHiddenDocumentIds.has(__omoikane_document_id)) return;
     browsingInput.visibilityHiddenDocumentIds.add(__omoikane_document_id);
     globalThis.dispatchEvent(new platformEventInterfaces.PageTransitionEvent("pagehide"));
     recordVisibilityStateEntry("hidden", nativePerformanceNow());
     document.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
     globalThis.dispatchEvent(new Event("unload"));
-  };
+  };/* @omoikane-bootstrap end */
 
-  const pointerLockDispatchEvent = Node.prototype.dispatchEvent;
+  /* @omoikane-bootstrap window-only pointerLockDispatchEvent-1821 */const pointerLockDispatchEvent = Node.prototype.dispatchEvent;
   globalThis.Node = Node;
   domInterfaces.bindNode(
     node => safeWeakMapHas(attributeNodeStates, node) || safeWeakMapHas(wrapperNodeIds, node),
@@ -22898,8 +23061,8 @@ let omoikaneUserActivationState;
     DOMException,
   );
   globalThis.NodeList = NodeList;
-  globalThis.Window = Window;
-  globalThis.Element = Element;
+  /* @omoikane-bootstrap end */globalThis.Window = Window;
+  /* @omoikane-bootstrap window-only dom-initialization-1826 */globalThis.Element = Element;
   globalThis.HTMLElement = HTMLElement;
   globalThis.HTMLUnknownElement = HTMLUnknownElement;
   globalThis.HTMLHtmlElement = HTMLHtmlElement;
@@ -22936,12 +23099,12 @@ let omoikaneUserActivationState;
   globalThis.Comment = Comment;
   globalThis.ProcessingInstruction = ProcessingInstruction;
   globalThis.Attr = Attr;
-  globalThis.NamedNodeMap = NamedNodeMap;
-  globalThis.Document = Document;
+  /* @omoikane-bootstrap end */globalThis.NamedNodeMap = NamedNodeMap;
+  /* @omoikane-bootstrap window-only dom-initialization-1851 */globalThis.Document = Document;
   globalThis.DocumentFragment = DocumentFragment;
   globalThis.ShadowRoot = ShadowRoot;
   globalThis.DocumentType = DocumentType;
-  globalThis.DOMException = DOMException;
+  /* @omoikane-bootstrap end */globalThis.DOMException = DOMException;
   globalThis.ToggleEvent = ToggleEvent;
   globalThis.CommandEvent = CommandEvent;
   globalThis.ValidityState = ValidityState;
@@ -23327,8 +23490,8 @@ let omoikaneUserActivationState;
   // Omoikane does not yet model mixed-content/security contexts, so realms are
   // currently treated as secure and expose the complete core API.
   globalThis.crypto = new Crypto(cryptoConstructionToken);
-  globalThis.CustomElementRegistry = CustomElementRegistry;
-  globalThis.CSSStyleSheet = CSSStyleSheet;
+  /* @omoikane-bootstrap window-only dom-initialization-1891 */globalThis.CustomElementRegistry = CustomElementRegistry;
+  /* @omoikane-bootstrap end */globalThis.CSSStyleSheet = CSSStyleSheet;
   globalThis.CSSRuleList = CSSRuleList;
   globalThis.MediaList = MediaList;
   globalThis.CSSStyleRule = CSSStyleRule;
@@ -23359,7 +23522,7 @@ let omoikaneUserActivationState;
   globalThis.CSSStartingStyleRule = CSSStartingStyleRule;
   globalThis.CSSViewTransitionRule = CSSViewTransitionRule;
   globalThis.NodeFilter = NodeFilter;
-  globalThis.NodeIterator = NodeIterator;
+  /* @omoikane-bootstrap window-only dom-initialization-1923 */globalThis.NodeIterator = NodeIterator;
   globalThis.TreeWalker = TreeWalker;
   globalThis.Range = Range;
   globalThis.Selection = Selection;
@@ -23387,7 +23550,7 @@ let omoikaneUserActivationState;
   globalThis.Option = Option;
   globalThis.HTMLImageElement = HTMLImageElement;
   globalThis.HTMLCanvasElement = HTMLCanvasElement;
-  globalThis.CanvasRenderingContext2D = CanvasRenderingContext2D;
+  /* @omoikane-bootstrap end */globalThis.CanvasRenderingContext2D = CanvasRenderingContext2D;
   globalThis.CanvasGradient = CanvasGradient;
   globalThis.CanvasPattern = CanvasPattern;
   globalThis.Path2D = Path2D;
@@ -23417,7 +23580,7 @@ let omoikaneUserActivationState;
   globalThis.OffscreenCanvasRenderingContext2D = OffscreenCanvasRenderingContext2D;
   globalThis.ImageBitmap = ImageBitmap;
   globalThis.ImageData = ImageData;
-  globalThis.Image = function(width, height) {
+  /* @omoikane-bootstrap window-only dom-initialization-1969 */globalThis.Image = function(width, height) {
     const image = document.createElement("img");
     if (width !== undefined) image.width = Number(width);
     if (height !== undefined) image.height = Number(height);
@@ -23443,7 +23606,7 @@ let omoikaneUserActivationState;
   globalThis.SVGGraphicsElement = SVGGraphicsElement;
   globalThis.SVGGeometryElement = SVGGeometryElement;
   globalThis.SVGSVGElement = SVGSVGElement;
-  globalThis.SVGRect = SVGRect;
+  /* @omoikane-bootstrap end */globalThis.SVGRect = SVGRect;
   globalThis.SVGPoint = SVGPoint;
   globalThis.SVGMatrix = SVGMatrix;
   globalThis.SVGAnimatedLength = SVGAnimatedLength;
@@ -23451,7 +23614,7 @@ let omoikaneUserActivationState;
   globalThis.SVGAnimatedRect = SVGAnimatedRect;
   globalThis.DOMPoint = DOMPoint;
   Object.defineProperty(globalThis, "DOMMatrix", { value: DOMMatrix, writable: true, configurable: true });
-  globalThis.SVGRectElement = SVGRectElement;
+  /* @omoikane-bootstrap window-only dom-initialization-1994 */globalThis.SVGRectElement = SVGRectElement;
   globalThis.SVGImageElement = SVGImageElement;
   globalThis.SVGCircleElement = SVGCircleElement;
   globalThis.SVGEllipseElement = SVGEllipseElement;
@@ -23464,7 +23627,7 @@ let omoikaneUserActivationState;
   globalThis.SVGTextElement = SVGTextElement;
   globalThis.SVGTSpanElement = SVGTSpanElement;
   globalThis.SVGTextPathElement = SVGTextPathElement;
-  globalThis.Event = Event;
+  /* @omoikane-bootstrap end */globalThis.Event = Event;
   globalThis.__omoikane_dispatch_lifecycle_event = function(type) {
     const event = type === "pageshow" ? new platformEventInterfaces.PageTransitionEvent(type) : new Event(type, { bubbles: type === "DOMContentLoaded" });
     if (type === "load" || type === "pageshow") globalThis.dispatchEvent(event);
@@ -23481,19 +23644,19 @@ let omoikaneUserActivationState;
   globalThis.InputEvent = InputEvent;
   globalThis.CompositionEvent = CompositionEvent;
   globalThis.PointerEvent = MouseEvent;
-  globalThis.TouchEvent = Event;
-  globalThis.AnimationEvent = Event;
+  /* @omoikane-bootstrap window-only dom-initialization-2020 */globalThis.TouchEvent = Event;
+  /* @omoikane-bootstrap end */globalThis.AnimationEvent = Event;
   globalThis.TransitionEvent = TransitionEvent;
-  globalThis.document = wrapNode(__omoikane_document_id);
+  /* @omoikane-bootstrap window-only dom-initialization-2023 */globalThis.document = wrapNode(__omoikane_document_id);
   const focusDocument = globalThis.document;
   // The embedding runtime supplies the owner iframe id only while creating a
   // child browsing-context Realm. Resolve it through this Realm's wrapper
   // cache, then remove the bootstrap-only slot before page code runs. A
   // cross-origin child receives no id and therefore observes the standard
   // `null` frameElement boundary.
-  const frameElementId = globalThis.__omoikane_frame_element_id;
-  try { delete globalThis.__omoikane_frame_element_id; } catch (_) {}
-  globalThis.frameElement = frameElementId == null ? null : wrapNode(frameElementId);
+  /* @omoikane-bootstrap end */const frameElementId = globalThis.__omoikane_frame_element_id;
+  /* @omoikane-bootstrap window-only dom-initialization-2026 */try { delete globalThis.__omoikane_frame_element_id; } catch (_) {}
+  /* @omoikane-bootstrap end */globalThis.frameElement = frameElementId == null ? null : wrapNode(frameElementId);
   // Named access is live: scripts can add, rename, or remove an element and
   // observe the change before the next task. Keep explicit globals and built-in
   // properties ahead of document names.
@@ -23611,7 +23774,7 @@ let omoikaneUserActivationState;
       windowNamedGetters.set(name, getter);
     }
   };
-  __omoikane_parser_update = function(ids) {
+  /* @omoikane-bootstrap window-only dom-initialization-2035 */__omoikane_parser_update = function(ids) {
     refreshWindowNamedProperties();
     for (const id of ids) {
       if (nativeNodeType(id) !== 1) continue;
@@ -23622,7 +23785,7 @@ let omoikaneUserActivationState;
   };
   globalThis.__omoikane_install_window_named_properties = refreshWindowNamedProperties;
   globalThis.customElements = registryForDocument(globalThis.document);
-  globalThis.__omoikane_set_current_script = function(id) {
+  /* @omoikane-bootstrap end */globalThis.__omoikane_set_current_script = function(id) {
     const script = id === null || id === undefined ? null : wrapNode(id);
     // Shadow-tree classic scripts execute, but are not exposed by
     // Document.currentScript. Latch this at entry, before script can move.
@@ -23630,18 +23793,18 @@ let omoikaneUserActivationState;
     globalThis.document.__currentScript = root && nativeShadowHost(internalNodeId(root)) != null
       ? null : script;
   };
-  if (globalThis.window === undefined) {
+  /* @omoikane-bootstrap window-only dom-initialization-2039 */if (globalThis.window === undefined) {
     globalThis.window = globalThis;
   }
-  globalThis.self = globalThis;
+  /* @omoikane-bootstrap end */globalThis.self = globalThis;
   globalThis.frames = globalThis;
-  Object.defineProperty(globalThis, "length", {
+  /* @omoikane-bootstrap window-only dom-initialization-2042 */Object.defineProperty(globalThis, "length", {
     configurable: true,
     get() { return globalThis.document.querySelectorAll("iframe, frame").length; },
   });
-  const windowListeners = new Map();
-  safeWeakMapSet(windowListenerStores, globalThis.document, windowListeners);
-  Object.defineProperty(globalThis, "__listeners", {
+  /* @omoikane-bootstrap end */const windowListeners = new Map();
+  /* @omoikane-bootstrap window-only dom-initialization-2044 */safeWeakMapSet(windowListenerStores, globalThis.document, windowListeners);
+  /* @omoikane-bootstrap end */Object.defineProperty(globalThis, "__listeners", {
     configurable: true,
     value: windowListeners,
   });
@@ -23654,7 +23817,7 @@ let omoikaneUserActivationState;
   globalThis.dispatchEvent = function(event) {
     return dispatchEventOnTarget(globalThis, event);
   };
-  for (const type of ["message", "messageerror", "load", "unload", "pagehide", "pageshow"]) {
+  /* @omoikane-bootstrap window-only dom-initialization-2049 */for (const type of ["message", "messageerror", "load", "unload", "pagehide", "pageshow"]) {
     let handler = null;
     Object.defineProperty(globalThis, `on${type}`, {
       configurable: true,
@@ -23677,7 +23840,7 @@ let omoikaneUserActivationState;
   // `<body>`/`<frameset>` (load, unload, resize, scroll, ...) are registered on
   // the Window so that `<body onload>` fires when the load event is dispatched;
   // all other handlers are registered on the element itself.
-  const WINDOW_REFLECTED_HANDLERS = new Set([
+  /* @omoikane-bootstrap end */const WINDOW_REFLECTED_HANDLERS = new Set([
     "load", "unload", "beforeunload", "resize", "scroll", "blur", "focus",
     "error", "hashchange", "popstate", "pageshow", "pagehide", "online",
     "offline", "languagechange", "message", "storage",
@@ -23820,7 +23983,7 @@ let omoikaneUserActivationState;
     if (target) pointerCaptureTargets.delete(key);
     return null;
   }
-  function setPointerCaptureTarget(target, pointerId) {
+  /* @omoikane-bootstrap window-only setPointerCaptureTarget-2062 */function setPointerCaptureTarget(target, pointerId) {
     if (nativePointerLockTarget() !== null) {
       throw new DOMException("Pointer lock is active", "InvalidStateError");
     }
@@ -23836,7 +23999,7 @@ let omoikaneUserActivationState;
     const key = pointerCaptureKey(doc, pointerId);
     if (pointerCaptureTargets.get(key) === internalNodeId(target)) pointerCaptureTargets.delete(key);
   }
-  function capturedInputTarget(target, pointerId = 1) {
+  /* @omoikane-bootstrap end */function capturedInputTarget(target, pointerId = 1) {
     const locked = wrapNode(nativePointerLockTarget());
     if (locked) return locked;
     const doc = target && target.nodeType === 9 ? target : target && target.ownerDocument;
@@ -23850,7 +24013,7 @@ let omoikaneUserActivationState;
     }
   };
 
-  function releaseCapturesForPointerLock(element) {
+  /* @omoikane-bootstrap window-only releaseCapturesForPointerLock-2066 */function releaseCapturesForPointerLock(element) {
     for (const [key, targetId] of pointerCaptureTargets) {
       pointerCaptureTargets.delete(key);
       dispatchLostPointerCapture(targetId, Number(key.slice(key.lastIndexOf(":") + 1)));
@@ -23869,7 +24032,7 @@ let omoikaneUserActivationState;
     return safeApply(pointerLockDispatchEvent, target, [event]);
   }
 
-  function draggableAncestor(target) {
+  /* @omoikane-bootstrap end */function draggableAncestor(target) {
     for (let current = target; current && current.nodeType === 1; current = current.parentNode) {
       if (current instanceof HTMLElement && current.draggable) return current;
     }
@@ -23997,8 +24160,8 @@ let omoikaneUserActivationState;
     return false;
   };
 
-  const nativeResizeGetBoundingClientRect = Element.prototype.getBoundingClientRect;
-  let nativeResizeDrag = null;
+  /* @omoikane-bootstrap window-only nativeResizeGetBoundingClientRect-2076 */const nativeResizeGetBoundingClientRect = Element.prototype.getBoundingClientRect;
+  /* @omoikane-bootstrap end */let nativeResizeDrag = null;
   function performCssResizeDefault(target, type, init, notCanceled, locked) {
     if (type === "mouseup") {
       const active = nativeResizeDrag !== null;
@@ -24151,7 +24314,7 @@ let omoikaneUserActivationState;
     }
     return (hostOverscrollX ? 2 : 0) | (hostOverscrollY ? 4 : 0);
   }
-  function nativeScrollTargetRejection(explain, reason, nodeId) {
+  /* @omoikane-bootstrap window-only nativeScrollTargetRejection-2082 */function nativeScrollTargetRejection(explain, reason, nodeId) {
     return explain ? reason + ":" + (nodeId ?? 0) : false;
   }
   function nativeScrollRootTarget(id, explain = false) {
@@ -24221,7 +24384,7 @@ let omoikaneUserActivationState;
     }
     return nativeScrollTargetRejection(explain, "root_not_reached", id);
   }
-  function dispatchNativeScrollNotification(id, init) {
+  /* @omoikane-bootstrap end */function dispatchNativeScrollNotification(id, init) {
     const target = wrapNode(id);
     if (!target || !isLiveNode(target) || !nativeNodeIsConnected(id)) return false;
     const inputDocument = internalNodeType(target) === 9 ? target : internalOwnerDocument(target);
@@ -24446,14 +24609,14 @@ let omoikaneUserActivationState;
       control.selectionStart + inserted.length,
     );
   };
-  Object.defineProperty(Document.prototype, "cookie", {
+  /* @omoikane-bootstrap window-only dom-initialization-2090 */Object.defineProperty(Document.prototype, "cookie", {
     configurable: true,
     enumerable: true,
     get() { return __omoikane_document_cookie_get(this.__id); },
     set(serialized) { __omoikane_document_cookie_set(this.__id, String(serialized)); },
   });
 
-  function storageAccessDocumentId(receiver) {
+  /* @omoikane-bootstrap end */function storageAccessDocumentId(receiver) {
     requireNodeReceiver(receiver);
     if (internalNodeType(receiver) !== 9) {
       throw new IntrinsicTypeError("Storage Access requires a Document");
@@ -24466,7 +24629,7 @@ let omoikaneUserActivationState;
       status === "inactive" ? "InvalidStateError" : "NotAllowedError",
     );
   }
-  Object.defineProperty(Document.prototype, "hasStorageAccess", {
+  /* @omoikane-bootstrap window-only dom-initialization-2093 */Object.defineProperty(Document.prototype, "hasStorageAccess", {
     configurable: true,
     enumerable: true,
     writable: true,
@@ -24489,7 +24652,7 @@ let omoikaneUserActivationState;
     },
   });
 
-  const navigationDocumentId = __omoikane_document_id;
+  /* @omoikane-bootstrap end */const navigationDocumentId = __omoikane_document_id;
   const auxiliaryNavigationId = globalThis.__omoikane_auxiliary_context_id;
   const isChildWindow = navigationDocumentId !== browsingInput.topDocumentId &&
     auxiliaryNavigationId === undefined;
@@ -27571,7 +27734,7 @@ let omoikaneUserActivationState;
   // WebIDL shape: a non-enumerable interface object of length 0 with
   // enumerable members, and an enumerable HTMLCanvasElement operation.
   Object.defineProperty(CanvasCaptureMediaStreamTrack, "length", { value: 0 });
-  for (const [prototype, member] of [
+  /* @omoikane-bootstrap window-only dom-initialization-2393 */for (const [prototype, member] of [
     [CanvasCaptureMediaStreamTrack.prototype, "canvas"],
     [CanvasCaptureMediaStreamTrack.prototype, "requestFrame"],
     [HTMLCanvasElement.prototype, "captureStream"],
@@ -27579,7 +27742,7 @@ let omoikaneUserActivationState;
     const descriptor = Object.getOwnPropertyDescriptor(prototype, member);
     Object.defineProperty(prototype, member, { ...descriptor, enumerable: true });
   }
-  Object.defineProperty(globalThis, "CanvasCaptureMediaStreamTrack", {
+  /* @omoikane-bootstrap end */Object.defineProperty(globalThis, "CanvasCaptureMediaStreamTrack", {
     configurable: true, enumerable: false, writable: true, value: CanvasCaptureMediaStreamTrack,
   });
   globalThis.MediaStreamTrackEvent = MediaStreamTrackEvent;
@@ -28218,23 +28381,27 @@ let omoikaneUserActivationState;
   }
   globalThis.Storage = Storage;
   globalThis.StorageEvent = StorageEvent;
-  globalThis.localStorage = storageForDocument("local", document, globalThis);
-  globalThis.sessionStorage = storageForDocument("session", document, globalThis);
+  /* @omoikane-bootstrap window-only dom-initialization-2473 */globalThis.localStorage = storageForDocument("local", document, globalThis);
+  /* @omoikane-bootstrap end *//* @omoikane-bootstrap worker-only dom-initialization-2473 */  const workerStorageDocument = Object.freeze({__id: __omoikane_document_id, get URL() { return String(nativeDocumentURL(__omoikane_document_id)); }});
+globalThis.localStorage = storageForDocument("local", workerStorageDocument, globalThis);
+  /* @omoikane-bootstrap end *//* @omoikane-bootstrap window-only dom-initialization-2474 */globalThis.sessionStorage = storageForDocument("session", document, globalThis);
 
-  const mutationObservers = [];
+  /* @omoikane-bootstrap end *//* @omoikane-bootstrap worker-only dom-initialization-2474 */globalThis.sessionStorage = storageForDocument("session", workerStorageDocument, globalThis);
+
+  /* @omoikane-bootstrap end */const mutationObservers = [];
   let hasLayoutObservers = false;
   let xpathMutationHook = null;
   // CSS Custom Highlight API: highlight.js re-resolves its ranges after DOM
   // or Range changes and reads Text intervals through these internals.
   let highlightChangeHook = null;
-  globalThis.__omoikane_install_highlight_hooks = hook => {
+  /* @omoikane-bootstrap window-only dom-initialization-2479 */globalThis.__omoikane_install_highlight_hooks = hook => {
     highlightChangeHook = hook;
     delete globalThis.__omoikane_install_highlight_hooks;
     return { textIntervals: highlightTextIntervals, nodeId: node => internalNodeId(node) };
   };
   // Returns [[textNode, start, end], ...] for the Text data a boundary pair
   // covers, in tree order. Invalid static boundaries yield no intervals.
-  function highlightTextIntervals(startNode, startOffset, endNode, endOffset) {
+  /* @omoikane-bootstrap end */function highlightTextIntervals(startNode, startOffset, endNode, endOffset) {
     if (!startNode || !endNode || nodeRoot(startNode) !== nodeRoot(endNode)) return [];
     startOffset = Math.min(startOffset, nodeLength(startNode));
     endOffset = Math.min(endOffset, nodeLength(endNode));
@@ -28259,7 +28426,7 @@ let omoikaneUserActivationState;
     }
     return result;
   }
-  globalThis.__omoikane_install_xpath_mutation_hook = hook => {
+  /* @omoikane-bootstrap window-only dom-initialization-2481 */globalThis.__omoikane_install_xpath_mutation_hook = hook => {
     xpathMutationHook = hook;
     delete globalThis.__omoikane_install_xpath_mutation_hook;
   };
@@ -28268,7 +28435,7 @@ let omoikaneUserActivationState;
   // page-visible MutationObserver or Promise methods cannot intercept it.
   // Bootstrap methods can outlive their creation Document through foreign
   // node aliases. A hook belongs to its Document, not that shared environment.
-  const fontMutationHooks = browsingInput.fontMutationHooks ||
+  /* @omoikane-bootstrap end */const fontMutationHooks = browsingInput.fontMutationHooks ||
     (browsingInput.fontMutationHooks = new WeakMap());
   let fontMutationDocument = null;
   let fontMutationPending = false;
@@ -29552,8 +29719,8 @@ let omoikaneUserActivationState;
     configurable: true, enumerable: true, get: () => interactionCount,
   });
   globalThis.performance = performance;
-  recordVisibilityStateEntry(document.visibilityState, 0);
-  globalThis.__omoikane_sync_initial_visibility_entry = function() {
+  /* @omoikane-bootstrap window-only dom-initialization-2617 */recordVisibilityStateEntry(document.visibilityState, 0);
+  /* @omoikane-bootstrap end */globalThis.__omoikane_sync_initial_visibility_entry = function() {
     const index = performanceEntries.findIndex(entry => entry.entryType === "visibility-state");
     if (index >= 0 && performanceEntries[index].name === document.visibilityState) return;
     if (index >= 0) performanceEntries.splice(index, 1);
@@ -29604,7 +29771,7 @@ let omoikaneUserActivationState;
 
   const domParserOwnerDocuments = browsingInput.domParserOwnerDocuments ||
     (browsingInput.domParserOwnerDocuments = new WeakMap());
-  globalThis.DOMParser = class DOMParser {
+  /* @omoikane-bootstrap window-only dom-initialization-2624 */globalThis.DOMParser = class DOMParser {
     constructor() {
       safeWeakMapSet(domParserOwnerDocuments, this, __omoikane_document_id);
     }
@@ -29647,8 +29814,8 @@ let omoikaneUserActivationState;
     }
   };
 
-  const xmlSerializerInstances = new WeakSet();
-  globalThis.XMLSerializer = class XMLSerializer {
+  /* @omoikane-bootstrap end */const xmlSerializerInstances = new WeakSet();
+  /* @omoikane-bootstrap window-only dom-initialization-2626 */globalThis.XMLSerializer = class XMLSerializer {
     constructor() {
       safeWeakSetAdd(xmlSerializerInstances, this);
     }
@@ -29672,7 +29839,7 @@ let omoikaneUserActivationState;
   };
 
   // URL and URLSearchParams (basic)
-  if (!globalThis.URLSearchParams) {
+  /* @omoikane-bootstrap end */if (!globalThis.URLSearchParams) {
     globalThis.URLSearchParams = class URLSearchParams {
       constructor(init) {
         this._params = new Map();
@@ -32647,7 +32814,7 @@ let omoikaneUserActivationState;
     enumerable: true,
   });
 
-  for (const type of ["enterpictureinpicture", "leavepictureinpicture"]) {
+  /* @omoikane-bootstrap window-only dom-initialization-2839 */for (const type of ["enterpictureinpicture", "leavepictureinpicture"]) {
     const key = "__on_" + type;
     Object.defineProperty(HTMLVideoElement.prototype, "on" + type, {
       configurable: true,
@@ -32691,7 +32858,7 @@ let omoikaneUserActivationState;
     enumerable: true,
   });
 
-  const dispatchWorkerErrorEvent = EventTarget.prototype.dispatchEvent;
+  /* @omoikane-bootstrap end */const dispatchWorkerErrorEvent = EventTarget.prototype.dispatchEvent;
   dispatchReportedWorkerError = (owner, event) => {
     if (!owner.__terminated) safeApply(dispatchWorkerErrorEvent, owner, [event]);
   };
@@ -34409,7 +34576,7 @@ let omoikaneUserActivationState;
     return cache.get(owner);
   }
 
-  Object.defineProperty(Element.prototype, "attributeStyleMap", {
+  /* @omoikane-bootstrap window-only dom-initialization-2949 */Object.defineProperty(Element.prototype, "attributeStyleMap", {
     get() { return mutableStyleMapFor(this, this.style); }, enumerable: true, configurable: true,
   });
   Element.prototype.computedStyleMap = function() {
@@ -34420,7 +34587,7 @@ let omoikaneUserActivationState;
     }
     return computedStyleMapCache.get(this);
   };
-  Object.defineProperty(CSSStyleRule.prototype, "styleMap", {
+  /* @omoikane-bootstrap end */Object.defineProperty(CSSStyleRule.prototype, "styleMap", {
     get() { return mutableStyleMapFor(this, this.style); }, enumerable: true, configurable: true,
   });
 
@@ -34783,7 +34950,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  Element.prototype.animate = function(keyframes, options) {
+  /* @omoikane-bootstrap window-only dom-initialization-2967 */Element.prototype.animate = function(keyframes, options) {
     const effect = new KeyframeEffect(this, keyframes, options);
     const animation = new Animation(effect, this.ownerDocument && this.ownerDocument.timeline);
     animation.play();
@@ -34814,7 +34981,7 @@ let omoikaneUserActivationState;
   if (!globalThis.document.timeline) {
     globalThis.document.timeline = new DocumentTimeline();
   }
-  globalThis.AnimationEffect = AnimationEffect;
+  /* @omoikane-bootstrap end */globalThis.AnimationEffect = AnimationEffect;
   globalThis.KeyframeEffect = KeyframeEffect;
   globalThis.AnimationTimeline = AnimationTimeline;
   globalThis.DocumentTimeline = DocumentTimeline;
@@ -35246,9 +35413,9 @@ let omoikaneUserActivationState;
   const dispatchCspGlobalEvent = EventTarget.prototype.dispatchEvent;
   // DOM nodes and the Window inherit the EventTarget interface. Their own
   // listener operations retain the document-backed event dispatch state.
-  Object.setPrototypeOf(Node.prototype, EventTarget.prototype);
+  /* @omoikane-bootstrap window-only dom-initialization-3025 */Object.setPrototypeOf(Node.prototype, EventTarget.prototype);
   Object.setPrototypeOf(Node, EventTarget);
-  Object.setPrototypeOf(Window.prototype, EventTarget.prototype);
+  /* @omoikane-bootstrap end */Object.setPrototypeOf(Window.prototype, EventTarget.prototype);
   Object.setPrototypeOf(Window, EventTarget);
   Object.setPrototypeOf(globalThis, Window.prototype);
   // Child WindowProxies replace globalThis after bootstrap. Keep the backing
@@ -35538,8 +35705,8 @@ let omoikaneUserActivationState;
 
   const cookieStoreOwners = new WeakMap();
   const cookieStoreToken = {};
-  const cookieStoreCreationURL = document.URL;
-  let serviceWorkerCookieStoreClass = null;
+  /* @omoikane-bootstrap window-only cookieStoreCreationURL-3042 */const cookieStoreCreationURL = document.URL;
+  /* @omoikane-bootstrap end */let serviceWorkerCookieStoreClass = null;
   let serviceWorkerCookieStore = null;
   let serviceWorkerCookieChangeDispatcher = null;
   const cookieStoreAvailable = (() => {
@@ -35787,7 +35954,7 @@ let omoikaneUserActivationState;
     return validateTransferList(options.transfer);
   }
 
-  function serializeStructuredValue(value, state) {
+  /* @omoikane-bootstrap window-only serializeStructuredValue-3087 */function serializeStructuredValue(value, state) {
     if (value === null || typeof value === "undefined" ||
         typeof value === "boolean" || typeof value === "number" ||
         typeof value === "string" || typeof value === "bigint") return ["p", value];
@@ -35881,7 +36048,101 @@ let omoikaneUserActivationState;
     return ["r", id];
   }
 
-  function resolveStructuredCloneToken(token, objects) {
+  /* @omoikane-bootstrap end *//* @omoikane-bootstrap worker-only serializeStructuredValue-3087 */function serializeStructuredValue(value, state) {
+    if (value === null || typeof value === "undefined" ||
+        typeof value === "boolean" || typeof value === "number" ||
+        typeof value === "string" || typeof value === "bigint") return ["p", value];
+    if (typeof value === "symbol" || typeof value === "function") throw dataCloneError();
+    if (safeWeakMapHas(customStateSetObjects, value) ||
+        workerIsNode(value) ||
+        (value instanceof EventTarget && !(value instanceof MessagePort))) throw dataCloneError();
+    if (safeMapHas(state.memory, value)) return ["r", safeMapGet(state.memory, value)];
+
+    const id = state.nodes.length;
+    safeMapSet(state.memory, value, id);
+    state.nodes.push(null);
+
+    if (value instanceof MessagePort) {
+      if (!safeMapHas(state.transferSet, value)) {
+        throw dataCloneError("A MessagePort must be transferred to be cloned.");
+      }
+      state.nodes[id] = ["P", value];
+    } else if (value instanceof FileSystemHandle) {
+      const handle = opfsHandleState(value);
+      state.nodes[id] = ["H", handle.kind, handle.documentId, handle.path.slice()];
+    } else if (value instanceof EncodedVideoChunk || value instanceof EncodedAudioChunk) {
+      const chunk = webCodecChunkState.get(value);
+      state.nodes[id] = ["C", value instanceof EncodedVideoChunk, chunk.type,
+        chunk.timestamp, chunk.duration, chunk.bytes.slice()];
+    } else if (value instanceof VideoFrame || value instanceof AudioData) {
+      const media = value.__state();
+      if (media.closed) throw dataCloneError("A closed media resource cannot be cloned.");
+      state.nodes[id] = [value instanceof VideoFrame ? "F" : "A", value,
+        safeMapHas(state.transferSet, value)];
+    } else if (value instanceof IntrinsicDate) {
+      state.nodes[id] = ["d", intrinsicDateGetTime(value)];
+    } else if (value instanceof IntrinsicRegExp) {
+      state.nodes[id] = ["x", safeApply(regexpSourceGetter, value, []),
+        safeApply(regexpFlagsGetter, value, [])];
+    } else {
+      const bufferInfo = nativeArrayBufferInfo(value);
+      if (bufferInfo !== null) {
+        if (bufferInfo[0]) throw dataCloneError("A detached ArrayBuffer cannot be cloned.");
+        if (safeMapHas(state.transferSet, value)) {
+          state.nodes[id] = ["b", value, true];
+        } else {
+          let clone;
+          try { clone = nativeCloneArrayBuffer(value); }
+          catch (_) { throw dataCloneError("The ArrayBuffer could not be cloned."); }
+          state.nodes[id] = ["b", clone, false];
+        }
+        return ["r", id];
+      }
+      const viewInfo = nativeArrayBufferViewInfo(value);
+      if (viewInfo !== null) {
+        if (viewInfo[5]) throw dataCloneError("An out-of-bounds ArrayBuffer view cannot be cloned.");
+        state.nodes[id] = ["v", viewInfo[0], viewInfo[1],
+          serializeStructuredValue(viewInfo[2], state), viewInfo[3], viewInfo[4], value];
+        return ["r", id];
+      }
+      if (value instanceof IntrinsicMap) {
+        const entries = [];
+        safeApply(mapForEachIntrinsic, value, [(item, key) => {
+          entries.push([serializeStructuredValue(key, state), serializeStructuredValue(item, state)]);
+        }]);
+        state.nodes[id] = ["m", entries];
+      } else if (value instanceof IntrinsicSet) {
+        const entries = [];
+        safeApply(setForEachIntrinsic, value, [item => {
+          entries.push(serializeStructuredValue(item, state));
+        }]);
+        state.nodes[id] = ["t", entries];
+      } else if (intrinsicArrayIsArray(value)) {
+        const entries = [];
+        const length = value.length;
+        for (let index = 0; index < length; index++) {
+          if (hasOwnProperty(value, index)) {
+            entries.push([index, serializeStructuredValue(value[index], state)]);
+          }
+        }
+        state.nodes[id] = ["a", length, entries];
+      } else {
+        const prototype = intrinsicObjectGetPrototypeOf(value);
+        if (prototype !== null && !safeWeakSetHas(structuredCloneObjectPrototypes, prototype)) {
+          throw dataCloneError();
+        }
+        if (intrinsicObjectGetOwnPropertySymbols(value).length) throw dataCloneError();
+        const entries = [];
+        for (const key of intrinsicObjectKeys(value)) {
+          entries.push([key, serializeStructuredValue(value[key], state)]);
+        }
+        state.nodes[id] = ["o", prototype === null ? 0 : 1, entries];
+      }
+    }
+    return ["r", id];
+  }
+
+  /* @omoikane-bootstrap end */function resolveStructuredCloneToken(token, objects) {
     if (token[0] === "p") return token[1];
     if (token[0] !== "r" || objects[token[1]] === undefined) throw dataCloneError();
     return objects[token[1]];
@@ -38572,7 +38833,7 @@ let omoikaneUserActivationState;
     }
   }
 
-  globalThis.__omoikane_install_service_worker_global = function(scope) {
+  /* @omoikane-bootstrap window-only service-worker-installer */globalThis.__omoikane_install_service_worker_global = function(scope) {
     // The common Worker bootstrap supplies importScripts, a separate Trusted
     // Types factory, and the response CSP before the ServiceWorker script runs.
     try { delete globalThis.DedicatedWorkerGlobalScope; } catch (_) { globalThis.DedicatedWorkerGlobalScope = undefined; }
@@ -38641,7 +38902,7 @@ let omoikaneUserActivationState;
     });
     try { delete globalThis.postMessage; } catch (_) { globalThis.postMessage = undefined; }
     try { delete globalThis.close; } catch (_) { globalThis.close = undefined; }
-  };
+  };/* @omoikane-bootstrap end */
 
   globalThis.__omoikane_install_shared_worker_global = function(url, sharedWorkerId) {
     // Reuse the dedicated-worker global sanitisation and then install the
@@ -41672,7 +41933,7 @@ let omoikaneUserActivationState;
 
   const activeResizeObservers = new Set();
 
-  class ResizeObserver {
+  /* @omoikane-bootstrap window-only ResizeObserver-3420 */class ResizeObserver {
     constructor(callback) {
       if (arguments.length < 1 || typeof callback !== "function") {
         throw new TypeError("ResizeObserver callback must be callable");
@@ -41807,7 +42068,7 @@ let omoikaneUserActivationState;
     });
   }
 
-  const intersectionObserverEntryStates = browsingInput.intersectionObserverEntryStates ||
+  /* @omoikane-bootstrap end */const intersectionObserverEntryStates = browsingInput.intersectionObserverEntryStates ||
     (browsingInput.intersectionObserverEntryStates = new WeakMap());
   function intersectionObserverEntryState(entry) {
     const state = safeWeakMapGet(intersectionObserverEntryStates, entry);
@@ -41838,7 +42099,7 @@ let omoikaneUserActivationState;
     get isIntersecting() { return intersectionObserverEntryState(this).isIntersecting; }
     get intersectionRatio() { return intersectionObserverEntryState(this).intersectionRatio; }
   }
-  for (const attribute of [
+  /* @omoikane-bootstrap window-only dom-initialization-3427 */for (const attribute of [
     "time", "target", "rootBounds", "boundingClientRect", "intersectionRect",
     "isIntersecting", "intersectionRatio",
   ]) {
@@ -41933,19 +42194,19 @@ let omoikaneUserActivationState;
   };
   // The host calls this after all animation-frame callbacks for Documents
   // whose scroll geometry changed during the rendering opportunity.
-  globalThis.__omoikane_intersection_observers_changed = function() {
+  /* @omoikane-bootstrap end */globalThis.__omoikane_intersection_observers_changed = function() {
     queueIntersectionObserverChecks();
   };
   globalThis.__omoikane_layout_observers_changed = function() {
     for (const observer of activeResizeObservers) observer.__queueCheck();
     queueIntersectionObserverChecks();
   };
-  globalThis.ResizeObserver = ResizeObserver;
-  globalThis.ResizeObserverEntry = ResizeObserverEntry;
+  /* @omoikane-bootstrap window-only dom-initialization-3433 */globalThis.ResizeObserver = ResizeObserver;
+  /* @omoikane-bootstrap end */globalThis.ResizeObserverEntry = ResizeObserverEntry;
   globalThis.ResizeObserverSize = ResizeObserverSize;
-  globalThis.IntersectionObserver = IntersectionObserver;
-  globalThis.IntersectionObserverEntry = IntersectionObserverEntry;
-  const inputDispatchers = {
+  /* @omoikane-bootstrap window-only dom-initialization-3436 */globalThis.IntersectionObserver = IntersectionObserver;
+  /* @omoikane-bootstrap end */globalThis.IntersectionObserverEntry = IntersectionObserverEntry;
+  /* @omoikane-bootstrap window-only inputDispatchers-3438 */const inputDispatchers = {
     focus: (kind, ...args) => safeApply(focusDocumentCommands[kind], undefined, args),
     mouse: globalThis.__omoikane_dispatch_mouse_input,
     wheel: globalThis.__omoikane_dispatch_wheel_input,
@@ -41966,12 +42227,12 @@ let omoikaneUserActivationState;
   };
   nativeRegisterInputDispatcher((kind, args) => safeApply(inputDispatchers[kind], undefined, args));
   const windowNameDocument = internalNodeId(globalThis.document);
-  Object.defineProperty(globalThis, "name", {
+  /* @omoikane-bootstrap end */Object.defineProperty(globalThis, "name", {
     configurable: true, enumerable: true,
     get() { return nativeWindowName(windowNameDocument); },
     set(value) { nativeWindowName(windowNameDocument, String(value)); },
   });
-  nativeRegisterValidation(internalNodeId(globalThis.document), snapshotCssValidity);
+  /* @omoikane-bootstrap window-only dom-initialization-3442 */nativeRegisterValidation(internalNodeId(globalThis.document), snapshotCssValidity);
   validationReady = true;
   formStateDocument = globalThis.document;
   nativeRegisterIframeNavigation(internalNodeId(globalThis.document), (frameId, documentId, kind, value, extra, committedURL, eventState) => {
@@ -41985,7 +42246,7 @@ let omoikaneUserActivationState;
     return safeWeakMapGet(iframeChildNavigators, frame)(documentId, kind, value, extra, committedURL, eventState);
   });
   nativeRegisterFormState(internalNodeId(formStateDocument), captureCustomFormState, restoreCustomFormState);
-  for (const name of [
+  /* @omoikane-bootstrap end */for (const name of [
     "Event", "CustomEvent", "EventTarget", "AbortController", "AbortSignal", "Node", "Document",
     "DOMImplementation", "DocumentFragment", "ProcessingInstruction", "DocumentType", "Element", "Attr",
     "CharacterData", "Text", "Comment", "NodeIterator", "TreeWalker", "NodeFilter", "NodeList",
@@ -42064,7 +42325,7 @@ let omoikaneUserActivationState;
       Object.defineProperty(this ?? globalThis, "event", { value, writable: true, configurable: true, enumerable: true });
     },
   });
-  globalThis.__omoikane_install_event_handlers = factory => {
+  /* @omoikane-bootstrap window-only dom-initialization-3457 */globalThis.__omoikane_install_event_handlers = factory => {
     const globalTargets = [HTMLElement.prototype, Document.prototype, SVGElement.prototype, globalThis];
     platformHandlerTypes = factory({
       secure: nativeIsSecureContext(),
@@ -42087,7 +42348,30 @@ let omoikaneUserActivationState;
     // Parser-authored attributes precede author scripts in a newly created Realm.
     wireInlineHandlers(globalThis.document);
   };
-  {
+  /* @omoikane-bootstrap end *//* @omoikane-bootstrap worker-only dom-initialization-3457 */globalThis.__omoikane_install_event_handlers = factory => {
+    const globalTargets = [globalThis];
+    platformHandlerTypes = factory({
+      secure: nativeIsSecureContext(),
+      globalTargets,
+      windowTargets: [globalThis],
+      windowTarget: globalThis,
+      reflectWindowTypes: types => { for (const type of types) WINDOW_REFLECTED_HANDLERS.add(type); },
+      resolveTarget(receiver, type) {
+        if (receiver === globalThis || receiver === topWindow) return globalThis;
+        const id = getWrapperNodeId(wrapperNodeIds, receiver);
+        if (id === undefined) throw new IntrinsicTypeError("Illegal invocation");
+        const tag = internalNodeLocalName(receiver);
+        if ((tag === "body" || tag === "frameset") && WINDOW_REFLECTED_HANDLERS.has(type)) {
+          const window = receiver.ownerDocument?.defaultView;
+          return window === topWindow ? globalThis : window;
+        }
+        return receiver;
+      },
+    });
+    // Parser-authored attributes precede author scripts in a newly created Realm.
+
+  };
+  /* @omoikane-bootstrap end */{
     const moduleHandles = new WeakMap();
     const instanceExports = new WeakMap();
     class CompileError extends Error {
@@ -42483,8 +42767,8 @@ let omoikaneUserActivationState;
   }
   // The parser already reset each select's selectedness. Mirror it into the
   // selectedcontent elements before author scripts run.
-  for (const selectedcontent of Array.from(globalThis.document.getElementsByTagName("selectedcontent"))) {
+  /* @omoikane-bootstrap window-only dom-initialization-3459 */for (const selectedcontent of Array.from(globalThis.document.getElementsByTagName("selectedcontent"))) {
     const select = wrapNode(nativeSelectedcontentSelect(internalNodeId(selectedcontent)));
     if (select && !select.hasAttribute("multiple")) updateSelectedcontent(select, selectedcontent);
   }
-})();
+/* @omoikane-bootstrap end */})();

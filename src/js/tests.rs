@@ -23983,6 +23983,50 @@ fn get_computed_style_uses_replaced_shadow_and_iframe_layout_sizes() {
 }
 
 #[test]
+fn constructable_stylesheet_adoption_uses_captured_weak_map_methods() {
+    let mut runtime = runtime_from_html("<html><body><div id='host'></div></body></html>");
+    let result = eval_str(
+        &mut runtime,
+        r#"(() => {
+        const root = document.getElementById('host').attachShadow({mode:'open'});
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(':host { color: red; }');
+        const get = WeakMap.prototype.get;
+        const set = WeakMap.prototype.set;
+        let reads = 0, writes = 0;
+        WeakMap.prototype.get = function(...args) {
+            reads++;
+            return Reflect.apply(get, this, args);
+        };
+        WeakMap.prototype.set = function(...args) {
+            writes++;
+            return Reflect.apply(set, this, args);
+        };
+        let documentList, rootList, adoptedDocumentLength, adoptedRootLength;
+        try {
+            document.adoptedStyleSheets = [sheet];
+            root.adoptedStyleSheets = [sheet];
+            documentList = document.adoptedStyleSheets;
+            rootList = root.adoptedStyleSheets;
+            adoptedDocumentLength = documentList.length;
+            adoptedRootLength = rootList.length;
+            sheet.replaceSync(':host { color: blue; }');
+            document.adoptedStyleSheets = [];
+            root.adoptedStyleSheets = [];
+        } finally {
+            WeakMap.prototype.get = get;
+            WeakMap.prototype.set = set;
+        }
+        return JSON.stringify([reads, writes, adoptedDocumentLength, adoptedRootLength,
+            documentList.length, rootList.length,
+            document.adoptedStyleSheets === documentList,
+            root.adoptedStyleSheets === rootList]);
+    })()"#,
+    );
+    assert_eq!(result, "[0,0,1,1,0,0,true,true]");
+}
+
+#[test]
 fn constructable_stylesheets_apply_to_documents_and_shadow_roots() {
     let html = r#"<html><body><div id="target"></div><div id="host"></div></body></html>"#;
     let mut runtime = runtime_from_html(html);
