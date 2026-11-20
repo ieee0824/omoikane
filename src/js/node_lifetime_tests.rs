@@ -394,12 +394,20 @@ fn old_document_generations_are_kept_by_references_without_an_eviction_limit() {
         .unwrap();
     // Each navigation is a separate script job, as it would be when initiated
     // by successive page tasks. Keep all 80 generations reachable throughout.
+    let diagnostic_epoch = (std::env::var("OMOIKANE_GATE_DIAGNOSTICS").as_deref() == Ok("1"))
+        .then(std::time::Instant::now);
     for index in 0..80 {
-        runtime
-            .eval(&format!(
-                "frame.srcdoc = '<p>{index}</p>'; held.push(frame.contentDocument);"
-            ))
-            .unwrap();
+        let caller_start = diagnostic_epoch.map(|epoch| epoch.elapsed());
+        let result = runtime.eval(&format!(
+            "frame.srcdoc = '<p>{index}</p>'; held.push(frame.contentDocument);"
+        ));
+        let timing = caller_start
+            .zip(diagnostic_epoch)
+            .map(|(start, epoch)| (start, epoch.elapsed()));
+        if let Some(line) = generation_diagnostic_line(index, timing, result.is_ok()) {
+            eprintln!("{line}");
+        }
+        result.unwrap();
     }
     collect(&mut runtime);
     assert_eq!(
@@ -421,6 +429,57 @@ fn old_document_generations_are_kept_by_references_without_an_eviction_limit() {
         "retired nodes must be reclaimed"
     );
     assert!(state.document_styles.len() <= 2);
+}
+
+/// Caller timing includes the sweep before the deadline and post-eval cleanup.
+/// It does not measure the inner deadline. Formatting and I/O happen after eval.
+/// With diagnostics disabled, no epoch or per-generation clock is read.
+fn generation_diagnostic_line(
+    generation: usize,
+    timing: Option<(std::time::Duration, std::time::Duration)>,
+    succeeded: bool,
+) -> Option<String> {
+    let (start, end) = timing?;
+    Some(format!(
+        "[node-lifetime-generation outer-elapsed-ms] {}",
+        serde_json::json!({
+            "generation": generation,
+            "caller_start_ms": start.as_secs_f64() * 1000.0,
+            "caller_end_ms": end.as_secs_f64() * 1000.0,
+            "outcome": if succeeded { "ok" } else { "error" },
+            "inner_deadline_ms": null,
+        })
+    ))
+}
+
+#[test]
+fn generation_diagnostic_disabled_has_no_record() {
+    assert_eq!(generation_diagnostic_line(0, None, true), None);
+    assert_eq!(generation_diagnostic_line(0, None, false), None);
+}
+
+#[test]
+fn generation_diagnostic_records_parseable_outer_times_and_result() {
+    use std::time::Duration;
+
+    for (succeeded, outcome) in [(true, "ok"), (false, "error")] {
+        let line = generation_diagnostic_line(
+            78,
+            Some((Duration::from_micros(1250), Duration::from_micros(4500))),
+            succeeded,
+        )
+        .unwrap();
+        let json = line
+            .strip_prefix("[node-lifetime-generation outer-elapsed-ms] ")
+            .unwrap();
+        let record: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(record.as_object().unwrap().len(), 5);
+        assert_eq!(record["generation"], 78);
+        assert_eq!(record["caller_start_ms"], 1.25);
+        assert_eq!(record["caller_end_ms"], 4.5);
+        assert_eq!(record["outcome"], outcome);
+        assert!(record["inner_deadline_ms"].is_null());
+    }
 }
 
 #[test]
