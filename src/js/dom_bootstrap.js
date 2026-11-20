@@ -27295,9 +27295,9 @@ let omoikaneUserActivationState;
   const serialPortState = new WeakMap();
   const serialPorts = new Map();
   let serialInstance = null;
-  function serialNative(operation, port = "", data = {}) {
+  function serialNative(operation, port = "", data = {}, session = "") {
     const result = JSON.parse(String(nativeSerial(
-      operation, __omoikane_document_id, String(port), JSON.stringify(data))));
+      operation, __omoikane_document_id, String(port), JSON.stringify(data), session)));
     if (result.error) throw new DOMException(result.message || "The serial operation failed", result.error);
     return result;
   }
@@ -27378,7 +27378,7 @@ let omoikaneUserActivationState;
       super();
       serialPortState.set(this, {
         id: String(info.id), info: normalizeSerialInfo(info), connected: Boolean(info.connected),
-        open: false, readable: null, writable: null,
+        open: false, closing: false, session: "", readable: null, writable: null,
       });
     }
     get connected() {
@@ -27405,22 +27405,32 @@ let omoikaneUserActivationState;
       const state = serialPortState.get(this);
       if (!state) return Promise.reject(new TypeError("Illegal SerialPort receiver"));
       if (state.open) return Promise.reject(new DOMException("The serial port is already open", "InvalidStateError"));
-      let normalized;
-      try { normalized = serialOptions(options); serialNative("open", state.id, normalized); }
+      let session;
+      try { session = serialNative("open", state.id, serialOptions(options)).session; }
       catch (error) { return Promise.reject(error); }
       state.open = true;
+      state.session = session;
       state.readable = new ReadableStream({
         type: "bytes",
         pull(controller) {
-          const result = serialNative("read", state.id);
-          if (result.bytes !== null) controller.enqueue(Uint8Array.from(result.bytes));
+          try {
+            const result = serialNative("read", state.id, {}, session);
+            if (result.bytes !== null) controller.enqueue(Uint8Array.from(result.bytes));
+          } catch (error) {
+            if (state.session === session) state.readable = null;
+            throw error;
+          }
         },
       }, {highWaterMark: 0});
       state.writable = new WritableStream({
         write(chunk) {
           if (!(chunk instanceof ArrayBuffer) && !ArrayBuffer.isView(chunk)) throw new TypeError("Serial writes require a BufferSource");
           const bytes = chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-          serialNative("write", state.id, Array.from(bytes));
+          try { serialNative("write", state.id, Array.from(bytes), session); }
+          catch (error) {
+            if (state.session === session) state.writable = null;
+            throw error;
+          }
         },
       });
       return Promise.resolve(undefined);
@@ -27428,29 +27438,48 @@ let omoikaneUserActivationState;
     close() {
       const state = serialPortState.get(this);
       if (!state) return Promise.reject(new TypeError("Illegal SerialPort receiver"));
-      if (!state.open || state.readable?.locked || state.writable?.locked) {
+      if (!state.open || state.closing || state.readable?.locked || state.writable?.locked) {
         return Promise.reject(new DOMException("The serial streams must be unlocked", "InvalidStateError"));
       }
-      try { serialNative("close", state.id); }
-      catch (error) { return Promise.reject(error); }
-      state.open = false; state.readable = null; state.writable = null;
-      return Promise.resolve(undefined);
+      const readable = state.readable, writable = state.writable, session = state.session;
+      state.closing = true;
+      let finished;
+      try {
+        finished = Promise.all([
+          readable ? readable.cancel() : undefined,
+          writable ? writable.abort() : undefined,
+        ]);
+      } catch (error) {
+        state.closing = false;
+        return Promise.reject(error);
+      }
+      return finished.then(() => {
+        state.readable = null; state.writable = null;
+        serialNative("close", state.id, {}, session);
+        state.open = false; state.session = "";
+      }).finally(() => { state.closing = false; });
     }
     getSignals() {
       const state = serialPortState.get(this);
       if (!state) return Promise.reject(new TypeError("Illegal SerialPort receiver"));
-      try { return Promise.resolve({...serialNative("getSignals", state.id).signals}); }
+      if (!state.open || state.closing) return Promise.reject(new DOMException("The serial port is not open", "InvalidStateError"));
+      try { return Promise.resolve({...serialNative("getSignals", state.id, {}, state.session).signals}); }
       catch (error) { return Promise.reject(error); }
     }
     setSignals(value = {}) {
       const state = serialPortState.get(this);
       if (!state) return Promise.reject(new TypeError("Illegal SerialPort receiver"));
+      const session = state.session;
       try {
         const source = value == null ? {} : Object(value);
-        serialNative("setSignals", state.id, {
+        const signals = {
           dataTerminalReady: Boolean(source.dataTerminalReady), requestToSend: Boolean(source.requestToSend),
           break: Boolean(source.break),
-        });
+        };
+        if (!state.open || state.closing || state.session !== session) {
+          throw new DOMException("The serial port is not open", "InvalidStateError");
+        }
+        serialNative("setSignals", state.id, signals, session);
         return Promise.resolve(undefined);
       } catch (error) { return Promise.reject(error); }
     }

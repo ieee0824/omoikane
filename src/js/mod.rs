@@ -84,6 +84,8 @@ pub mod native_scroll;
 mod navigation_transport;
 mod paint_timing;
 mod retained_scroll;
+#[cfg(test)]
+mod serial_owner_reproduction_tests;
 mod tree_style_invalidation;
 mod url_pattern;
 mod view_transition;
@@ -198,7 +200,7 @@ pub use push_api::{
 mod web_serial;
 pub use web_serial::{
     DeterministicSerialProvider, SerialError, SerialInputSignals, SerialOptions,
-    SerialOutputSignals, SerialPortFilter, SerialPortInfo, SerialProvider,
+    SerialOutputSignals, SerialPortFilter, SerialPortInfo, SerialProvider, SerialSessionId,
 };
 mod payment_request;
 pub use payment_request::{
@@ -6812,12 +6814,7 @@ impl HostState {
     }
 
     fn retire_web_serial_document(&self, document_id: usize) {
-        let Some(url) = self.base_url_for_document(document_id) else {
-            return;
-        };
-        self.web_serial
-            .provider
-            .retire(&format!("{}://{}", url.scheme(), url.authority()));
+        self.web_serial.retire_document(document_id);
     }
 
     fn cors_origin_for_document(&self, document_id: usize) -> CorsOrigin {
