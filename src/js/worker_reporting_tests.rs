@@ -28,15 +28,16 @@ impl WorkerOwnerFixture {
         let stopped = Arc::new(AtomicBool::new(false));
         let worker_stopped = Arc::clone(&stopped);
         let worker = FixtureWorker::spawn(move || {
-            let deadline = Instant::now() + ACCEPT_TIMEOUT;
             let mut paths = Vec::new();
             while !worker_stopped.load(Ordering::Acquire) {
-                assert!(Instant::now() < deadline, "worker owner fixture timed out");
                 let mut stream = match accept_with_timeout(&listener, Duration::from_millis(20)) {
                     Ok(stream) => stream,
                     Err(error) if error.kind() == io::ErrorKind::TimedOut => continue,
                     Err(error) => panic!("worker owner accept failed: {error}"),
                 };
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
                 let headers = read_request_headers(&mut stream, READ_TIMEOUT).unwrap();
                 let path = headers
                     .lines()
@@ -189,6 +190,24 @@ impl Drop for WorkerOwnerFixture {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::Release);
     }
+}
+
+#[test]
+fn worker_owner_fixture_serves_requests_after_the_accept_timeout() {
+    let fixture = WorkerOwnerFixture::new(true);
+    // ACCEPT_TIMEOUT bounds a request wait, not the owner's total lifetime.
+    std::thread::sleep(ACCEPT_TIMEOUT + Duration::from_millis(100));
+    let address = fixture.origin.strip_prefix("http://").unwrap();
+    let mut stream = std::net::TcpStream::connect(address).unwrap();
+    stream.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+    stream.set_write_timeout(Some(READ_TIMEOUT)).unwrap();
+    stream
+        .write_all(b"GET /resource HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 204 No Content\r\n"));
+    assert_eq!(fixture.finish(), vec!["/resource"]);
 }
 
 fn data_script_url(source: &str) -> String {
