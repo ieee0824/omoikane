@@ -233,6 +233,13 @@ fn drive_case_tasks(
         if js_bool(runtime, "globalThis.__wpt_complete === true") {
             return;
         }
+        if !drive_window_command(runtime, errors) {
+            return;
+        }
+        // Resolving a window command runs jobs that may complete the harness.
+        if js_bool(runtime, "globalThis.__wpt_complete === true") {
+            return;
+        }
         let action_duration = super::testdriver::drive_action_tick(runtime, errors);
         let tick_ms = action_duration.unwrap_or(STEP_MS).max(STEP_MS);
         if runtime.has_pending_timers() {
@@ -254,30 +261,22 @@ fn drive_case_tasks(
     }
 }
 
-fn drive_visibility_state_testdriver(runtime: &mut JsRuntime, errors: &mut Vec<String>) {
-    // Keep this bridge scoped to the one WPT that needs host window-state
-    // automation. Each queued Promise resolves only after host visibility has
-    // changed, so its observer can see the matching entry before continuing.
-    for _ in 0..64 {
-        if js_bool(runtime, "globalThis.__wpt_complete === true") {
-            break;
-        }
-        if js_bool(runtime, "globalThis.__wpt_window_commands.length > 0") {
-            let hidden = js_bool(runtime, "__wpt_window_commands[0].hidden");
-            runtime.set_page_visibility(hidden);
-            if let Err(error) = runtime
-                .eval("__wpt_window_commands.shift().resolve({x:0,y:0,width:800,height:600})")
-            {
-                errors.push(format!("window-state testdriver: {error}"));
-                break;
-            }
-        }
-        runtime.run_timers(500, 10, 500);
-        if let Err(error) = runtime.run_jobs() {
-            errors.push(format!("window-state testdriver jobs: {error}"));
-            break;
-        }
+fn drive_window_command(runtime: &mut JsRuntime, errors: &mut Vec<String>) -> bool {
+    if !js_bool(runtime, "globalThis.__wpt_window_commands?.length > 0") {
+        return true;
     }
+    // Poll throughout harness cleanup as well as the test body. Resolve only
+    // after the host visibility state and its observer entries have changed.
+    let hidden = js_bool(runtime, "__wpt_window_commands[0].hidden");
+    runtime.set_page_visibility(hidden);
+    if let Err(error) = runtime
+        .eval("__wpt_window_commands.shift().resolve({x:0,y:0,width:800,height:600})")
+        .and_then(|_| runtime.run_jobs())
+    {
+        errors.push(format!("window-state testdriver: {error}"));
+        return false;
+    }
+    true
 }
 
 fn actual_status(errors: &[String], complete: bool, passed: bool) -> ActualStatus {
@@ -433,11 +432,7 @@ pub(super) fn run_case_with_transport(
         .expect("wire WPT handlers");
     runtime.fire_load().expect("fire WPT load");
     let mut history = SameDocumentHistory::new(url);
-    if path == "page-visibility/visibility-state-entry.tentative.html" {
-        drive_visibility_state_testdriver(&mut runtime, &mut errors);
-    } else {
-        drive_case_tasks(&mut runtime, &mut history, &mut errors, timeout);
-    }
+    drive_case_tasks(&mut runtime, &mut history, &mut errors, timeout);
     // WPTs commonly observe rendering steps through nested
     // requestAnimationFrame callbacks. Drive a bounded number of explicit
     // opportunities after load so resize/scroll events queued for a frame
@@ -579,6 +574,97 @@ mod tests {
         );
         assert!(errors.is_empty(), "{errors:?}");
         assert!(js_bool(&mut runtime, "__wpt_complete && !timedOut"));
+    }
+
+    #[test]
+    fn task_driver_stops_input_after_window_promise_completes_harness() {
+        let document = TreeBuilder::parse("<!doctype html><body><input></body>").document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime.enable_test_automation().unwrap();
+        runtime
+            .eval("globalThis.test_driver_internal = {}")
+            .unwrap();
+        runtime
+            .eval(super::super::testdriver::VENDOR_SCRIPT)
+            .unwrap();
+        runtime
+            .eval(
+                r#"
+            globalThis.__wpt_complete = false;
+            globalThis.trustedKeys = 0;
+            const input = document.querySelector('input');
+            input.focus();
+            input.addEventListener('keydown', event => {
+                if (event.isTrusted) trustedKeys++;
+            });
+            test_driver_internal.set_window_rect().then(() => {
+                __wpt_complete = true;
+                test_driver_internal.action_sequence([{
+                    type: 'key', id: 'late',
+                    actions: [{type: 'keyDown', value: 'x'}]
+                }]);
+            });
+        "#,
+            )
+            .unwrap();
+        let mut history = SameDocumentHistory::new("about:blank".to_owned());
+        let mut errors = Vec::new();
+        drive_case_tasks(
+            &mut runtime,
+            &mut history,
+            &mut errors,
+            Duration::from_secs(1),
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(js_bool(&mut runtime, "__wpt_complete && !document.hidden"));
+        assert!(js_bool(
+            &mut runtime,
+            "document.querySelector('input').value === '' && trustedKeys === 0"
+        ));
+    }
+
+    #[test]
+    fn task_driver_completes_window_minimize_and_async_restore_cleanup() {
+        let document = TreeBuilder::parse("<!doctype html><body></body>").document();
+        let mut runtime = JsRuntime::with_document(document).unwrap();
+        runtime.enable_test_automation().unwrap();
+        runtime
+            .eval("globalThis.test_driver_internal = {}")
+            .unwrap();
+        runtime
+            .eval(super::super::testdriver::VENDOR_SCRIPT)
+            .unwrap();
+        runtime
+            .eval(
+                r#"
+            globalThis.__wpt_complete = false;
+            globalThis.states = [];
+            globalThis.failure = '';
+            (async () => {
+                await test_driver_internal.minimize_window();
+                states.push(document.hidden);
+                // Model the asynchronous testharness cleanup before completion.
+                await Promise.resolve();
+                await test_driver_internal.set_window_rect();
+                states.push(document.hidden);
+                __wpt_complete = true;
+            })().catch(error => { failure = String(error); });
+        "#,
+            )
+            .unwrap();
+        let mut history = SameDocumentHistory::new("about:blank".to_owned());
+        let mut errors = Vec::new();
+        drive_case_tasks(
+            &mut runtime,
+            &mut history,
+            &mut errors,
+            Duration::from_secs(1),
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(js_bool(
+            &mut runtime,
+            "__wpt_complete && failure === '' && JSON.stringify(states) === '[true,false]'"
+        ));
     }
 
     #[test]
