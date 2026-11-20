@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "format": "gzip JSON mapping archive-relative paths to exact UTF-8 text",
+  "excluded": [
+    "executables",
+    "PNG pixels",
+    "full Callgrind event files",
+    "build output"
+  ],
+  "bundles": {
+    "reproduction.json.gz": {
+      "sha256": "b45c0d189e0e665cb664acccc8bedb302f171dafea573cef541456672ccbd249",
+      "files": 324,
+      "bytes": 56659
+    },
+    "recheck-original.json.gz": {
+      "sha256": "3cef999c78cbca824bbd88b4bd5ba964edb64d174a80e1e8ca101e743a6ae746",
+      "files": 324,
+      "bytes": 56354
+    },
+    "eager-clone.json.gz": {
+      "sha256": "3d6920d875641192a181e43ff79e07ae95a14dedfde1196447dc2cf3eb93f64c",
+      "files": 324,
+      "bytes": 56560
+    },
+    "object-clone.json.gz": {
+      "sha256": "f54c607ce2d5cbd2c282a2ec72ed58adc6409a76fe6f9a6afd1ec3e5b9e106b7",
+      "files": 324,
+      "bytes": 55745
+    },
+    "borrow.json.gz": {
+      "sha256": "0edadbb6d0259e1cc0b9d8a3b1296fabc398ce35de932c5d21313023edc60194",
+      "files": 324,
+      "bytes": 55709
+    },
+    "sham.json.gz": {
+      "sha256": "97ac7ab96a9f82b77c6ada8039079502e44f34703859395305a9a0789ccfaac8",
+      "files": 324,
+      "bytes": 54504
+    },
+    "diagnostics.json.gz": {
+      "sha256": "4c88f35c4296aca5abc79b6057b8f8542f2238009b95d6ea43db6d6bf335b82f",
+      "files": 120,
+      "bytes": 76034
+    }
+  }
+}
