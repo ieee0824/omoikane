@@ -41,7 +41,6 @@ impl EphemeronSet {
         self.0.remove(&Identity(*pointer))
     }
 
-    #[cfg(test)]
     pub(crate) fn contains(&self, pointer: &EphemeronPointer) -> bool {
         self.0.contains(&Identity(*pointer))
     }

@@ -115,6 +115,14 @@ impl Tracer {
             .push_back(EphemeronEntry { pointer: node });
     }
 
+    #[cfg(test)]
+    pub(crate) fn ephemeron_queue_snapshot(&self) -> Vec<EphemeronPointer> {
+        self.ephemeron_queue
+            .iter()
+            .map(|entry| entry.pointer)
+            .collect()
+    }
+
     pub(crate) fn enqueue_ephemeron_root(&mut self, node: EphemeronPointer) {
         self.ephemeron_queue
             .push_back(EphemeronEntry { pointer: node });
