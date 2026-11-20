@@ -541,6 +541,7 @@ let omoikaneUserActivationState;
   const safeRegExpExec = RegExp.prototype.exec;
   const safeGetPrototypeOf = Reflect.getPrototypeOf;
   const safeGetOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
+  const safeHas = Reflect.has;
   const safeArrayPush = Function.prototype.call.bind(Array.prototype.push);
   const safeArrayPop = Function.prototype.call.bind(Array.prototype.pop);
   const mapForEachIntrinsic = Map.prototype.forEach;
@@ -37854,6 +37855,13 @@ let omoikaneUserActivationState;
     const crossOriginValue = (property, descriptor = false) =>
       nativeCrossOriginAuxiliaryValue(id, property, descriptor, getProxy());
     return {
+      has(target, property) {
+        // Preserve the existing fallback until cross-origin/closed contracts
+        // are handled separately; only inspect an active same-origin global.
+        if (__omoikane_auxiliary_window_state(id) !== "same") return safeHas(target, property);
+        const window = nativeWindowProxyGlobal(getProxy());
+        return safeHas(window === null ? target : window, property);
+      },
       defineProperty(_target, property, descriptor) {
         const window = nativeWindowProxyGlobal(getProxy());
         if (window === null) return crossOriginValue("__error__");
