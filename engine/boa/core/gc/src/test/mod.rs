@@ -58,6 +58,7 @@ impl Harness {
             assert!(gc.young_weaks.is_empty());
             assert!(gc.old_weaks.is_empty());
             assert_eq!(gc.runtime.bytes_allocated, 0);
+            crate::MINOR_EPHEMERON_ROOTS.with(|roots| assert!(roots.borrow().is_empty()));
         });
     }
 

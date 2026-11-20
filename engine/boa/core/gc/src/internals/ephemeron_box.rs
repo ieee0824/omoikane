@@ -128,7 +128,9 @@ impl<K: Trace + ?Sized, V: Trace> ErasedEphemeronBox for EphemeronBox<K, V> {
         // SAFETY: the collector clears this data before freeing its key. This
         // read neither allocates nor mutates the ephemeron, so the existing
         // key-validity invariant is unchanged.
-        unsafe { self.key() }.is_none_or(|key| key.header.is_young())
+        // A cleared old unit handle has no edge either. Retargeting it to a
+        // young key is covered by WeakGcEdge's remembered-set barrier.
+        unsafe { self.key() }.is_some_and(|key| key.header.is_young())
     }
 
     unsafe fn trace(&self, tracer: &mut Tracer) -> bool {
