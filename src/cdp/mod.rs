@@ -956,3 +956,6 @@ mod render_demand_tests;
 
 #[cfg(test)]
 mod startup_parallel_tests;
+
+#[cfg(test)]
+mod worker_startup_tests;

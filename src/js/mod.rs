@@ -253,6 +253,8 @@ mod worker_imports;
 mod worker_loading;
 #[cfg(test)]
 mod worker_reporting_tests;
+#[cfg(test)]
+pub(crate) mod worker_startup_tests;
 pub use form_state::{FormStateRestoreMode, FormStateSnapshot};
 #[cfg(test)]
 mod hit_test_order_tests;
@@ -2772,6 +2774,10 @@ struct HostState {
     /// Dedicated workers owned by this global. The map lives on the page
     /// global; worker globals instead hold `worker_owner` and `worker_id`.
     workers: HashMap<u64, Rc<RefCell<WorkerRuntime>>>,
+    /// Unbound LoadFailure markers contain only owned Document IDs, never JS roots.
+    /// A marker may survive an author exception until bind, the next background
+    /// cleanup, or owner teardown. There is no separate marker-count limit.
+    failed_worker_startups: HashMap<u64, FailedWorkerStartup>,
     /// Owner-side worker objects are kept separately from `workers` so the
     /// host root tracer never has to borrow a `WorkerRuntime` through its
     /// `RefCell` while a worker operation is in flight.
@@ -2913,6 +2919,13 @@ enum WebSocketReadResult {
 struct WebSocketConnection {
     client: crate::realtime::WebSocketClient,
     incoming: Receiver<WebSocketReadResult>,
+}
+
+/// A rejected load waiting for its owner endpoint to bind. The only possible
+/// notification is LoadFailure; exception payloads and runtimes cannot live here.
+#[derive(Debug, Clone, Copy)]
+struct FailedWorkerStartup {
+    owner_document_id: usize,
 }
 
 /// State for one same-origin classic Dedicated Worker. A worker owns a fully
@@ -3653,6 +3666,7 @@ impl HostState {
             csp_violation_keys: HashSet::new(),
             module_loader: None,
             workers: HashMap::new(),
+            failed_worker_startups: HashMap::new(),
             worker_owner_objects: HashMap::new(),
             next_worker_id: 1,
             worker_owner: None,
@@ -6406,10 +6420,17 @@ impl HostState {
             });
     }
 
+    /// Discards unbound LoadFailure markers for one retiring Document.
+    fn discard_failed_worker_startups_for_document(&mut self, document_id: usize) {
+        self.failed_worker_startups
+            .retain(|_, entry| entry.owner_document_id != document_id);
+    }
+
     /// Retires a popup Document without leaving callbacks, nested iframe
     /// contexts, or document-scoped native state alive after close/navigation.
     fn retire_document_tree(&mut self, document: &NodeHandle) {
         let document_id = document.identity();
+        self.discard_failed_worker_startups_for_document(document_id);
         self.retire_web_serial_document(document_id);
         self.cookie_change_callbacks.remove(&document_id);
         self.idle_period_hooks.remove(&document_id);
@@ -6551,6 +6572,7 @@ impl HostState {
         let Some(previous) = self.iframe_documents.remove(&iframe_id) else {
             return;
         };
+        self.discard_failed_worker_startups_for_document(previous.document.identity());
         self.retire_web_serial_document(previous.document.identity());
         self.cookie_change_callbacks
             .remove(&previous.document.identity());
@@ -10063,6 +10085,7 @@ impl JsRuntime {
     /// reload, or disconnect. Dropping the map breaks the owner/worker Rc cycle
     /// after queued task ids have become inert.
     pub(crate) fn terminate_workers(&mut self) {
+        self.host_state.borrow_mut().failed_worker_startups.clear();
         let workers = std::mem::take(&mut self.host_state.borrow_mut().workers);
         for entry in workers.values() {
             let mut worker = entry.borrow_mut();
@@ -10103,6 +10126,9 @@ impl JsRuntime {
     }
 
     fn run_worker_background_tasks(&mut self) {
+        // Rejected unbound runtimes were collected at this phase too. Keeping
+        // their scalar markers beyond it would make a late bind observable.
+        self.host_state.borrow_mut().failed_worker_startups.clear();
         let worker_ids: Vec<_> = self.host_state.borrow().workers.keys().copied().collect();
         for worker_id in worker_ids {
             let Some(entry) = self.host_state.borrow_mut().workers.remove(&worker_id) else {
@@ -25821,6 +25847,71 @@ fn initialize_dedicated_worker(
     })
 }
 
+/// Emits the existing debug/safe report without retaining a host borrow during I/O.
+fn report_dedicated_worker_startup_failure(
+    owner_state: &Rc<RefCell<HostState>>,
+    source_loaded: bool,
+    message: &script_errors::WorkerErrorNotification,
+) {
+    if std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some() {
+        eprintln!("[omoikane][worker-startup-error] {message:?}");
+    }
+    let reporter = owner_state.borrow().error_reporter.clone();
+    report_safe_worker_or_module_failure(
+        reporter,
+        ErrorCategory::Worker,
+        if source_loaded {
+            "WORKER_STARTUP_FAILED"
+        } else {
+            "WORKER_FETCH_FAILED"
+        },
+        if source_loaded { "execute" } else { "fetch" },
+    );
+}
+
+/// Preserves a failed load until owner binding without creating any child JS state.
+fn register_rejected_dedicated_worker(
+    owner_state: &Rc<RefCell<HostState>>,
+    fetched: &FetchedDedicatedWorker,
+) -> u64 {
+    let id = fetched.creator.worker_id;
+    owner_state.borrow_mut().failed_worker_startups.insert(
+        id,
+        FailedWorkerStartup {
+            owner_document_id: fetched.creator.document_id,
+        },
+    );
+    report_dedicated_worker_startup_failure(
+        owner_state,
+        false,
+        &script_errors::WorkerErrorNotification::LoadFailure,
+    );
+    id
+}
+
+/// Binds the existing traced error task once; the marker itself owns no JS roots.
+fn bind_rejected_worker_owner(
+    owner_state: &Rc<RefCell<HostState>>,
+    id: u64,
+    owner_object: &JsValue,
+    owner_realm: &Option<Realm>,
+) -> bool {
+    let mut state = owner_state.borrow_mut();
+    if state.failed_worker_startups.remove(&id).is_none() {
+        return false;
+    }
+    state
+        .event_loop
+        .bind_worker_error_owner(id, owner_object, owner_realm);
+    state.event_loop.enqueue_worker_error(
+        id,
+        Some(owner_object.clone()),
+        owner_realm.clone(),
+        script_errors::WorkerErrorNotification::LoadFailure,
+    );
+    true
+}
+
 fn create_worker_for_owner_state(
     owner_state: Rc<RefCell<HostState>>,
     requested_url: &str,
@@ -25834,6 +25925,9 @@ fn create_worker_for_owner_state(
         csp_source,
         false,
     )?;
+    if fetched.loaded.is_none() {
+        return Ok(register_rejected_dedicated_worker(&owner_state, &fetched));
+    }
     let PreparedDedicatedWorker {
         id: worker_id,
         url: worker_url,
@@ -25891,22 +25985,8 @@ fn create_worker_for_owner_state(
             Some(script_errors::WorkerErrorNotification::LoadFailure)
         }
     };
-    if let Some(message) = startup_error.as_ref()
-        && std::env::var_os("OMOIKANE_LOG_SCRIPTS").is_some()
-    {
-        eprintln!("[omoikane][worker-startup-error] {message:?}");
-    }
-    if startup_error.is_some() {
-        report_safe_worker_or_module_failure(
-            owner_state.borrow().error_reporter.clone(),
-            ErrorCategory::Worker,
-            if source_loaded {
-                "WORKER_STARTUP_FAILED"
-            } else {
-                "WORKER_FETCH_FAILED"
-            },
-            if source_loaded { "execute" } else { "fetch" },
-        );
+    if let Some(message) = startup_error.as_ref() {
+        report_dedicated_worker_startup_failure(&owner_state, source_loaded, message);
     }
     {
         let mut worker = entry.borrow_mut();
@@ -25932,6 +26012,9 @@ fn bind_worker_owner_native(
     let owner_object = args.get(1).cloned().unwrap_or_default();
     let owner_realm = Some(context.realm().clone());
     with_host_state(|state| {
+        if bind_rejected_worker_owner(state, id, &owner_object, &owner_realm) {
+            return Ok(JsValue::undefined());
+        }
         let entry = state.borrow().workers.get(&id).cloned();
         let Some(entry) = entry else {
             return Ok(JsValue::undefined());
@@ -26024,6 +26107,7 @@ fn terminate_worker_native(
 ) -> JsResult<JsValue> {
     let id = worker_id_argument(args, context)?;
     with_host_state(|state| {
+        state.borrow_mut().failed_worker_startups.remove(&id);
         // Removing the entry breaks the owner/worker Rc cycle immediately. Any
         // already queued tasks retain only the id and become harmless no-ops
         // when the owner map lookup below fails.
